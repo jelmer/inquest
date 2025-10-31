@@ -1,0 +1,29 @@
+[package]
+name = "testrepository"
+version = "0.1.0"
+edition = "2021"
+authors = ["Robert Collins <robertc@robertcollins.net>", "Jelmer Vernooĳ <jelmer@jelmer.uk>"]
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "A repository of test results (Rust port)"
+repository = "https://github.com/testing-cabal/testrepository"
+keywords = ["subunit", "testrunner", "unittest", "testing"]
+categories = ["development-tools::testing"]
+
+[[bin]]
+name = "testr"
+path = "src/main.rs"
+
+[lib]
+name = "testrepository"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_ini = "0.2"
+clap = { version = "4.5", features = ["derive", "env"] }
+chrono = "0.4"
+
+[dev-dependencies]
+tempfile = "3.13"

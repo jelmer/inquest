@@ -14,3 +14,8 @@ ChangeLog
 doc/build/
 testrepository/_version.py
 /.vscode
+
+
+# Added by cargo
+
+/target
