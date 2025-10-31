@@ -7,5 +7,6 @@ pub mod error;
 pub mod repository;
 pub mod commands;
 pub mod ui;
+pub mod subunit_stream;
 
 pub use error::{Error, Result};

@@ -9,8 +9,9 @@
 
 use crate::error::{Error, Result};
 use crate::repository::{Repository, RepositoryFactory, TestId, TestRun};
+use crate::subunit_stream;
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -110,19 +111,17 @@ impl Repository for FileRepository {
             return Err(Error::TestRunNotFound(run_id.to_string()));
         }
 
-        // TODO: Parse subunit stream from file
-        // For now, return a placeholder
-        Ok(TestRun::new(run_id.to_string()))
+        let file = File::open(&path)?;
+        subunit_stream::parse_stream(file, run_id.to_string())
     }
 
-    fn insert_test_run(&mut self, _run: TestRun) -> Result<String> {
+    fn insert_test_run(&mut self, run: TestRun) -> Result<String> {
         let run_id = self.increment_next_stream()?;
         let run_id_str = run_id.to_string();
 
-        // TODO: Write test run as subunit stream
-        // For now, just create an empty file
         let path = self.get_run_path(&run_id_str);
-        fs::write(&path, "")?;
+        let file = File::create(&path)?;
+        subunit_stream::write_stream(&run, file)?;
 
         Ok(run_id_str)
     }
