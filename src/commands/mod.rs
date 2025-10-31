@@ -13,6 +13,7 @@ pub mod load;
 pub mod run;
 pub mod slowest;
 pub mod stats;
+mod utils;
 
 pub use failing::FailingCommand;
 pub use init::InitCommand;

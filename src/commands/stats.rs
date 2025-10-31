@@ -2,10 +2,7 @@
 
 use crate::commands::Command;
 use crate::error::Result;
-use crate::repository::file::FileRepositoryFactory;
-use crate::repository::RepositoryFactory;
 use crate::ui::UI;
-use std::path::Path;
 
 pub struct StatsCommand {
     base_path: Option<String>,
@@ -19,14 +16,7 @@ impl StatsCommand {
 
 impl Command for StatsCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
-        let base = self
-            .base_path
-            .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new("."));
-
-        let factory = FileRepositoryFactory;
-        let repo = factory.open(base)?;
+        let repo = super::utils::open_repository(self.base_path.as_deref())?;
 
         let run_count = repo.count()?;
         let run_ids = repo.list_run_ids()?;
@@ -79,8 +69,7 @@ mod tests {
     fn test_stats_command_empty_repo() {
         let temp = TempDir::new().unwrap();
 
-        let factory = FileRepositoryFactory;
-        factory.initialise(temp.path()).unwrap();
+        super::super::utils::init_repository(Some(&temp.path().to_string_lossy())).unwrap();
 
         let mut ui = TestUI::new();
         let cmd = StatsCommand::new(Some(temp.path().to_string_lossy().to_string()));
@@ -96,8 +85,8 @@ mod tests {
     fn test_stats_command_with_runs() {
         let temp = TempDir::new().unwrap();
 
-        let factory = FileRepositoryFactory;
-        let mut repo = factory.initialise(temp.path()).unwrap();
+        let mut repo =
+            super::super::utils::init_repository(Some(&temp.path().to_string_lossy())).unwrap();
 
         // Add two test runs
         for i in 0..2 {
