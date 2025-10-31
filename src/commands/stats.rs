@@ -37,7 +37,10 @@ impl Command for StatsCommand {
         if !run_ids.is_empty() {
             let latest_run = repo.get_latest_run()?;
             ui.output(&format!("  Latest run: {}", latest_run.id))?;
-            ui.output(&format!("  Tests in latest run: {}", latest_run.total_tests()))?;
+            ui.output(&format!(
+                "  Tests in latest run: {}",
+                latest_run.total_tests()
+            ))?;
             ui.output(&format!(
                 "  Failures in latest run: {}",
                 latest_run.count_failures()
@@ -130,7 +133,8 @@ mod tests {
         // Add two test runs
         for i in 0..2 {
             let mut test_run = TestRun::new(i.to_string());
-            test_run.timestamp = chrono::DateTime::from_timestamp(1000000000 + i as i64, 0).unwrap();
+            test_run.timestamp =
+                chrono::DateTime::from_timestamp(1000000000 + i as i64, 0).unwrap();
 
             test_run.add_result(TestResult {
                 test_id: TestId::new(format!("test{}", i)),

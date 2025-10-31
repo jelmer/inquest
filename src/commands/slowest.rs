@@ -42,11 +42,7 @@ impl Command for SlowestCommand {
         let mut tests_with_duration: Vec<_> = test_run
             .results
             .values()
-            .filter_map(|result| {
-                result
-                    .duration
-                    .map(|dur| (result.test_id.clone(), dur))
-            })
+            .filter_map(|result| result.duration.map(|dur| (result.test_id.clone(), dur)))
             .collect();
 
         if tests_with_duration.is_empty() {

@@ -65,10 +65,7 @@ impl Command for LoadCommand {
         ))?;
 
         if test_run.count_failures() > 0 {
-            ui.output(&format!(
-                "{} test(s) failed",
-                test_run.count_failures()
-            ))?;
+            ui.output(&format!("{} test(s) failed", test_run.count_failures()))?;
             Ok(1)
         } else {
             Ok(0)

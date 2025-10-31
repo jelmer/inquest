@@ -44,7 +44,6 @@ pub struct TestrConfig {
     pub instance_dispose: Option<String>,
 }
 
-
 impl TestrConfig {
     /// Load configuration from a .testr.conf file
     pub fn load_from_file(path: &Path) -> Result<Self> {
@@ -68,9 +67,7 @@ impl TestrConfig {
         let config = TestrConfig {
             test_command: default
                 .get("test_command")
-                .ok_or_else(|| {
-                    Error::Config("No test_command option in .testr.conf".to_string())
-                })?
+                .ok_or_else(|| Error::Config("No test_command option in .testr.conf".to_string()))?
                 .clone(),
             test_id_option: default.get("test_id_option").cloned(),
             test_list_option: default.get("test_list_option").cloned(),
@@ -85,9 +82,7 @@ impl TestrConfig {
 
         // Validate required fields
         if config.test_command.is_empty() {
-            return Err(Error::Config(
-                "test_command cannot be empty".to_string(),
-            ));
+            return Err(Error::Config("test_command cannot be empty".to_string()));
         }
 
         // Validate that if $IDOPTION is used, test_id_option is configured
@@ -170,10 +165,7 @@ test_list_option=--list
 
         let result = TestrConfig::parse(config_str);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("test_command"));
+        assert!(result.unwrap_err().to_string().contains("test_command"));
     }
 
     #[test]
@@ -185,10 +177,7 @@ test_command=foo
 
         let result = TestrConfig::parse(config_str);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("DEFAULT"));
+        assert!(result.unwrap_err().to_string().contains("DEFAULT"));
     }
 
     #[test]
@@ -200,10 +189,7 @@ test_command=python -m test $IDOPTION
 
         let result = TestrConfig::parse(config_str);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("IDOPTION"));
+        assert!(result.unwrap_err().to_string().contains("IDOPTION"));
     }
 
     #[test]
@@ -215,10 +201,7 @@ test_command=python -m test $LISTOPT
 
         let result = TestrConfig::parse(config_str);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("LISTOPT"));
+        assert!(result.unwrap_err().to_string().contains("LISTOPT"));
     }
 
     #[test]
@@ -230,7 +213,10 @@ test_command=python -m test $LISTOPT
         };
 
         let mut vars = HashMap::new();
-        vars.insert("IDOPTION".to_string(), "--load-list failing.list".to_string());
+        vars.insert(
+            "IDOPTION".to_string(),
+            "--load-list failing.list".to_string(),
+        );
         vars.insert("LISTOPT".to_string(), "--list".to_string());
 
         let result = config.substitute_variables(&config.test_command, &vars);

@@ -8,10 +8,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-pub mod test_run;
 pub mod file;
+pub mod test_run;
 
-pub use test_run::{TestRun, TestId, TestStatus, TestResult};
+pub use test_run::{TestId, TestResult, TestRun, TestStatus};
 
 /// Abstract repository trait for test result storage
 pub trait Repository {

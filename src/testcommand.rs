@@ -29,9 +29,7 @@ impl TestCommand {
     pub fn from_directory(dir: &Path) -> Result<Self> {
         let config_path = dir.join(".testr.conf");
         if !config_path.exists() {
-            return Err(Error::Config(
-                "No .testr.conf file found".to_string(),
-            ));
+            return Err(Error::Config("No .testr.conf file found".to_string()));
         }
 
         let config = TestrConfig::load_from_file(&config_path)?;
@@ -73,12 +71,14 @@ impl TestCommand {
                 vars.insert("IDLIST".to_string(), id_list.clone());
 
                 // Create IDFILE (newline-separated in temp file)
-                let mut temp = NamedTempFile::new()
-                    .map_err(|e| Error::CommandExecution(format!("Failed to create temp file: {}", e)))?;
+                let mut temp = NamedTempFile::new().map_err(|e| {
+                    Error::CommandExecution(format!("Failed to create temp file: {}", e))
+                })?;
 
                 for id in ids {
-                    writeln!(temp, "{}", id.as_str())
-                        .map_err(|e| Error::CommandExecution(format!("Failed to write to temp file: {}", e)))?;
+                    writeln!(temp, "{}", id.as_str()).map_err(|e| {
+                        Error::CommandExecution(format!("Failed to write to temp file: {}", e))
+                    })?;
                 }
 
                 let temp_path = temp.path().to_string_lossy().to_string();
@@ -102,11 +102,7 @@ impl TestCommand {
             }
         } else {
             // No test IDs specified - use default
-            let id_list = self
-                .config
-                .test_id_list_default
-                .as_deref()
-                .unwrap_or("");
+            let id_list = self.config.test_id_list_default.as_deref().unwrap_or("");
             vars.insert("IDLIST".to_string(), id_list.to_string());
             vars.insert("IDOPTION".to_string(), String::new());
         }
@@ -126,7 +122,9 @@ impl TestCommand {
             .arg(&cmd)
             .current_dir(&self.base_dir)
             .output()
-            .map_err(|e| Error::CommandExecution(format!("Failed to execute test command: {}", e)))?;
+            .map_err(|e| {
+                Error::CommandExecution(format!("Failed to execute test command: {}", e))
+            })?;
 
         if !output.status.success() {
             return Err(Error::CommandExecution(format!(
@@ -146,10 +144,7 @@ impl TestCommand {
     }
 
     /// Execute tests and return the subunit output
-    pub fn run_tests(
-        &self,
-        test_ids: Option<&[TestId]>,
-    ) -> Result<std::process::Child> {
+    pub fn run_tests(&self, test_ids: Option<&[TestId]>) -> Result<std::process::Child> {
         let (cmd, _temp_file) = self.build_command(test_ids, false)?;
 
         // Spawn the test process
@@ -246,10 +241,7 @@ test_command=python -m test $LISTOPT
         let temp_dir = TempDir::new().unwrap();
         let result = TestCommand::from_directory(temp_dir.path());
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains(".testr.conf"));
+        assert!(result.unwrap_err().to_string().contains(".testr.conf"));
     }
 
     #[test]

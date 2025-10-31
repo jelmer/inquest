@@ -51,9 +51,7 @@ impl RepositoryFactory for FileRepositoryFactory {
         // Verify format
         let format_path = repo_path.join("format");
         if !format_path.exists() {
-            return Err(Error::InvalidFormat(
-                "Missing format file".to_string(),
-            ));
+            return Err(Error::InvalidFormat("Missing format file".to_string()));
         }
 
         let format = fs::read_to_string(&format_path)?.trim().to_string();
