@@ -5,6 +5,9 @@
 use crate::error::Result;
 use std::io::{self, Write};
 
+#[cfg(test)]
+pub mod test_ui;
+
 /// Abstract UI trait for command interaction
 pub trait UI {
     /// Output a message to the user

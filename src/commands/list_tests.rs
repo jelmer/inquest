@@ -56,40 +56,9 @@ impl Command for ListTestsCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::UI;
+    use crate::ui::test_ui::TestUI;
     use std::fs;
     use tempfile::TempDir;
-
-    struct TestUI {
-        output: Vec<String>,
-        errors: Vec<String>,
-    }
-
-    impl TestUI {
-        fn new() -> Self {
-            TestUI {
-                output: Vec::new(),
-                errors: Vec::new(),
-            }
-        }
-    }
-
-    impl UI for TestUI {
-        fn output(&mut self, message: &str) -> Result<()> {
-            self.output.push(message.to_string());
-            Ok(())
-        }
-
-        fn error(&mut self, message: &str) -> Result<()> {
-            self.errors.push(message.to_string());
-            Ok(())
-        }
-
-        fn warning(&mut self, message: &str) -> Result<()> {
-            self.errors.push(format!("Warning: {}", message));
-            Ok(())
-        }
-    }
 
     #[test]
     fn test_list_tests_command_no_config() {

@@ -88,6 +88,74 @@ pub struct TestResult {
     pub tags: Vec<String>,
 }
 
+impl TestResult {
+    /// Create a successful test result
+    pub fn success(test_id: impl Into<TestId>) -> Self {
+        TestResult {
+            test_id: test_id.into(),
+            status: TestStatus::Success,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec![],
+        }
+    }
+
+    /// Create a failed test result
+    pub fn failure(test_id: impl Into<TestId>, message: impl Into<String>) -> Self {
+        TestResult {
+            test_id: test_id.into(),
+            status: TestStatus::Failure,
+            message: Some(message.into()),
+            duration: None,
+            details: None,
+            tags: vec![],
+        }
+    }
+
+    /// Create a skipped test result
+    pub fn skip(test_id: impl Into<TestId>) -> Self {
+        TestResult {
+            test_id: test_id.into(),
+            status: TestStatus::Skip,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec![],
+        }
+    }
+
+    /// Create an error test result
+    pub fn error(test_id: impl Into<TestId>, message: impl Into<String>) -> Self {
+        TestResult {
+            test_id: test_id.into(),
+            status: TestStatus::Error,
+            message: Some(message.into()),
+            duration: None,
+            details: None,
+            tags: vec![],
+        }
+    }
+
+    /// Set the duration
+    pub fn with_duration(mut self, duration: Duration) -> Self {
+        self.duration = Some(duration);
+        self
+    }
+
+    /// Set the details
+    pub fn with_details(mut self, details: impl Into<String>) -> Self {
+        self.details = Some(details.into());
+        self
+    }
+
+    /// Add a tag
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.tags.push(tag.into());
+        self
+    }
+}
+
 /// A complete test run containing results for multiple tests
 #[derive(Debug, Clone)]
 pub struct TestRun {
@@ -215,5 +283,40 @@ mod tests {
         assert_eq!(TestStatus::Skip.to_string(), "skip");
         assert_eq!(TestStatus::ExpectedFailure.to_string(), "xfail");
         assert_eq!(TestStatus::UnexpectedSuccess.to_string(), "uxsuccess");
+    }
+
+    #[test]
+    fn test_result_success_constructor() {
+        let result = TestResult::success("test1");
+        assert_eq!(result.test_id.as_str(), "test1");
+        assert_eq!(result.status, TestStatus::Success);
+        assert!(result.message.is_none());
+        assert!(result.duration.is_none());
+    }
+
+    #[test]
+    fn test_result_failure_constructor() {
+        let result = TestResult::failure("test1", "Failed!");
+        assert_eq!(result.test_id.as_str(), "test1");
+        assert_eq!(result.status, TestStatus::Failure);
+        assert_eq!(result.message, Some("Failed!".to_string()));
+    }
+
+    #[test]
+    fn test_result_with_duration() {
+        let result = TestResult::success("test1").with_duration(Duration::from_millis(100));
+        assert_eq!(result.duration, Some(Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn test_result_with_details() {
+        let result = TestResult::failure("test1", "Failed").with_details("Stack trace here");
+        assert_eq!(result.details, Some("Stack trace here".to_string()));
+    }
+
+    #[test]
+    fn test_result_with_tag() {
+        let result = TestResult::success("test1").with_tag("slow");
+        assert_eq!(result.tags, vec!["slow"]);
     }
 }
