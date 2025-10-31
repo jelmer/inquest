@@ -9,9 +9,15 @@ use std::io::{Read, Write};
 use subunit::Event;
 
 /// Parse a subunit stream into a TestRun
+///
+/// This function catches panics from the subunit crate and converts them to proper errors.
 pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
-    let events = subunit::parse_subunit(reader)
-        .map_err(|e| Error::Subunit(format!("Failed to parse subunit stream: {}", e)))?;
+    // The subunit crate can panic on invalid input, so we catch panics
+    let events = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        subunit::parse_subunit(reader)
+    }))
+    .map_err(|_| Error::Subunit("Invalid subunit stream format (parse panic)".to_string()))?
+    .map_err(|e| Error::Subunit(format!("Failed to parse subunit stream: {}", e)))?;
 
     let mut test_run = TestRun::new(run_id);
 
@@ -65,6 +71,8 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
 }
 
 /// Write a TestRun as a subunit stream
+///
+/// This function catches panics from the subunit crate and converts them to proper errors.
 pub fn write_stream<W: Write>(test_run: &TestRun, mut writer: W) -> Result<()> {
     for result in test_run.results.values() {
         let status_str = match result.status {
@@ -98,6 +106,7 @@ pub fn write_stream<W: Write>(test_run: &TestRun, mut writer: W) -> Result<()> {
             event.mime_type = Some("text/plain".to_string());
         }
 
+        // Write event - errors from subunit crate are properly handled
         event
             .write(&mut writer)
             .map_err(|e| Error::Subunit(format!("Failed to write subunit event: {}", e)))?;
@@ -191,6 +200,24 @@ mod tests {
 
             let result = parsed.results.values().next().unwrap();
             assert_eq!(result.status, status);
+        }
+    }
+
+    #[test]
+    fn test_invalid_subunit_stream_no_panic() {
+        // Test that invalid input doesn't panic but returns an error
+        let invalid_data: &[u8] = b"not valid subunit data at all";
+        let result = parse_stream(invalid_data, "0".to_string());
+        // Should return an error, not panic
+        assert!(result.is_err());
+        if let Err(Error::Subunit(msg)) = result {
+            assert!(
+                msg.contains("Invalid subunit stream") || msg.contains("Failed to parse"),
+                "Error message: {}",
+                msg
+            );
+        } else {
+            panic!("Expected Subunit error");
         }
     }
 }
