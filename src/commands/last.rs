@@ -1,0 +1,167 @@
+//! Show the last test run
+
+use crate::commands::Command;
+use crate::error::Result;
+use crate::repository::file::FileRepositoryFactory;
+use crate::repository::RepositoryFactory;
+use crate::ui::UI;
+use std::path::Path;
+
+pub struct LastCommand {
+    base_path: Option<String>,
+}
+
+impl LastCommand {
+    pub fn new(base_path: Option<String>) -> Self {
+        LastCommand { base_path }
+    }
+}
+
+impl Command for LastCommand {
+    fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
+        let base = self
+            .base_path
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or_else(|| Path::new("."));
+
+        let factory = FileRepositoryFactory;
+        let repo = factory.open(base)?;
+
+        let test_run = repo.get_latest_run()?;
+
+        ui.output(&format!("Test run: {}", test_run.id))?;
+        ui.output(&format!("Timestamp: {}", test_run.timestamp))?;
+        ui.output(&format!("Total tests: {}", test_run.total_tests()))?;
+        ui.output(&format!("Passed: {}", test_run.count_successes()))?;
+        ui.output(&format!("Failed: {}", test_run.count_failures()))?;
+
+        if test_run.count_failures() > 0 {
+            ui.output("")?;
+            ui.output("Failed tests:")?;
+            for test_id in test_run.get_failing_tests() {
+                ui.output(&format!("  {}", test_id))?;
+            }
+            Ok(1)
+        } else {
+            Ok(0)
+        }
+    }
+
+    fn name(&self) -> &str {
+        "last"
+    }
+
+    fn help(&self) -> &str {
+        "Show the results from the last test run"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repository::{TestId, TestResult, TestRun, TestStatus};
+    use crate::ui::UI;
+    use tempfile::TempDir;
+
+    struct TestUI {
+        output: Vec<String>,
+        errors: Vec<String>,
+    }
+
+    impl TestUI {
+        fn new() -> Self {
+            TestUI {
+                output: Vec::new(),
+                errors: Vec::new(),
+            }
+        }
+    }
+
+    impl UI for TestUI {
+        fn output(&mut self, message: &str) -> Result<()> {
+            self.output.push(message.to_string());
+            Ok(())
+        }
+
+        fn error(&mut self, message: &str) -> Result<()> {
+            self.errors.push(message.to_string());
+            Ok(())
+        }
+
+        fn warning(&mut self, message: &str) -> Result<()> {
+            self.errors.push(format!("Warning: {}", message));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_last_command() {
+        let temp = TempDir::new().unwrap();
+
+        // Initialize repository and add a test run
+        let factory = FileRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut test_run = TestRun::new("0".to_string());
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test1"),
+            status: TestStatus::Success,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec![],
+        });
+
+        repo.insert_test_run(test_run).unwrap();
+
+        // Execute last command
+        let mut ui = TestUI::new();
+        let cmd = LastCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui);
+
+        assert_eq!(result.unwrap(), 0);
+        assert!(ui.output.iter().any(|s| s.contains("Test run: 0")));
+        assert!(ui.output.iter().any(|s| s.contains("Total tests: 1")));
+        assert!(ui.output.iter().any(|s| s.contains("Passed: 1")));
+        assert!(ui.output.iter().any(|s| s.contains("Failed: 0")));
+    }
+
+    #[test]
+    fn test_last_command_with_failures() {
+        let temp = TempDir::new().unwrap();
+
+        let factory = FileRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut test_run = TestRun::new("0".to_string());
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test1"),
+            status: TestStatus::Success,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec![],
+        });
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test2"),
+            status: TestStatus::Failure,
+            duration: None,
+            message: Some("Failed".to_string()),
+            details: None,
+            tags: vec![],
+        });
+
+        repo.insert_test_run(test_run).unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = LastCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui);
+
+        assert_eq!(result.unwrap(), 1); // Non-zero exit code for failures
+        assert!(ui.output.iter().any(|s| s.contains("Failed: 1")));
+        assert!(ui.output.iter().any(|s| s.contains("test2")));
+    }
+}

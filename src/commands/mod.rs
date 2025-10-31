@@ -5,6 +5,16 @@
 use crate::error::Result;
 use crate::ui::UI;
 
+pub mod init;
+pub mod load;
+pub mod last;
+pub mod failing;
+
+pub use init::InitCommand;
+pub use load::LoadCommand;
+pub use last::LastCommand;
+pub use failing::FailingCommand;
+
 /// Trait that all commands must implement
 pub trait Command {
     /// Execute the command
