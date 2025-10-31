@@ -30,13 +30,13 @@ impl RepositoryFactory for FileRepositoryFactory {
 
         fs::create_dir_all(&repo_path)?;
 
-        // Write format file
+        // Write format file (with newline for Python compatibility)
         let format_path = repo_path.join("format");
-        fs::write(&format_path, REPOSITORY_FORMAT)?;
+        fs::write(&format_path, format!("{}\n", REPOSITORY_FORMAT))?;
 
-        // Initialize next-stream counter
+        // Initialize next-stream counter (with newline for Python compatibility)
         let next_stream_path = repo_path.join("next-stream");
-        fs::write(&next_stream_path, "0")?;
+        fs::write(&next_stream_path, "0\n")?;
 
         Ok(Box::new(FileRepository { path: repo_path }))
     }
@@ -86,7 +86,7 @@ impl FileRepository {
 
     fn write_next_stream(&self, value: u64) -> Result<()> {
         let path = self.get_next_stream_path();
-        fs::write(&path, value.to_string())?;
+        fs::write(&path, format!("{}\n", value))?;
         Ok(())
     }
 
