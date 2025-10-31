@@ -1,6 +1,6 @@
 //! Configuration file (.testr.conf) parsing and handling
 //!
-//! The .testr.conf file uses INI format with a [DEFAULT] section containing
+//! The .testr.conf file uses INI format with a `[DEFAULT]` section containing
 //! test command configuration and variable substitution.
 
 use crate::error::{Error, Result};
