@@ -5,21 +5,23 @@
 use crate::error::Result;
 use crate::ui::UI;
 
-pub mod init;
-pub mod load;
-pub mod last;
 pub mod failing;
-pub mod stats;
-pub mod slowest;
+pub mod init;
+pub mod last;
 pub mod list_tests;
+pub mod load;
+pub mod run;
+pub mod slowest;
+pub mod stats;
 
-pub use init::InitCommand;
-pub use load::LoadCommand;
-pub use last::LastCommand;
 pub use failing::FailingCommand;
-pub use stats::StatsCommand;
-pub use slowest::SlowestCommand;
+pub use init::InitCommand;
+pub use last::LastCommand;
 pub use list_tests::ListTestsCommand;
+pub use load::LoadCommand;
+pub use run::RunCommand;
+pub use slowest::SlowestCommand;
+pub use stats::StatsCommand;
 
 /// Trait that all commands must implement
 pub trait Command {
