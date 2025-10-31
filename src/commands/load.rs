@@ -12,6 +12,7 @@ use std::path::Path;
 pub struct LoadCommand {
     base_path: Option<String>,
     input: Option<Box<dyn Read>>,
+    force_init: bool,
 }
 
 impl LoadCommand {
@@ -19,6 +20,15 @@ impl LoadCommand {
         LoadCommand {
             base_path,
             input: None,
+            force_init: false,
+        }
+    }
+
+    pub fn with_force_init(base_path: Option<String>) -> Self {
+        LoadCommand {
+            base_path,
+            input: None,
+            force_init: true,
         }
     }
 
@@ -26,6 +36,7 @@ impl LoadCommand {
         LoadCommand {
             base_path,
             input: Some(input),
+            force_init: false,
         }
     }
 }
@@ -39,7 +50,12 @@ impl Command for LoadCommand {
             .unwrap_or_else(|| Path::new("."));
 
         let factory = FileRepositoryFactory;
-        let mut repo = factory.open(base)?;
+        let mut repo = if self.force_init {
+            // Try to open, if it fails, initialize
+            factory.open(base).or_else(|_| factory.initialise(base))?
+        } else {
+            factory.open(base)?
+        };
 
         // Get the next run ID
         let run_id = repo.get_next_run_id()?.to_string();

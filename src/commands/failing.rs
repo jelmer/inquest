@@ -9,11 +9,22 @@ use std::path::Path;
 
 pub struct FailingCommand {
     base_path: Option<String>,
+    list_only: bool,
 }
 
 impl FailingCommand {
     pub fn new(base_path: Option<String>) -> Self {
-        FailingCommand { base_path }
+        FailingCommand {
+            base_path,
+            list_only: false,
+        }
+    }
+
+    pub fn with_list_only(base_path: Option<String>) -> Self {
+        FailingCommand {
+            base_path,
+            list_only: true,
+        }
     }
 }
 
@@ -33,12 +44,22 @@ impl Command for FailingCommand {
         let failing = test_run.get_failing_tests();
 
         if failing.is_empty() {
-            ui.output("No failing tests")?;
+            if !self.list_only {
+                ui.output("No failing tests")?;
+            }
             Ok(0)
         } else {
-            ui.output(&format!("{} failing test(s):", failing.len()))?;
-            for test_id in failing {
-                ui.output(&format!("  {}", test_id))?;
+            if self.list_only {
+                // List mode: just output test IDs, one per line
+                for test_id in failing {
+                    ui.output(test_id.as_str())?;
+                }
+            } else {
+                // Normal mode: output with header
+                ui.output(&format!("{} failing test(s):", failing.len()))?;
+                for test_id in failing {
+                    ui.output(&format!("  {}", test_id))?;
+                }
             }
             Ok(1)
         }
@@ -132,5 +153,33 @@ mod tests {
         assert!(ui.output.iter().any(|s| s.contains("2 failing")));
         assert!(ui.output.iter().any(|s| s.contains("test2")));
         assert!(ui.output.iter().any(|s| s.contains("test3")));
+    }
+
+    #[test]
+    fn test_failing_command_list_mode() {
+        let temp = TempDir::new().unwrap();
+
+        let factory = FileRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut test_run = TestRun::new("0".to_string());
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(TestResult::failure("test1", "Failed"));
+        test_run.add_result(TestResult::failure("test2", "Also failed"));
+        test_run.add_result(TestResult::success("test3"));
+
+        repo.insert_test_run(test_run).unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = FailingCommand::with_list_only(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui);
+
+        assert_eq!(result.unwrap(), 1);
+        // In list mode, output should be just test IDs, no header
+        assert_eq!(ui.output.len(), 2);
+        assert!(ui.output.contains(&"test1".to_string()));
+        assert!(ui.output.contains(&"test2".to_string()));
+        // No header in list mode
+        assert!(!ui.output.iter().any(|s| s.contains("failing test(s):")));
     }
 }

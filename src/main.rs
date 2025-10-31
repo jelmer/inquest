@@ -24,13 +24,21 @@ enum Commands {
     Init,
 
     /// Load test results from stdin
-    Load,
+    Load {
+        /// Create repository if it doesn't exist
+        #[arg(long)]
+        force_init: bool,
+    },
 
     /// Show results from the last test run
     Last,
 
     /// Show failing tests from the last run
-    Failing,
+    Failing {
+        /// List test IDs only, one per line (for scripting)
+        #[arg(long)]
+        list: bool,
+    },
 
     /// Show repository statistics
     Stats,
@@ -39,8 +47,12 @@ enum Commands {
     #[command(name = "slowest")]
     Slowest {
         /// Number of tests to show
-        #[arg(short = 'n', long, default_value = "10")]
+        #[arg(short = 'n', long, default_value = "10", conflicts_with = "all")]
         count: usize,
+
+        /// Show all tests (not just top N)
+        #[arg(long)]
+        all: bool,
     },
 
     /// List all available tests
@@ -52,6 +64,10 @@ enum Commands {
         /// Run only the tests that failed in the last run
         #[arg(long)]
         failing: bool,
+
+        /// Create repository if it doesn't exist
+        #[arg(long)]
+        force_init: bool,
     },
 }
 
@@ -85,32 +101,46 @@ fn main() {
             let cmd = InitCommand::new(cli.directory);
             cmd.execute(&mut ui)
         }
-        Commands::Load => {
-            let cmd = LoadCommand::new(cli.directory);
+        Commands::Load { force_init } => {
+            let cmd = if force_init {
+                LoadCommand::with_force_init(cli.directory)
+            } else {
+                LoadCommand::new(cli.directory)
+            };
             cmd.execute(&mut ui)
         }
         Commands::Last => {
             let cmd = LastCommand::new(cli.directory);
             cmd.execute(&mut ui)
         }
-        Commands::Failing => {
-            let cmd = FailingCommand::new(cli.directory);
+        Commands::Failing { list } => {
+            let cmd = if list {
+                FailingCommand::with_list_only(cli.directory)
+            } else {
+                FailingCommand::new(cli.directory)
+            };
             cmd.execute(&mut ui)
         }
         Commands::Stats => {
             let cmd = StatsCommand::new(cli.directory);
             cmd.execute(&mut ui)
         }
-        Commands::Slowest { count } => {
-            let cmd = SlowestCommand::with_count(cli.directory, count);
+        Commands::Slowest { count, all } => {
+            let display_count = if all { usize::MAX } else { count };
+            let cmd = SlowestCommand::with_count(cli.directory, display_count);
             cmd.execute(&mut ui)
         }
         Commands::ListTests => {
             let cmd = ListTestsCommand::new(cli.directory);
             cmd.execute(&mut ui)
         }
-        Commands::Run { failing } => {
-            let cmd = if failing {
+        Commands::Run {
+            failing,
+            force_init,
+        } => {
+            let cmd = if force_init {
+                RunCommand::with_force_init(cli.directory, failing)
+            } else if failing {
                 RunCommand::with_failing_only(cli.directory)
             } else {
                 RunCommand::new(cli.directory)

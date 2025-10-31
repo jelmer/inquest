@@ -12,6 +12,7 @@ use std::path::Path;
 pub struct RunCommand {
     base_path: Option<String>,
     failing_only: bool,
+    force_init: bool,
 }
 
 impl RunCommand {
@@ -19,6 +20,7 @@ impl RunCommand {
         RunCommand {
             base_path,
             failing_only: false,
+            force_init: false,
         }
     }
 
@@ -26,6 +28,15 @@ impl RunCommand {
         RunCommand {
             base_path,
             failing_only: true,
+            force_init: false,
+        }
+    }
+
+    pub fn with_force_init(base_path: Option<String>, failing_only: bool) -> Self {
+        RunCommand {
+            base_path,
+            failing_only,
+            force_init: true,
         }
     }
 }
@@ -40,7 +51,12 @@ impl Command for RunCommand {
 
         // Open repository
         let factory = FileRepositoryFactory;
-        let mut repo = factory.open(base)?;
+        let mut repo = if self.force_init {
+            // Try to open, if it fails, initialize
+            factory.open(base).or_else(|_| factory.initialise(base))?
+        } else {
+            factory.open(base)?
+        };
 
         // Load test command configuration
         let test_cmd = TestCommand::from_directory(base)?;
