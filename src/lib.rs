@@ -74,6 +74,7 @@ pub mod error;
 pub mod repository;
 pub mod subunit_stream;
 pub mod testcommand;
+pub mod testlist;
 pub mod ui;
 
 pub use error::{Error, Result};

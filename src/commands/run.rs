@@ -14,6 +14,7 @@ pub struct RunCommand {
     failing_only: bool,
     force_init: bool,
     partial: bool,
+    load_list: Option<String>,
 }
 
 impl RunCommand {
@@ -23,6 +24,7 @@ impl RunCommand {
             failing_only: false,
             force_init: false,
             partial: false,
+            load_list: None,
         }
     }
 
@@ -32,6 +34,7 @@ impl RunCommand {
             failing_only: true,
             force_init: false,
             partial: true, // --failing implies partial mode
+            load_list: None,
         }
     }
 
@@ -41,6 +44,7 @@ impl RunCommand {
             failing_only,
             force_init: true,
             partial: failing_only, // --failing implies partial mode
+            load_list: None,
         }
     }
 
@@ -55,6 +59,23 @@ impl RunCommand {
             failing_only,
             force_init,
             partial,
+            load_list: None,
+        }
+    }
+
+    pub fn with_all_options(
+        base_path: Option<String>,
+        partial: bool,
+        failing_only: bool,
+        force_init: bool,
+        load_list: Option<String>,
+    ) -> Self {
+        RunCommand {
+            base_path,
+            failing_only,
+            force_init,
+            partial,
+            load_list,
         }
     }
 }
@@ -80,7 +101,7 @@ impl Command for RunCommand {
         let test_cmd = TestCommand::from_directory(base)?;
 
         // Determine which tests to run
-        let test_ids = if self.failing_only {
+        let mut test_ids = if self.failing_only {
             let latest = repo.get_latest_run()?;
             let failing = latest.get_failing_tests();
             if failing.is_empty() {
@@ -91,6 +112,25 @@ impl Command for RunCommand {
         } else {
             None
         };
+
+        // Apply --load-list filter if provided
+        if let Some(ref load_list_path) = self.load_list {
+            let load_list_ids = crate::testlist::parse_list_file(Path::new(load_list_path))?;
+
+            if let Some(existing_ids) = test_ids {
+                // Intersect with existing list (e.g., from --failing)
+                let load_list_set: std::collections::HashSet<_> = load_list_ids.iter().collect();
+                test_ids = Some(
+                    existing_ids
+                        .into_iter()
+                        .filter(|id| load_list_set.contains(id))
+                        .collect(),
+                );
+            } else {
+                // Use load-list verbatim
+                test_ids = Some(load_list_ids);
+            }
+        }
 
         // Run tests
         ui.output("Running tests...")?;

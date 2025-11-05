@@ -154,9 +154,10 @@ impl FileRepository {
 
         // Open the GDBM database for reading
         let db = gdbm::Gdbm::new(&times_path, 0, gdbm::Open::READER, 0o644).map_err(|e| {
-            Error::Io(std::io::Error::other(
-                format!("Failed to open times database: {}", e),
-            ))
+            Error::Io(std::io::Error::other(format!(
+                "Failed to open times database: {}",
+                e
+            )))
         })?;
 
         let mut result = HashMap::new();
@@ -190,9 +191,10 @@ impl FileRepository {
         // Open the GDBM database for writing (create if doesn't exist)
         // mode 0o644 = readable by all, writable by owner
         let db = gdbm::Gdbm::new(&times_path, 0, gdbm::Open::WRCREAT, 0o644).map_err(|e| {
-            Error::Io(std::io::Error::other(
-                format!("Failed to open times database: {}", e),
-            ))
+            Error::Io(std::io::Error::other(format!(
+                "Failed to open times database: {}",
+                e
+            )))
         })?;
 
         // Update each test time
@@ -201,9 +203,10 @@ impl FileRepository {
             let value = duration.as_secs_f64().to_string();
             db.store(key, value.as_bytes(), true) // true = replace if exists
                 .map_err(|e| {
-                    Error::Io(std::io::Error::other(
-                        format!("Failed to store test time: {}", e),
-                    ))
+                    Error::Io(std::io::Error::other(format!(
+                        "Failed to store test time: {}",
+                        e
+                    )))
                 })?;
         }
 

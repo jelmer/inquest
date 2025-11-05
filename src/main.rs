@@ -76,6 +76,10 @@ enum Commands {
         /// Partial run mode (update failing tests additively)
         #[arg(long)]
         partial: bool,
+
+        /// Only run tests listed in the named file (one test ID per line)
+        #[arg(long)]
+        load_list: Option<String>,
     },
 }
 
@@ -145,8 +149,15 @@ fn main() {
             failing,
             force_init,
             partial,
+            load_list,
         } => {
-            let cmd = RunCommand::with_partial(cli.directory, partial, failing, force_init);
+            let cmd = RunCommand::with_all_options(
+                cli.directory,
+                partial,
+                failing,
+                force_init,
+                load_list,
+            );
             cmd.execute(&mut ui)
         }
     };
