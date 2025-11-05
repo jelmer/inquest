@@ -10,6 +10,7 @@ use std::path::Path;
 pub struct FailingCommand {
     base_path: Option<String>,
     list_only: bool,
+    subunit: bool,
 }
 
 impl FailingCommand {
@@ -17,6 +18,7 @@ impl FailingCommand {
         FailingCommand {
             base_path,
             list_only: false,
+            subunit: false,
         }
     }
 
@@ -24,6 +26,15 @@ impl FailingCommand {
         FailingCommand {
             base_path,
             list_only: true,
+            subunit: false,
+        }
+    }
+
+    pub fn with_subunit(base_path: Option<String>) -> Self {
+        FailingCommand {
+            base_path,
+            list_only: false,
+            subunit: true,
         }
     }
 }
@@ -39,30 +50,44 @@ impl Command for FailingCommand {
         let factory = FileRepositoryFactory;
         let repo = factory.open(base)?;
 
-        // Get failing tests from the latest run
-        let test_run = repo.get_latest_run()?;
-        let failing = test_run.get_failing_tests();
+        // Get failing tests from the repository's failing file
+        let failing_tests = repo.get_failing_tests()?;
 
-        if failing.is_empty() {
-            if !self.list_only {
+        if failing_tests.is_empty() {
+            if !self.list_only && !self.subunit {
                 ui.output("No failing tests")?;
             }
-            Ok(0)
-        } else {
-            if self.list_only {
-                // List mode: just output test IDs, one per line
-                for test_id in failing {
-                    ui.output(test_id.as_str())?;
-                }
-            } else {
-                // Normal mode: output with header
-                ui.output(&format!("{} failing test(s):", failing.len()))?;
-                for test_id in failing {
-                    ui.output(&format!("  {}", test_id))?;
-                }
-            }
-            Ok(1)
+            return Ok(0);
         }
+
+        if self.subunit {
+            // Output the failing tests as a subunit stream
+            // We need to reconstruct a TestRun from the failing file
+            use std::fs::File;
+            let failing_path = base.join(".testrepository").join("failing");
+            if failing_path.exists() {
+                let file = File::open(&failing_path)?;
+                let test_run = crate::subunit_stream::parse_stream(file, "failing".to_string())?;
+                let mut buffer = Vec::new();
+                crate::subunit_stream::write_stream(&test_run, &mut buffer)?;
+                ui.output_bytes(&buffer)?;
+            }
+            return Ok(0); // Exit code 0 if we successfully wrote the stream
+        }
+
+        if self.list_only {
+            // List mode: just output test IDs, one per line
+            for test_id in failing_tests {
+                ui.output(test_id.as_str())?;
+            }
+        } else {
+            // Normal mode: output with header
+            ui.output(&format!("{} failing test(s):", failing_tests.len()))?;
+            for test_id in failing_tests {
+                ui.output(&format!("  {}", test_id))?;
+            }
+        }
+        Ok(1)
     }
 
     fn name(&self) -> &str {
@@ -143,7 +168,8 @@ mod tests {
             tags: vec![],
         });
 
-        repo.insert_test_run(test_run).unwrap();
+        // Use insert_test_run_partial with partial=false to populate the failing file
+        repo.insert_test_run_partial(test_run, false).unwrap();
 
         let mut ui = TestUI::new();
         let cmd = FailingCommand::new(Some(temp.path().to_string_lossy().to_string()));
@@ -168,7 +194,8 @@ mod tests {
         test_run.add_result(TestResult::failure("test2", "Also failed"));
         test_run.add_result(TestResult::success("test3"));
 
-        repo.insert_test_run(test_run).unwrap();
+        // Use insert_test_run_partial with partial=false to populate the failing file
+        repo.insert_test_run_partial(test_run, false).unwrap();
 
         let mut ui = TestUI::new();
         let cmd = FailingCommand::with_list_only(Some(temp.path().to_string_lossy().to_string()));

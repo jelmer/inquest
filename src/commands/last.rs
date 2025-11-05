@@ -9,11 +9,22 @@ use std::path::Path;
 
 pub struct LastCommand {
     base_path: Option<String>,
+    subunit: bool,
 }
 
 impl LastCommand {
     pub fn new(base_path: Option<String>) -> Self {
-        LastCommand { base_path }
+        LastCommand {
+            base_path,
+            subunit: false,
+        }
+    }
+
+    pub fn with_subunit(base_path: Option<String>) -> Self {
+        LastCommand {
+            base_path,
+            subunit: true,
+        }
     }
 }
 
@@ -29,6 +40,14 @@ impl Command for LastCommand {
         let repo = factory.open(base)?;
 
         let test_run = repo.get_latest_run()?;
+
+        if self.subunit {
+            // Output the test run as a subunit stream
+            let mut buffer = Vec::new();
+            crate::subunit_stream::write_stream(&test_run, &mut buffer)?;
+            ui.output_bytes(&buffer)?;
+            return Ok(0); // Exit code 0 if we successfully wrote the stream
+        }
 
         ui.output(&format!("Test run: {}", test_run.id))?;
         ui.output(&format!("Timestamp: {}", test_run.timestamp))?;

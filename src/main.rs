@@ -35,13 +35,21 @@ enum Commands {
     },
 
     /// Show results from the last test run
-    Last,
+    Last {
+        /// Show output as a subunit stream
+        #[arg(long)]
+        subunit: bool,
+    },
 
     /// Show failing tests from the last run
     Failing {
         /// List test IDs only, one per line (for scripting)
         #[arg(long)]
         list: bool,
+
+        /// Show output as a subunit stream
+        #[arg(long)]
+        subunit: bool,
     },
 
     /// Show repository statistics
@@ -120,12 +128,18 @@ fn main() {
             let cmd = LoadCommand::with_partial(cli.directory, partial, force_init);
             cmd.execute(&mut ui)
         }
-        Commands::Last => {
-            let cmd = LastCommand::new(cli.directory);
+        Commands::Last { subunit } => {
+            let cmd = if subunit {
+                LastCommand::with_subunit(cli.directory)
+            } else {
+                LastCommand::new(cli.directory)
+            };
             cmd.execute(&mut ui)
         }
-        Commands::Failing { list } => {
-            let cmd = if list {
+        Commands::Failing { list, subunit } => {
+            let cmd = if subunit {
+                FailingCommand::with_subunit(cli.directory)
+            } else if list {
                 FailingCommand::with_list_only(cli.directory)
             } else {
                 FailingCommand::new(cli.directory)

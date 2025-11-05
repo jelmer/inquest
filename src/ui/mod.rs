@@ -18,6 +18,13 @@ pub trait UI {
 
     /// Output a warning message
     fn warning(&mut self, message: &str) -> Result<()>;
+
+    /// Output raw bytes (e.g., for subunit streams)
+    fn output_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        // Default implementation: write to stdout
+        io::stdout().write_all(bytes)?;
+        Ok(())
+    }
 }
 
 /// Command-line UI implementation

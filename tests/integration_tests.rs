@@ -140,7 +140,7 @@ fn test_workflow_with_failing_tests() {
 
     let factory = testrepository::repository::file::FileRepositoryFactory;
     let mut repo = factory.open(temp.path()).unwrap();
-    repo.insert_test_run(run1).unwrap();
+    repo.insert_test_run_partial(run1, false).unwrap();
 
     // Check failing tests
     let mut ui = TestUI::new();
@@ -160,7 +160,7 @@ fn test_workflow_with_failing_tests() {
     run2.add_result(TestResult::success("test2"));
     run2.add_result(TestResult::failure("test3", "Still failing"));
 
-    repo.insert_test_run(run2).unwrap();
+    repo.insert_test_run_partial(run2, false).unwrap();
 
     // Check failing tests again - should only have test3
     let mut ui = TestUI::new();
@@ -284,7 +284,7 @@ fn test_workflow_list_flag() {
     run.add_result(TestResult::failure("test2", "Error"));
     run.add_result(TestResult::success("test3"));
 
-    repo.insert_test_run(run).unwrap();
+    repo.insert_test_run_partial(run, false).unwrap();
 
     // Test --list flag
     let mut ui = TestUI::new();
