@@ -96,6 +96,6 @@ test_list_option=
 
         assert_eq!(result.unwrap(), 0);
         // The echo command should output test1, test2, test3
-        assert!(ui.output.len() >= 1);
+        assert!(!ui.output.is_empty());
     }
 }
