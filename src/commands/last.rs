@@ -1,11 +1,9 @@
 //! Show the last test run
 
+use crate::commands::utils::open_repository;
 use crate::commands::Command;
 use crate::error::Result;
-use crate::repository::file::FileRepositoryFactory;
-use crate::repository::RepositoryFactory;
 use crate::ui::UI;
-use std::path::Path;
 
 pub struct LastCommand {
     base_path: Option<String>,
@@ -30,15 +28,7 @@ impl LastCommand {
 
 impl Command for LastCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
-        let base = self
-            .base_path
-            .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new("."));
-
-        let factory = FileRepositoryFactory;
-        let repo = factory.open(base)?;
-
+        let repo = open_repository(self.base_path.as_deref())?;
         let test_run = repo.get_latest_run()?;
 
         if self.subunit {
@@ -79,7 +69,8 @@ impl Command for LastCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::{TestId, TestResult, TestRun, TestStatus};
+    use crate::repository::file::FileRepositoryFactory;
+    use crate::repository::{RepositoryFactory, TestId, TestResult, TestRun, TestStatus};
     use crate::ui::test_ui::TestUI;
     use tempfile::TempDir;
 

@@ -1,9 +1,8 @@
 //! Run tests and load results into the repository
 
+use crate::commands::utils::{init_repository, open_repository};
 use crate::commands::Command;
 use crate::error::Result;
-use crate::repository::file::FileRepositoryFactory;
-use crate::repository::RepositoryFactory;
 use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 use crate::ui::UI;
@@ -82,19 +81,15 @@ impl RunCommand {
 
 impl Command for RunCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
-        let base = self
-            .base_path
-            .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new("."));
+        let base = Path::new(self.base_path.as_deref().unwrap_or("."));
 
         // Open repository
-        let factory = FileRepositoryFactory;
         let mut repo = if self.force_init {
             // Try to open, if it fails, initialize
-            factory.open(base).or_else(|_| factory.initialise(base))?
+            open_repository(self.base_path.as_deref())
+                .or_else(|_| init_repository(self.base_path.as_deref()))?
         } else {
-            factory.open(base)?
+            open_repository(self.base_path.as_deref())?
         };
 
         // Load test command configuration
@@ -186,6 +181,8 @@ impl Command for RunCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repository::file::FileRepositoryFactory;
+    use crate::repository::RepositoryFactory;
     use crate::ui::test_ui::TestUI;
     use std::fs;
     use tempfile::TempDir;

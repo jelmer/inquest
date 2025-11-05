@@ -1,9 +1,8 @@
 //! Show currently failing tests
 
+use crate::commands::utils::open_repository;
 use crate::commands::Command;
 use crate::error::Result;
-use crate::repository::file::FileRepositoryFactory;
-use crate::repository::RepositoryFactory;
 use crate::ui::UI;
 use std::path::Path;
 
@@ -41,14 +40,8 @@ impl FailingCommand {
 
 impl Command for FailingCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
-        let base = self
-            .base_path
-            .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new("."));
-
-        let factory = FileRepositoryFactory;
-        let repo = factory.open(base)?;
+        let base = Path::new(self.base_path.as_deref().unwrap_or("."));
+        let repo = open_repository(self.base_path.as_deref())?;
 
         // Get failing tests from the repository's failing file
         let failing_tests = repo.get_failing_tests()?;
@@ -102,7 +95,8 @@ impl Command for FailingCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::{TestId, TestResult, TestRun, TestStatus};
+    use crate::repository::file::FileRepositoryFactory;
+    use crate::repository::{RepositoryFactory, TestId, TestResult, TestRun, TestStatus};
     use crate::ui::test_ui::TestUI;
     use tempfile::TempDir;
 

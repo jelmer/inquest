@@ -1,11 +1,9 @@
 //! Show the slowest tests
 
+use crate::commands::utils::open_repository;
 use crate::commands::Command;
 use crate::error::Result;
-use crate::repository::file::FileRepositoryFactory;
-use crate::repository::RepositoryFactory;
 use crate::ui::UI;
-use std::path::Path;
 
 pub struct SlowestCommand {
     base_path: Option<String>,
@@ -27,15 +25,7 @@ impl SlowestCommand {
 
 impl Command for SlowestCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
-        let base = self
-            .base_path
-            .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new("."));
-
-        let factory = FileRepositoryFactory;
-        let repo = factory.open(base)?;
-
+        let repo = open_repository(self.base_path.as_deref())?;
         let test_run = repo.get_latest_run()?;
 
         // Collect tests with durations
@@ -76,7 +66,8 @@ impl Command for SlowestCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::{TestId, TestResult, TestRun, TestStatus};
+    use crate::repository::file::FileRepositoryFactory;
+    use crate::repository::{RepositoryFactory, TestId, TestResult, TestRun, TestStatus};
     use crate::ui::test_ui::TestUI;
     use std::time::Duration;
     use tempfile::TempDir;

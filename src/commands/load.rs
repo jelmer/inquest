@@ -1,13 +1,11 @@
 //! Load test results from a subunit stream into the repository
 
+use crate::commands::utils::{init_repository, open_repository};
 use crate::commands::Command;
 use crate::error::Result;
-use crate::repository::file::FileRepositoryFactory;
-use crate::repository::RepositoryFactory;
 use crate::subunit_stream;
 use crate::ui::UI;
 use std::io::{self, Read};
-use std::path::Path;
 
 pub struct LoadCommand {
     base_path: Option<String>,
@@ -56,18 +54,13 @@ impl LoadCommand {
 
 impl Command for LoadCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
-        let base = self
-            .base_path
-            .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new("."));
-
-        let factory = FileRepositoryFactory;
+        // Open repository
         let mut repo = if self.force_init {
             // Try to open, if it fails, initialize
-            factory.open(base).or_else(|_| factory.initialise(base))?
+            open_repository(self.base_path.as_deref())
+                .or_else(|_| init_repository(self.base_path.as_deref()))?
         } else {
-            factory.open(base)?
+            open_repository(self.base_path.as_deref())?
         };
 
         // Get the next run ID
@@ -113,7 +106,8 @@ impl Command for LoadCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::{TestId, TestResult, TestRun, TestStatus};
+    use crate::repository::file::FileRepositoryFactory;
+    use crate::repository::{RepositoryFactory, TestId, TestResult, TestRun, TestStatus};
     use crate::ui::UI;
     use tempfile::TempDir;
 
