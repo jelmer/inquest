@@ -143,6 +143,72 @@ impl FileRepository {
 
         Ok(())
     }
+
+    fn get_test_times_for_ids(&self, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
+        let times_path = self.path.join("times.dbm");
+
+        // If the database doesn't exist yet, return empty
+        if !times_path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        // Open the GDBM database for reading
+        let db = gdbm::Gdbm::new(&times_path, 0, gdbm::Open::READER, 0o644).map_err(|e| {
+            Error::Io(std::io::Error::other(
+                format!("Failed to open times database: {}", e),
+            ))
+        })?;
+
+        let mut result = HashMap::new();
+
+        // Fetch times for specific test IDs
+        for test_id in test_ids {
+            match db.fetch_string(test_id.as_str().as_bytes()) {
+                Ok(duration_str) => {
+                    if let Ok(seconds) = duration_str.parse::<f64>() {
+                        let duration = Duration::from_secs_f64(seconds);
+                        result.insert(test_id.clone(), duration);
+                    }
+                }
+                Err(_) => {
+                    // Key doesn't exist, skip it
+                    continue;
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn update_test_times(&self, times: &HashMap<TestId, Duration>) -> Result<()> {
+        if times.is_empty() {
+            return Ok(());
+        }
+
+        let times_path = self.path.join("times.dbm");
+
+        // Open the GDBM database for writing (create if doesn't exist)
+        // mode 0o644 = readable by all, writable by owner
+        let db = gdbm::Gdbm::new(&times_path, 0, gdbm::Open::WRCREAT, 0o644).map_err(|e| {
+            Error::Io(std::io::Error::other(
+                format!("Failed to open times database: {}", e),
+            ))
+        })?;
+
+        // Update each test time
+        for (test_id, duration) in times {
+            let key = test_id.as_str().as_bytes();
+            let value = duration.as_secs_f64().to_string();
+            db.store(key, value.as_bytes(), true) // true = replace if exists
+                .map_err(|e| {
+                    Error::Io(std::io::Error::other(
+                        format!("Failed to store test time: {}", e),
+                    ))
+                })?;
+        }
+
+        Ok(())
+    }
 }
 
 impl Repository for FileRepository {
@@ -163,6 +229,17 @@ impl Repository for FileRepository {
         let path = self.get_run_path(&run_id_str);
         let file = File::create(&path)?;
         subunit_stream::write_stream(&run, file)?;
+
+        // Extract and store test durations
+        let mut times = HashMap::new();
+        for result in run.results.values() {
+            if let Some(duration) = result.duration {
+                times.insert(result.test_id.clone(), duration);
+            }
+        }
+        if !times.is_empty() {
+            self.update_test_times(&times)?;
+        }
 
         Ok(run_id_str)
     }
@@ -216,7 +293,12 @@ impl Repository for FileRepository {
     }
 
     fn get_test_times(&self) -> Result<HashMap<TestId, Duration>> {
-        // TODO: Read from times database
+        // TODO: The gdbm crate doesn't expose iteration methods (firstkey/nextkey).
+        // For now, return empty HashMap. This method isn't currently used in the CLI.
+        // When needed, we can either:
+        // 1. Add iteration support to the gdbm crate
+        // 2. Use a different approach (e.g., maintain a separate index)
+        // 3. Use get_test_times_for_ids() for specific lookups
         Ok(HashMap::new())
     }
 
@@ -247,6 +329,7 @@ impl Repository for FileRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     #[test]
@@ -421,5 +504,84 @@ mod tests {
         assert!(failing.iter().any(|id| id.as_str() == "test3"));
         assert!(!failing.iter().any(|id| id.as_str() == "test1"));
         assert!(!failing.iter().any(|id| id.as_str() == "test2"));
+    }
+
+    #[test]
+    fn test_times_database_write_and_read() {
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+
+        // Get the repo path directly
+        let repo_path = temp.path().join(".testrepository");
+
+        // Initialize using factory and then create a direct FileRepository instance for testing
+        factory.initialise(temp.path()).unwrap();
+        let mut file_repo = FileRepository {
+            path: repo_path.clone(),
+        };
+
+        // Create a test run with durations
+        let mut run = TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::success("test1").with_duration(Duration::from_secs_f64(1.5)));
+        run.add_result(TestResult::success("test2").with_duration(Duration::from_secs_f64(0.5)));
+        run.add_result(TestResult::success("test3").with_duration(Duration::from_secs_f64(2.25)));
+
+        // Insert the run (should write times to database)
+        file_repo.insert_test_run(run).unwrap();
+
+        // Verify times.dbm file was created
+        let times_path = repo_path.join("times.dbm");
+        assert!(times_path.exists(), "times.dbm should be created");
+
+        // Read times for specific test IDs
+        let test_ids = vec![
+            TestId::new("test1"),
+            TestId::new("test2"),
+            TestId::new("test3"),
+        ];
+        let times = file_repo.get_test_times_for_ids(&test_ids).unwrap();
+
+        assert_eq!(times.len(), 3);
+        assert_eq!(times.get(&TestId::new("test1")).unwrap().as_secs_f64(), 1.5);
+        assert_eq!(times.get(&TestId::new("test2")).unwrap().as_secs_f64(), 0.5);
+        assert_eq!(
+            times.get(&TestId::new("test3")).unwrap().as_secs_f64(),
+            2.25
+        );
+    }
+
+    #[test]
+    fn test_times_database_updates_on_multiple_runs() {
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+
+        // Get the repo path directly
+        let repo_path = temp.path().join(".testrepository");
+
+        // Initialize using factory and then create a direct FileRepository instance for testing
+        factory.initialise(temp.path()).unwrap();
+        let mut file_repo = FileRepository {
+            path: repo_path.clone(),
+        };
+
+        // First run with initial times
+        let mut run1 = TestRun::new("0".to_string());
+        run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run1.add_result(TestResult::success("test1").with_duration(Duration::from_secs_f64(1.0)));
+        file_repo.insert_test_run(run1).unwrap();
+
+        // Second run with updated time for test1
+        let mut run2 = TestRun::new("1".to_string());
+        run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
+        run2.add_result(TestResult::success("test1").with_duration(Duration::from_secs_f64(2.0)));
+        file_repo.insert_test_run(run2).unwrap();
+
+        // Verify that the time was updated (not accumulated)
+        let test_ids = vec![TestId::new("test1")];
+        let times = file_repo.get_test_times_for_ids(&test_ids).unwrap();
+
+        assert_eq!(times.len(), 1);
+        assert_eq!(times.get(&TestId::new("test1")).unwrap().as_secs_f64(), 2.0);
     }
 }
