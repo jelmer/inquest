@@ -6,11 +6,8 @@
 use std::fs;
 use std::io::Write;
 use tempfile::TempDir;
-use testrepository::commands::{
-    Command, FailingCommand, InitCommand, LastCommand, LoadCommand, StatsCommand,
-};
+use testrepository::commands::{Command, FailingCommand, InitCommand, LastCommand, StatsCommand};
 use testrepository::repository::{RepositoryFactory, TestResult, TestRun};
-use testrepository::subunit_stream;
 use testrepository::ui::UI;
 
 /// Simple test UI that captures output for assertions
@@ -45,13 +42,6 @@ impl UI for TestUI {
     }
 }
 
-/// Create a test run subunit stream
-fn create_test_subunit_stream(run: &TestRun) -> Vec<u8> {
-    let mut buffer = Vec::new();
-    subunit_stream::write_stream(run, &mut buffer).unwrap();
-    buffer
-}
-
 #[test]
 fn test_full_workflow_init_load_last() {
     let temp = TempDir::new().unwrap();
@@ -75,17 +65,8 @@ fn test_full_workflow_init_load_last() {
     test_run.add_result(TestResult::failure("test2", "Failed"));
     test_run.add_result(TestResult::success("test3"));
 
-    let subunit_data = create_test_subunit_stream(&test_run);
-
-    // Write subunit to stdin-like file
-    let input_file = temp.path().join("subunit.stream");
-    fs::write(&input_file, subunit_data).unwrap();
-
-    let ui = TestUI::new();
-    let load_cmd = LoadCommand::new(Some(base_path.clone()));
-
-    // Simulate loading from stdin by reading the file
-    // For this test, we'll use the repository API directly
+    // Load the test run directly using the repository API
+    // (In real usage, this would be done via LoadCommand reading from stdin)
     let factory = testrepository::repository::file::FileRepositoryFactory;
     let mut repo = factory.open(temp.path()).unwrap();
     repo.insert_test_run(test_run).unwrap();
