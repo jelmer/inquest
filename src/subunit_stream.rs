@@ -12,6 +12,8 @@ use subunit::Event;
 ///
 /// This function catches panics from the subunit crate and converts them to proper errors.
 pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
+    use std::collections::HashMap;
+
     // The subunit crate can panic on invalid input, so we catch panics
     let events = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         subunit::parse_subunit(reader)
@@ -20,10 +22,21 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
     .map_err(|e| Error::Subunit(format!("Failed to parse subunit stream: {}", e)))?;
 
     let mut test_run = TestRun::new(run_id);
+    let mut start_times: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
 
     for event in events {
         if let Some(ref test_id_str) = event.test_id {
             let test_id = TestId::new(test_id_str.clone());
+
+            // Track start events for duration calculation
+            if let Some(ref status_str) = event.status {
+                if status_str == "inprogress" {
+                    if let Some(timestamp) = event.timestamp {
+                        start_times.insert(test_id_str.clone(), timestamp);
+                    }
+                    continue; // Don't add inprogress events to results
+                }
+            }
 
             // Convert subunit status to our TestStatus
             let status = if let Some(ref status_str) = event.status {
@@ -34,7 +47,7 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
                     "skip" => TestStatus::Skip,
                     "xfail" => TestStatus::ExpectedFailure,
                     "uxsuccess" => TestStatus::UnexpectedSuccess,
-                    _ => continue, // Skip events with unknown status (e.g., "inprogress", "exists")
+                    _ => continue, // Skip events with unknown status (e.g., "exists")
                 }
             } else {
                 continue; // Skip events without status
@@ -51,10 +64,19 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
                 (None, None)
             };
 
-            // TODO: Calculate duration from timestamps
-            // The subunit protocol doesn't directly provide duration,
-            // we'd need to track start/stop events
-            let duration = None;
+            // Calculate duration from start/stop timestamps
+            let duration = if let (Some(start_time), Some(end_time)) =
+                (start_times.get(test_id_str), event.timestamp)
+            {
+                let duration_secs = (end_time - *start_time).num_milliseconds();
+                if duration_secs >= 0 {
+                    Some(std::time::Duration::from_millis(duration_secs as u64))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             test_run.add_result(TestResult {
                 test_id,
@@ -75,6 +97,33 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
 /// This function catches panics from the subunit crate and converts them to proper errors.
 pub fn write_stream<W: Write>(test_run: &TestRun, mut writer: W) -> Result<()> {
     for result in test_run.results.values() {
+        // If we have duration information, write an "inprogress" event first
+        if let Some(duration) = result.duration {
+            // Calculate start time by subtracting duration from run timestamp
+            // Use seconds to avoid precision issues and chrono panics
+            let duration_secs = duration.as_secs() as i64;
+            let start_timestamp = test_run.timestamp - chrono::Duration::seconds(duration_secs);
+
+            let mut start_event = Event {
+                status: Some("inprogress".to_string()),
+                test_id: Some(result.test_id.as_str().to_string()),
+                timestamp: Some(start_timestamp),
+                file_name: None,
+                file_content: None,
+                mime_type: None,
+                route_code: None,
+                tags: if !result.tags.is_empty() {
+                    Some(result.tags.clone())
+                } else {
+                    None
+                },
+            };
+
+            start_event
+                .write(&mut writer)
+                .map_err(|e| Error::Subunit(format!("Failed to write subunit event: {}", e)))?;
+        }
+
         let status_str = match result.status {
             TestStatus::Success => "success",
             TestStatus::Failure => "fail",

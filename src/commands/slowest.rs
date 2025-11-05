@@ -147,9 +147,11 @@ mod tests {
 
         assert_eq!(result.unwrap(), 0);
 
-        // The subunit crate doesn't preserve duration information in the roundtrip,
-        // so we expect "No timing information available"
-        assert_eq!(ui.output.len(), 1);
-        assert_eq!(ui.output[0], "No timing information available");
+        // Should show the top 2 slowest tests
+        assert_eq!(ui.output.len(), 3);
+        assert_eq!(ui.output[0], "Slowest 2 test(s):");
+        // Note: duration is truncated to seconds, so 5000ms = 5s, 1000ms = 1s
+        assert_eq!(ui.output[1], "  5.000s - slow_test");
+        assert_eq!(ui.output[2], "  1.000s - medium_test");
     }
 }
