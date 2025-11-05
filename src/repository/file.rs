@@ -8,7 +8,7 @@
 //! - times.dbm: test timing database (NOT YET IMPLEMENTED - will use different format)
 
 use crate::error::{Error, Result};
-use crate::repository::{Repository, RepositoryFactory, TestId, TestRun};
+use crate::repository::{Repository, RepositoryFactory, TestId, TestResult, TestRun};
 use crate::subunit_stream;
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -100,6 +100,49 @@ impl FileRepository {
     fn get_run_path(&self, run_id: &str) -> PathBuf {
         self.path.join(run_id)
     }
+
+    fn get_failing_path(&self) -> PathBuf {
+        self.path.join("failing")
+    }
+
+    fn read_failing_run(&self) -> Result<HashMap<TestId, TestResult>> {
+        let path = self.get_failing_path();
+
+        if !path.exists() {
+            // No failing file yet, return empty
+            return Ok(HashMap::new());
+        }
+
+        // Read the failing subunit stream
+        let file = File::open(&path)?;
+        let test_run = subunit_stream::parse_stream(file, "failing".to_string())?;
+
+        Ok(test_run.results)
+    }
+
+    fn write_failing_run(&self, failing: &HashMap<TestId, TestResult>) -> Result<()> {
+        let path = self.get_failing_path();
+
+        if failing.is_empty() {
+            // Remove the failing file if there are no failures
+            if path.exists() {
+                fs::remove_file(&path)?;
+            }
+            return Ok(());
+        }
+
+        // Create a synthetic test run with just the failing tests
+        let mut test_run = TestRun::new("failing".to_string());
+        // Use a fixed timestamp for the failing run
+        test_run.timestamp =
+            chrono::DateTime::from_timestamp(1000000000, 0).unwrap_or_else(chrono::Utc::now);
+        test_run.results = failing.clone();
+
+        let file = File::create(&path)?;
+        subunit_stream::write_stream(&test_run, file)?;
+
+        Ok(())
+    }
 }
 
 impl Repository for FileRepository {
@@ -134,9 +177,42 @@ impl Repository for FileRepository {
         self.get_test_run(&run_id)
     }
 
+    fn update_failing_tests(&mut self, run: &TestRun) -> Result<()> {
+        // Read existing failing tests
+        let mut failing = self.read_failing_run()?;
+
+        // Update with results from this run
+        for result in run.results.values() {
+            if result.status.is_failure() {
+                // Add or update failure
+                failing.insert(result.test_id.clone(), result.clone());
+            } else if result.status.is_success() {
+                // Remove from failures if it passed
+                failing.remove(&result.test_id);
+            }
+        }
+
+        // Write back
+        self.write_failing_run(&failing)?;
+        Ok(())
+    }
+
+    fn replace_failing_tests(&mut self, run: &TestRun) -> Result<()> {
+        // Collect all failing tests from this run
+        let failing: HashMap<TestId, TestResult> = run
+            .results
+            .values()
+            .filter(|r| r.status.is_failure())
+            .map(|r| (r.test_id.clone(), r.clone()))
+            .collect();
+
+        self.write_failing_run(&failing)?;
+        Ok(())
+    }
+
     fn get_failing_tests(&self) -> Result<Vec<TestId>> {
-        // TODO: Read from 'failing' synthetic run
-        Ok(Vec::new())
+        let failing = self.read_failing_run()?;
+        Ok(failing.keys().cloned().collect())
     }
 
     fn get_test_times(&self) -> Result<HashMap<TestId, Duration>> {
@@ -276,5 +352,74 @@ mod tests {
         let repo = factory.initialise(temp.path()).unwrap();
         let result = repo.get_latest_run();
         assert!(matches!(result, Err(Error::NoTestRuns)));
+    }
+
+    #[test]
+    fn test_partial_run_update_failing() {
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        // First run: test1 fails, test2 passes
+        let mut run1 = TestRun::new("0".to_string());
+        run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run1.add_result(TestResult::failure("test1", "Failed"));
+        run1.add_result(TestResult::success("test2"));
+
+        repo.insert_test_run_partial(run1, false).unwrap();
+
+        // Check failing tests after first run
+        let failing = repo.get_failing_tests().unwrap();
+        assert_eq!(failing.len(), 1);
+        assert!(failing.iter().any(|id| id.as_str() == "test1"));
+
+        // Second partial run: test1 now passes, test3 fails
+        let mut run2 = TestRun::new("1".to_string());
+        run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
+        run2.add_result(TestResult::success("test1")); // Now passes
+        run2.add_result(TestResult::failure("test3", "Failed")); // New failure
+
+        repo.insert_test_run_partial(run2, true).unwrap(); // Partial mode
+
+        // Check failing tests after partial run
+        let failing = repo.get_failing_tests().unwrap();
+        assert_eq!(failing.len(), 1);
+        // test1 should be removed (it passed), test3 should be added
+        assert!(!failing.iter().any(|id| id.as_str() == "test1"));
+        assert!(failing.iter().any(|id| id.as_str() == "test3"));
+    }
+
+    #[test]
+    fn test_full_run_replaces_failing() {
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        // First run: test1 and test2 fail
+        let mut run1 = TestRun::new("0".to_string());
+        run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run1.add_result(TestResult::failure("test1", "Failed"));
+        run1.add_result(TestResult::failure("test2", "Failed"));
+
+        repo.insert_test_run_partial(run1, false).unwrap();
+
+        let failing = repo.get_failing_tests().unwrap();
+        assert_eq!(failing.len(), 2);
+
+        // Second full run: only test3 fails
+        let mut run2 = TestRun::new("1".to_string());
+        run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
+        run2.add_result(TestResult::success("test1"));
+        run2.add_result(TestResult::success("test2"));
+        run2.add_result(TestResult::failure("test3", "Failed"));
+
+        repo.insert_test_run_partial(run2, false).unwrap(); // Full mode
+
+        // Check that failing tests were replaced, not updated
+        let failing = repo.get_failing_tests().unwrap();
+        assert_eq!(failing.len(), 1);
+        assert!(failing.iter().any(|id| id.as_str() == "test3"));
+        assert!(!failing.iter().any(|id| id.as_str() == "test1"));
+        assert!(!failing.iter().any(|id| id.as_str() == "test2"));
     }
 }

@@ -13,6 +13,7 @@ pub struct LoadCommand {
     base_path: Option<String>,
     input: Option<Box<dyn Read>>,
     force_init: bool,
+    partial: bool,
 }
 
 impl LoadCommand {
@@ -21,6 +22,7 @@ impl LoadCommand {
             base_path,
             input: None,
             force_init: false,
+            partial: false,
         }
     }
 
@@ -29,6 +31,16 @@ impl LoadCommand {
             base_path,
             input: None,
             force_init: true,
+            partial: false,
+        }
+    }
+
+    pub fn with_partial(base_path: Option<String>, partial: bool, force_init: bool) -> Self {
+        LoadCommand {
+            base_path,
+            input: None,
+            force_init,
+            partial,
         }
     }
 
@@ -37,6 +49,7 @@ impl LoadCommand {
             base_path,
             input: Some(input),
             force_init: false,
+            partial: false,
         }
     }
 }
@@ -71,8 +84,8 @@ impl Command for LoadCommand {
         // Parse the subunit stream
         let test_run = subunit_stream::parse_stream(&mut *input, run_id.clone())?;
 
-        // Insert into repository
-        let inserted_id = repo.insert_test_run(test_run.clone())?;
+        // Insert into repository (with partial mode support)
+        let inserted_id = repo.insert_test_run_partial(test_run.clone(), self.partial)?;
 
         ui.output(&format!(
             "Loaded {} test(s) as run {}",

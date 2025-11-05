@@ -28,6 +28,10 @@ enum Commands {
         /// Create repository if it doesn't exist
         #[arg(long)]
         force_init: bool,
+
+        /// Partial run mode (update failing tests additively)
+        #[arg(long)]
+        partial: bool,
     },
 
     /// Show results from the last test run
@@ -68,6 +72,10 @@ enum Commands {
         /// Create repository if it doesn't exist
         #[arg(long)]
         force_init: bool,
+
+        /// Partial run mode (update failing tests additively)
+        #[arg(long)]
+        partial: bool,
     },
 }
 
@@ -101,12 +109,11 @@ fn main() {
             let cmd = InitCommand::new(cli.directory);
             cmd.execute(&mut ui)
         }
-        Commands::Load { force_init } => {
-            let cmd = if force_init {
-                LoadCommand::with_force_init(cli.directory)
-            } else {
-                LoadCommand::new(cli.directory)
-            };
+        Commands::Load {
+            force_init,
+            partial,
+        } => {
+            let cmd = LoadCommand::with_partial(cli.directory, partial, force_init);
             cmd.execute(&mut ui)
         }
         Commands::Last => {
@@ -137,14 +144,9 @@ fn main() {
         Commands::Run {
             failing,
             force_init,
+            partial,
         } => {
-            let cmd = if force_init {
-                RunCommand::with_force_init(cli.directory, failing)
-            } else if failing {
-                RunCommand::with_failing_only(cli.directory)
-            } else {
-                RunCommand::new(cli.directory)
-            };
+            let cmd = RunCommand::with_partial(cli.directory, partial, failing, force_init);
             cmd.execute(&mut ui)
         }
     };

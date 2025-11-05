@@ -21,6 +21,33 @@ pub trait Repository {
     /// Insert a test run, returning the assigned run ID
     fn insert_test_run(&mut self, run: TestRun) -> Result<String>;
 
+    /// Insert a partial test run
+    ///
+    /// In partial mode, the failing test tracking is additive:
+    /// - Keeps existing failures
+    /// - Adds new failures from this run
+    /// - Removes tests that now pass
+    ///
+    /// In full (non-partial) mode, all previous failures are cleared.
+    fn insert_test_run_partial(&mut self, run: TestRun, partial: bool) -> Result<String> {
+        if partial {
+            // Update the failing tests before inserting
+            self.update_failing_tests(&run)?;
+        } else {
+            // Clear and replace failing tests
+            self.replace_failing_tests(&run)?;
+        }
+
+        // Insert the run normally
+        self.insert_test_run(run)
+    }
+
+    /// Update failing tests additively (for partial runs)
+    fn update_failing_tests(&mut self, run: &TestRun) -> Result<()>;
+
+    /// Replace all failing tests (for full runs)
+    fn replace_failing_tests(&mut self, run: &TestRun) -> Result<()>;
+
     /// Get the latest test run
     fn get_latest_run(&self) -> Result<TestRun>;
 

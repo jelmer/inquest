@@ -13,6 +13,7 @@ pub struct RunCommand {
     base_path: Option<String>,
     failing_only: bool,
     force_init: bool,
+    partial: bool,
 }
 
 impl RunCommand {
@@ -21,6 +22,7 @@ impl RunCommand {
             base_path,
             failing_only: false,
             force_init: false,
+            partial: false,
         }
     }
 
@@ -29,6 +31,7 @@ impl RunCommand {
             base_path,
             failing_only: true,
             force_init: false,
+            partial: true, // --failing implies partial mode
         }
     }
 
@@ -37,6 +40,21 @@ impl RunCommand {
             base_path,
             failing_only,
             force_init: true,
+            partial: failing_only, // --failing implies partial mode
+        }
+    }
+
+    pub fn with_partial(
+        base_path: Option<String>,
+        partial: bool,
+        failing_only: bool,
+        force_init: bool,
+    ) -> Self {
+        RunCommand {
+            base_path,
+            failing_only,
+            force_init,
+            partial,
         }
     }
 }
@@ -95,8 +113,8 @@ impl Command for RunCommand {
             .wait()
             .map_err(|e| crate::error::Error::CommandExecution(format!("Failed to wait: {}", e)))?;
 
-        // Insert into repository
-        let inserted_id = repo.insert_test_run(test_run.clone())?;
+        // Insert into repository (with partial mode support)
+        let inserted_id = repo.insert_test_run_partial(test_run.clone(), self.partial)?;
 
         ui.output(&format!(
             "Ran {} test(s) as run {}",
