@@ -23,6 +23,15 @@ enum Commands {
     /// Initialize a new test repository
     Init,
 
+    /// Show help information for commands
+    Help {
+        /// Command to show help for
+        command: Option<String>,
+    },
+
+    /// Show quickstart documentation
+    Quickstart,
+
     /// Load test results from stdin
     Load {
         /// Create repository if it doesn't exist
@@ -121,6 +130,14 @@ fn main() {
             let cmd = InitCommand::new(cli.directory);
             cmd.execute(&mut ui)
         }
+        Commands::Help { command } => {
+            let cmd = HelpCommand::new(command);
+            cmd.execute(&mut ui)
+        }
+        Commands::Quickstart => {
+            let cmd = QuickstartCommand::new();
+            cmd.execute(&mut ui)
+        }
         Commands::Load {
             force_init,
             partial,
@@ -171,6 +188,7 @@ fn main() {
                 failing,
                 force_init,
                 load_list,
+                None, // TODO: Add --parallel flag
             );
             cmd.execute(&mut ui)
         }

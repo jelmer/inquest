@@ -14,6 +14,7 @@ pub struct RunCommand {
     force_init: bool,
     partial: bool,
     load_list: Option<String>,
+    concurrency: Option<usize>,
 }
 
 impl RunCommand {
@@ -24,6 +25,7 @@ impl RunCommand {
             force_init: false,
             partial: false,
             load_list: None,
+            concurrency: None,
         }
     }
 
@@ -34,6 +36,7 @@ impl RunCommand {
             force_init: false,
             partial: true, // --failing implies partial mode
             load_list: None,
+            concurrency: None,
         }
     }
 
@@ -44,6 +47,7 @@ impl RunCommand {
             force_init: true,
             partial: failing_only, // --failing implies partial mode
             load_list: None,
+            concurrency: None,
         }
     }
 
@@ -59,6 +63,7 @@ impl RunCommand {
             force_init,
             partial,
             load_list: None,
+            concurrency: None,
         }
     }
 
@@ -68,6 +73,7 @@ impl RunCommand {
         failing_only: bool,
         force_init: bool,
         load_list: Option<String>,
+        concurrency: Option<usize>,
     ) -> Self {
         RunCommand {
             base_path,
@@ -75,6 +81,7 @@ impl RunCommand {
             force_init,
             partial,
             load_list,
+            concurrency,
         }
     }
 }

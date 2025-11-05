@@ -71,6 +71,7 @@
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod partition;
 pub mod repository;
 pub mod subunit_stream;
 pub mod testcommand;

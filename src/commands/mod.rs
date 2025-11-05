@@ -6,20 +6,24 @@ use crate::error::Result;
 use crate::ui::UI;
 
 pub mod failing;
+pub mod help;
 pub mod init;
 pub mod last;
 pub mod list_tests;
 pub mod load;
+pub mod quickstart;
 pub mod run;
 pub mod slowest;
 pub mod stats;
 mod utils;
 
 pub use failing::FailingCommand;
+pub use help::HelpCommand;
 pub use init::InitCommand;
 pub use last::LastCommand;
 pub use list_tests::ListTestsCommand;
 pub use load::LoadCommand;
+pub use quickstart::QuickstartCommand;
 pub use run::RunCommand;
 pub use slowest::SlowestCommand;
 pub use stats::StatsCommand;

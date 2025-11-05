@@ -333,6 +333,7 @@ test_command=echo "test1"
         false,
         false,
         Some("/nonexistent/list.txt".to_string()),
+        None,
     );
     let result = cmd.execute(&mut ui);
 
