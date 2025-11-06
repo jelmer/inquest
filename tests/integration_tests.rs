@@ -484,3 +484,32 @@ test_list_option=--list
     assert_eq!(cmd.name(), "analyze-isolation");
     assert_eq!(cmd.help(), "Analyze test isolation issues using bisection");
 }
+
+#[test]
+fn test_group_regex_with_parallel_execution() {
+    use testrepository::testcommand::TestCommand;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    // Initialize repository
+    let mut ui = TestUI::new();
+    let init_cmd = InitCommand::new(Some(base_path.clone()));
+    init_cmd.execute(&mut ui).unwrap();
+
+    // Create .testr.conf with group_regex to group by module
+    let config = r#"
+[DEFAULT]
+test_command=echo ""
+test_list_option=--list
+group_regex=^([^.]+)\.
+"#;
+    fs::write(temp.path().join(".testr.conf"), config).unwrap();
+
+    // Load TestCommand and verify group_regex is set
+    let test_cmd = TestCommand::from_directory(temp.path()).unwrap();
+    assert_eq!(
+        test_cmd.config().group_regex,
+        Some("^([^.]+)\\.".to_string())
+    );
+}

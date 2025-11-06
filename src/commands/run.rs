@@ -191,8 +191,17 @@ impl RunCommand {
         // Get historical test durations
         let durations = repo.get_test_times()?;
 
+        // Get group_regex from config if present
+        let group_regex = test_cmd.config().group_regex.as_deref();
+
         // Partition tests across workers
-        let partitions = crate::partition::partition_tests(&all_tests, &durations, concurrency);
+        let partitions = crate::partition::partition_tests_with_grouping(
+            &all_tests,
+            &durations,
+            concurrency,
+            group_regex,
+        )
+        .map_err(|e| crate::error::Error::Config(format!("Invalid group_regex pattern: {}", e)))?;
 
         ui.output(&format!(
             "Running {} tests across {} workers",
