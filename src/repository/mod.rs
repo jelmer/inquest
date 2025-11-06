@@ -14,6 +14,42 @@ pub mod test_run;
 pub use test_run::{TestId, TestResult, TestRun, TestStatus};
 
 /// Abstract repository trait for test result storage
+///
+/// # Examples
+///
+/// ```
+/// use testrepository::repository::{Repository, RepositoryFactory, TestResult, TestRun};
+/// use testrepository::repository::file::FileRepositoryFactory;
+/// use tempfile::TempDir;
+///
+/// # fn main() -> testrepository::error::Result<()> {
+/// // Create a temporary directory for the repository
+/// let temp = TempDir::new().unwrap();
+///
+/// // Initialize a new repository
+/// let factory = FileRepositoryFactory;
+/// let mut repo = factory.initialise(temp.path())?;
+///
+/// // Create a test run with results
+/// let mut test_run = TestRun::new("0".to_string());
+/// test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+/// test_run.add_result(TestResult::success("test_example::test_passing"));
+/// test_run.add_result(TestResult::failure("test_example::test_failing", "assertion failed"));
+///
+/// // Insert the test run
+/// let run_id = repo.insert_test_run(test_run)?;
+/// println!("Inserted test run with ID: {}", run_id);
+///
+/// // Retrieve the latest run
+/// let latest = repo.get_latest_run()?;
+/// println!("Latest run has {} tests", latest.total_tests());
+///
+/// // Get failing tests
+/// let failing = repo.get_failing_tests()?;
+/// println!("Found {} failing tests", failing.len());
+/// # Ok(())
+/// # }
+/// ```
 pub trait Repository {
     /// Get a specific test run by ID
     fn get_test_run(&self, run_id: &str) -> Result<TestRun>;
