@@ -6,6 +6,12 @@ use crate::ui::UI;
 
 pub struct QuickstartCommand;
 
+impl Default for QuickstartCommand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QuickstartCommand {
     pub fn new() -> Self {
         QuickstartCommand

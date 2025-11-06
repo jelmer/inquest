@@ -77,6 +77,7 @@ impl RunCommand {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn with_all_options(
         base_path: Option<String>,
         partial: bool,
@@ -322,7 +323,8 @@ impl RunCommand {
             ui.output(&format!("  [{}/{}] {}", idx + 1, test_ids.len(), test_id))?;
 
             // Build command for this single test
-            let (cmd_str, _temp_file) = test_cmd.build_command(Some(&[test_id.clone()]), false)?;
+            let (cmd_str, _temp_file) =
+                test_cmd.build_command(Some(std::slice::from_ref(test_id)), false)?;
 
             // Spawn process for this test
             let output = Command::new("sh")

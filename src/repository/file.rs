@@ -144,6 +144,7 @@ impl FileRepository {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn get_test_times_for_ids(&self, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
         let times_path = self.path.join("times.dbm");
 
