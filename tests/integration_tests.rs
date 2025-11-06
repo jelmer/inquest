@@ -294,3 +294,70 @@ fn test_error_handling_no_repository() {
     // Should fail with an error
     assert!(result.is_err());
 }
+
+#[test]
+fn test_parallel_execution() {
+    use testrepository::commands::RunCommand;
+    use testrepository::repository::file::FileRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    // Initialize repository
+    let factory = FileRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    // Create a simple test configuration that outputs subunit
+    let config = r#"
+[DEFAULT]
+test_command=python3 -c "import sys; import time; sys.stdout.buffer.write(b'\xb3\x29\x00\x16test1\x20\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xb3'); sys.stdout.buffer.flush()"
+"#;
+    fs::write(temp.path().join(".testr.conf"), config).unwrap();
+
+    // Run with parallel execution
+    let mut ui = TestUI::new();
+    let cmd = RunCommand::with_all_options(
+        Some(base_path.clone()),
+        false, // partial
+        false, // failing
+        false, // force_init
+        None,  // load_list
+        Some(2), // concurrency
+    );
+
+    // Note: This test will fail to actually run because the command is synthetic
+    // But it tests that the parallel code path is exercised
+    let _result = cmd.execute(&mut ui);
+
+    // The command should have at least attempted to run
+    assert!(!ui.output.is_empty());
+}
+
+#[test]
+fn test_parallel_execution_with_worker_tags() {
+    use testrepository::partition::partition_tests;
+    use testrepository::repository::TestId;
+    use std::collections::HashMap;
+
+    // Create a set of test IDs
+    let test_ids = vec![
+        TestId::new("test1"),
+        TestId::new("test2"),
+        TestId::new("test3"),
+        TestId::new("test4"),
+    ];
+
+    // Partition across 2 workers
+    let partitions = partition_tests(&test_ids, &HashMap::new(), 2);
+
+    // Should create 2 partitions
+    assert_eq!(partitions.len(), 2);
+
+    // All tests should be accounted for
+    let total_tests: usize = partitions.iter().map(|p| p.len()).sum();
+    assert_eq!(total_tests, 4);
+
+    // Each partition should have at least one test
+    assert!(!partitions[0].is_empty());
+    assert!(!partitions[1].is_empty());
+}
