@@ -84,6 +84,205 @@ impl RunCommand {
             concurrency,
         }
     }
+
+    /// Run tests serially (single process)
+    fn run_serial(
+        &self,
+        ui: &mut dyn UI,
+        repo: &mut Box<dyn crate::repository::Repository>,
+        test_cmd: &TestCommand,
+        test_ids: Option<&[crate::repository::TestId]>,
+        run_id: String,
+    ) -> Result<i32> {
+        use std::process::{Command, Stdio};
+
+        // Build command with test IDs if provided
+        let (cmd_str, _temp_file) = test_cmd.build_command(test_ids, false)?;
+
+        // Execute test command
+        ui.output(&format!("Running: {}", cmd_str))?;
+
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&cmd_str)
+            .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| {
+                crate::error::Error::CommandExecution(format!(
+                    "Failed to execute test command: {}",
+                    e
+                ))
+            })?;
+
+        // Check if command succeeded
+        let command_failed = !output.status.success();
+
+        // Parse subunit output
+        let test_run = subunit_stream::parse_stream(output.stdout.as_slice(), run_id)?;
+
+        // Store results
+        if self.partial {
+            repo.insert_test_run_partial(test_run.clone(), true)?;
+        } else {
+            repo.insert_test_run(test_run.clone())?;
+        }
+
+        // Display summary
+        let total = test_run.total_tests();
+        let failures = test_run.count_failures();
+        let successes = test_run.count_successes();
+
+        ui.output("\nTest run complete:")?;
+        ui.output(&format!("  Total:   {}", total))?;
+        ui.output(&format!("  Passed:  {}", successes))?;
+        ui.output(&format!("  Failed:  {}", failures))?;
+
+        // Return exit code based on results
+        if failures > 0 || command_failed {
+            Ok(1)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Run tests in parallel across multiple workers
+    fn run_parallel(
+        &self,
+        ui: &mut dyn UI,
+        repo: &mut Box<dyn crate::repository::Repository>,
+        test_cmd: &TestCommand,
+        test_ids: Option<&[crate::repository::TestId]>,
+        run_id: String,
+        concurrency: usize,
+    ) -> Result<i32> {
+        use std::collections::HashMap;
+        use std::process::{Command, Stdio};
+
+        // Get the list of tests to run
+        let all_tests = if let Some(ids) = test_ids {
+            ids.to_vec()
+        } else {
+            // Need to list all tests
+            test_cmd.list_tests()?
+        };
+
+        if all_tests.is_empty() {
+            ui.output("No tests to run")?;
+            return Ok(0);
+        }
+
+        // Get historical test durations
+        let durations = repo.get_test_times()?;
+
+        // Partition tests across workers
+        let partitions = crate::partition::partition_tests(&all_tests, &durations, concurrency);
+
+        ui.output(&format!(
+            "Running {} tests across {} workers",
+            all_tests.len(),
+            concurrency
+        ))?;
+
+        // Spawn worker processes
+        let mut workers = Vec::new();
+        for (worker_id, partition) in partitions.iter().enumerate() {
+            if partition.is_empty() {
+                continue;
+            }
+
+            ui.output(&format!("Worker {}: {} tests", worker_id, partition.len()))?;
+
+            // Build command for this partition
+            let (cmd_str, _temp_file) = test_cmd.build_command(Some(partition), false)?;
+
+            // Spawn the worker process
+            let child = Command::new("sh")
+                .arg("-c")
+                .arg(&cmd_str)
+                .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| {
+                    crate::error::Error::CommandExecution(format!(
+                        "Failed to spawn worker {}: {}",
+                        worker_id, e
+                    ))
+                })?;
+
+            workers.push((worker_id, child, _temp_file));
+        }
+
+        // Wait for all workers to complete and collect results
+        let mut all_results = HashMap::new();
+        let mut any_failed = false;
+
+        for (worker_id, child, _temp_file) in workers {
+            let output = child.wait_with_output().map_err(|e| {
+                crate::error::Error::CommandExecution(format!(
+                    "Failed to wait for worker {}: {}",
+                    worker_id, e
+                ))
+            })?;
+
+            if !output.status.success() {
+                ui.warning(&format!("Worker {} exited with non-zero status", worker_id))?;
+                any_failed = true;
+            }
+
+            // Parse worker results
+            let worker_run_id = format!("{}-{}", run_id, worker_id);
+            let mut worker_run =
+                subunit_stream::parse_stream(output.stdout.as_slice(), worker_run_id)?;
+
+            // Add worker tag to all results
+            let worker_tag = format!("worker-{}", worker_id);
+            for (_, result) in worker_run.results.iter_mut() {
+                if !result.tags.contains(&worker_tag) {
+                    result.tags.push(worker_tag.clone());
+                }
+            }
+
+            // Collect results
+            for (test_id, result) in worker_run.results {
+                all_results.insert(test_id, result);
+            }
+        }
+
+        // Create combined test run
+        let mut combined_run = crate::repository::TestRun::new(run_id);
+        combined_run.timestamp = chrono::Utc::now();
+
+        for (_, result) in all_results {
+            combined_run.add_result(result);
+        }
+
+        // Store combined results
+        if self.partial {
+            repo.insert_test_run_partial(combined_run.clone(), true)?;
+        } else {
+            repo.insert_test_run(combined_run.clone())?;
+        }
+
+        // Display summary
+        let total = combined_run.total_tests();
+        let failures = combined_run.count_failures();
+        let successes = combined_run.count_successes();
+
+        ui.output("\nTest run complete:")?;
+        ui.output(&format!("  Total:   {}", total))?;
+        ui.output(&format!("  Passed:  {}", successes))?;
+        ui.output(&format!("  Failed:  {}", failures))?;
+
+        // Return exit code based on results
+        if failures > 0 || any_failed {
+            Ok(1)
+        } else {
+            Ok(0)
+        }
+    }
 }
 
 impl Command for RunCommand {
@@ -134,45 +333,25 @@ impl Command for RunCommand {
             }
         }
 
-        // Run tests
-        ui.output("Running tests...")?;
-        let mut child = test_cmd.run_tests(test_ids.as_deref())?;
-
-        // Read subunit output from stdout
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| crate::error::Error::CommandExecution("No stdout".to_string()))?;
-
         // Get the next run ID
         let run_id = repo.get_next_run_id()?.to_string();
 
-        // Parse the subunit stream
-        let test_run = subunit_stream::parse_stream(stdout, run_id.clone())?;
+        // Check if we should run in parallel
+        let concurrency = self.concurrency.unwrap_or(1);
 
-        // Wait for the process to complete
-        let status = child
-            .wait()
-            .map_err(|e| crate::error::Error::CommandExecution(format!("Failed to wait: {}", e)))?;
-
-        // Insert into repository (with partial mode support)
-        let inserted_id = repo.insert_test_run_partial(test_run.clone(), self.partial)?;
-
-        ui.output(&format!(
-            "Ran {} test(s) as run {}",
-            test_run.total_tests(),
-            inserted_id
-        ))?;
-
-        if test_run.count_failures() > 0 {
-            ui.output(&format!("{} test(s) failed", test_run.count_failures()))?;
-            Ok(1)
-        } else if !status.success() {
-            ui.output("Test runner failed")?;
-            Ok(status.code().unwrap_or(1))
+        if concurrency > 1 {
+            // Parallel execution
+            self.run_parallel(
+                ui,
+                &mut repo,
+                &test_cmd,
+                test_ids.as_deref(),
+                run_id,
+                concurrency,
+            )
         } else {
-            ui.output("All tests passed")?;
-            Ok(0)
+            // Serial execution
+            self.run_serial(ui, &mut repo, &test_cmd, test_ids.as_deref(), run_id)
         }
     }
 

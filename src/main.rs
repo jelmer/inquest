@@ -9,6 +9,7 @@ use testrepository::ui::UI;
 #[derive(Parser)]
 #[command(name = "testr")]
 #[command(about = "Test repository management tool", long_about = None)]
+#[command(disable_help_subcommand = true)]
 struct Cli {
     /// Repository path (defaults to current directory)
     #[arg(short = 'C', long, global = true)]
@@ -97,6 +98,10 @@ enum Commands {
         /// Only run tests listed in the named file (one test ID per line)
         #[arg(long)]
         load_list: Option<String>,
+
+        /// Run tests in parallel across multiple workers
+        #[arg(long, short = 'j', value_name = "N")]
+        parallel: Option<usize>,
     },
 }
 
@@ -181,6 +186,7 @@ fn main() {
             force_init,
             partial,
             load_list,
+            parallel,
         } => {
             let cmd = RunCommand::with_all_options(
                 cli.directory,
@@ -188,7 +194,7 @@ fn main() {
                 failing,
                 force_init,
                 load_list,
-                None, // TODO: Add --parallel flag
+                parallel,
             );
             cmd.execute(&mut ui)
         }
