@@ -6,7 +6,9 @@
 use std::fs;
 use std::io::Write;
 use tempfile::TempDir;
-use testrepository::commands::{Command, FailingCommand, InitCommand, LastCommand, StatsCommand};
+use testrepository::commands::{
+    AnalyzeIsolationCommand, Command, FailingCommand, InitCommand, LastCommand, StatsCommand,
+};
 use testrepository::repository::{RepositoryFactory, TestResult, TestRun};
 use testrepository::ui::UI;
 
@@ -337,9 +339,9 @@ test_command=python3 -c "import sys; import time; sys.stdout.buffer.write(b'\xb3
 
 #[test]
 fn test_parallel_execution_with_worker_tags() {
+    use std::collections::HashMap;
     use testrepository::partition::partition_tests;
     use testrepository::repository::TestId;
-    use std::collections::HashMap;
 
     // Create a set of test IDs
     let test_ids = vec![
@@ -436,4 +438,49 @@ test_command=echo ""
 
     // Verify the command was created successfully
     assert_eq!(cmd.name(), "run");
+}
+
+#[test]
+fn test_analyze_isolation_command_no_repository() {
+    // Test that analyze-isolation gives proper error when repository doesn't exist
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let mut ui = TestUI::new();
+    let cmd = AnalyzeIsolationCommand::new(Some(base_path.clone()), "test_example".to_string());
+
+    // Should fail because no repository exists
+    let result = cmd.execute(&mut ui);
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Repository not found"));
+}
+
+#[test]
+fn test_analyze_isolation_command_basic() {
+    // Test that analyze-isolation command can be created and has correct metadata
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    // Initialize repository
+    let mut ui = TestUI::new();
+    let init_cmd = InitCommand::new(Some(base_path.clone()));
+    init_cmd.execute(&mut ui).unwrap();
+
+    // Create .testr.conf with a simple command that outputs passing test
+    let config = r#"
+[DEFAULT]
+test_command=printf "test: test_target\nsuccess: test_target\n" | python3 -c "import sys; sys.stdout.buffer.write(b'\xb3)\x00\x00\x01\x1btest: test_target\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x05\xb3*\x00\x00\x00\x1asuccess: test_target\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x05')"
+test_list_option=--list
+"#;
+    fs::write(temp.path().join(".testr.conf"), config).unwrap();
+
+    // Create the analyze-isolation command
+    let cmd = AnalyzeIsolationCommand::new(Some(base_path), "test_target".to_string());
+
+    // Verify command metadata
+    assert_eq!(cmd.name(), "analyze-isolation");
+    assert_eq!(cmd.help(), "Analyze test isolation issues using bisection");
 }

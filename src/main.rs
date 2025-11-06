@@ -6,6 +6,9 @@ use testrepository::commands::*;
 use testrepository::error::Result;
 use testrepository::ui::UI;
 
+// Explicit imports for commands not covered by wildcard
+use testrepository::commands::AnalyzeIsolationCommand;
+
 #[derive(Parser)]
 #[command(name = "testr")]
 #[command(about = "Test repository management tool", long_about = None)]
@@ -80,6 +83,13 @@ enum Commands {
     /// List all available tests
     #[command(name = "list-tests")]
     ListTests,
+
+    /// Analyze test isolation issues using bisection
+    #[command(name = "analyze-isolation")]
+    AnalyzeIsolation {
+        /// The test to analyze for isolation issues
+        test: String,
+    },
 
     /// Run tests and load results
     Run {
@@ -187,6 +197,10 @@ fn main() {
         }
         Commands::ListTests => {
             let cmd = ListTestsCommand::new(cli.directory);
+            cmd.execute(&mut ui)
+        }
+        Commands::AnalyzeIsolation { test } => {
+            let cmd = AnalyzeIsolationCommand::new(cli.directory, test);
             cmd.execute(&mut ui)
         }
         Commands::Run {
