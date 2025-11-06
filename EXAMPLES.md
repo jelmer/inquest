@@ -60,6 +60,26 @@ test_id_option=--tests=$IDFILE
 test_id_list_default=all
 ```
 
+### Dynamic Concurrency
+
+```ini
+[DEFAULT]
+test_command=python -m subunit.run $IDOPTION
+test_id_option=$IDLIST
+# Automatically detect CPU count
+test_run_concurrency=nproc
+```
+
+For more complex scenarios:
+
+```ini
+[DEFAULT]
+test_command=python -m subunit.run $IDOPTION
+test_id_option=$IDLIST
+# Custom script to determine concurrency
+test_run_concurrency=./scripts/get-worker-count.sh
+```
+
 ## Common Usage Patterns
 
 ### Initial Setup
@@ -83,6 +103,9 @@ testr run --failing
 
 # Run tests in isolation to find interactions
 testr run --failing --isolated
+
+# Analyze which tests cause isolation failures
+testr analyze-isolation my_module.test_flaky
 
 # Run until failure to catch flaky tests
 testr run --until-failure
@@ -251,4 +274,25 @@ testr run --isolated
 
 # Check worker-specific failures
 testr last | grep worker-
+```
+
+### Test Isolation Failures
+
+When a test passes in isolation but fails when run with other tests:
+
+```bash
+# Step 1: Verify the test fails with others
+testr run
+
+# Step 2: Verify it passes in isolation
+testr run --isolated test_module.test_flaky
+
+# Step 3: Find the minimal set of tests causing the issue
+testr analyze-isolation test_module.test_flaky
+
+# The command will output which tests cause the failure
+# Example output:
+# Found minimal set of 2 tests causing isolation failure:
+#   - test_module.test_setup_state
+#   - test_module.test_cleanup_missing
 ```
