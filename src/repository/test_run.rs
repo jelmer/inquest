@@ -197,6 +197,39 @@ impl TestRun {
         self.results.len()
     }
 
+    /// Check if a result matches the given tag filter
+    fn matches_filter(result: &TestResult, filter_tags: &[String]) -> bool {
+        if filter_tags.is_empty() {
+            return true;
+        }
+        // Result matches if it has any of the filter tags
+        result.tags.iter().any(|tag| filter_tags.contains(tag))
+    }
+
+    /// Count failures matching the given tags
+    pub fn count_failures_filtered(&self, filter_tags: &[String]) -> usize {
+        self.results
+            .values()
+            .filter(|r| Self::matches_filter(r, filter_tags) && r.status.is_failure())
+            .count()
+    }
+
+    /// Count successes matching the given tags
+    pub fn count_successes_filtered(&self, filter_tags: &[String]) -> usize {
+        self.results
+            .values()
+            .filter(|r| Self::matches_filter(r, filter_tags) && r.status.is_success())
+            .count()
+    }
+
+    /// Count total tests matching the given tags
+    pub fn total_tests_filtered(&self, filter_tags: &[String]) -> usize {
+        self.results
+            .values()
+            .filter(|r| Self::matches_filter(r, filter_tags))
+            .count()
+    }
+
     pub fn get_failing_tests(&self) -> Vec<&TestId> {
         self.results
             .values()
@@ -318,5 +351,69 @@ mod tests {
     fn test_result_with_tag() {
         let result = TestResult::success("test1").with_tag("slow");
         assert_eq!(result.tags, vec!["slow"]);
+    }
+
+    #[test]
+    fn test_filtered_counts_empty_filter() {
+        let mut run = TestRun::new("0".to_string());
+
+        run.add_result(TestResult::success("test1").with_tag("worker-0"));
+        run.add_result(TestResult::failure("test2", "Failed").with_tag("worker-1"));
+
+        // Empty filter should match all results
+        assert_eq!(run.total_tests_filtered(&[]), 2);
+        assert_eq!(run.count_successes_filtered(&[]), 1);
+        assert_eq!(run.count_failures_filtered(&[]), 1);
+    }
+
+    #[test]
+    fn test_filtered_counts_with_tags() {
+        let mut run = TestRun::new("0".to_string());
+
+        run.add_result(TestResult::success("test1").with_tag("worker-0"));
+        run.add_result(TestResult::failure("test2", "Failed").with_tag("worker-0"));
+        run.add_result(TestResult::success("test3").with_tag("worker-1"));
+        run.add_result(TestResult::failure("test4", "Failed").with_tag("worker-1"));
+
+        // Filter by worker-0
+        let filter = vec!["worker-0".to_string()];
+        assert_eq!(run.total_tests_filtered(&filter), 2);
+        assert_eq!(run.count_successes_filtered(&filter), 1);
+        assert_eq!(run.count_failures_filtered(&filter), 1);
+
+        // Filter by worker-1
+        let filter = vec!["worker-1".to_string()];
+        assert_eq!(run.total_tests_filtered(&filter), 2);
+        assert_eq!(run.count_successes_filtered(&filter), 1);
+        assert_eq!(run.count_failures_filtered(&filter), 1);
+    }
+
+    #[test]
+    fn test_filtered_counts_no_match() {
+        let mut run = TestRun::new("0".to_string());
+
+        run.add_result(TestResult::success("test1").with_tag("worker-0"));
+
+        // Filter by non-existent tag
+        let filter = vec!["worker-99".to_string()];
+        assert_eq!(run.total_tests_filtered(&filter), 0);
+        assert_eq!(run.count_successes_filtered(&filter), 0);
+        assert_eq!(run.count_failures_filtered(&filter), 0);
+    }
+
+    #[test]
+    fn test_filtered_counts_multiple_tags() {
+        let mut run = TestRun::new("0".to_string());
+
+        run.add_result(
+            TestResult::success("test1")
+                .with_tag("worker-0")
+                .with_tag("slow"),
+        );
+        run.add_result(TestResult::success("test2").with_tag("worker-1"));
+
+        // Filter should match if result has ANY of the filter tags
+        let filter = vec!["slow".to_string()];
+        assert_eq!(run.total_tests_filtered(&filter), 1);
     }
 }
