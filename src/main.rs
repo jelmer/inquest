@@ -106,6 +106,10 @@ enum Commands {
         /// Run tests repeatedly until they fail
         #[arg(long)]
         until_failure: bool,
+
+        /// Run each test in a separate process (completely isolated)
+        #[arg(long)]
+        isolated: bool,
     },
 }
 
@@ -192,6 +196,7 @@ fn main() {
             load_list,
             parallel,
             until_failure,
+            isolated,
         } => {
             let cmd = RunCommand::with_all_options(
                 cli.directory,
@@ -201,6 +206,7 @@ fn main() {
                 load_list,
                 parallel,
                 until_failure,
+                isolated,
             );
             cmd.execute(&mut ui)
         }

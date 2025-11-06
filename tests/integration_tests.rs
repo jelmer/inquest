@@ -324,6 +324,7 @@ test_command=python3 -c "import sys; import time; sys.stdout.buffer.write(b'\xb3
         None,    // load_list
         Some(2), // concurrency
         false,   // until_failure
+        false,   // isolated
     );
 
     // Note: This test will fail to actually run because the command is synthetic
@@ -393,10 +394,46 @@ test_command=echo ""
         None,  // load_list
         None,  // concurrency
         true,  // until_failure
+        false, // isolated
     );
 
     // Verify the command was created successfully
     // (The actual looping behavior would run infinitely with always-passing tests,
     // so we just verify the command can be constructed with the flag)
+    assert_eq!(cmd.name(), "run");
+}
+
+#[test]
+fn test_isolated_flag_behavior() {
+    use testrepository::commands::RunCommand;
+    use testrepository::repository::file::FileRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    // Initialize repository
+    let factory = FileRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    // Create a simple test configuration
+    let config = r#"
+[DEFAULT]
+test_command=echo ""
+"#;
+    fs::write(temp.path().join(".testr.conf"), config).unwrap();
+
+    // Create command with isolated set to true
+    let cmd = RunCommand::with_all_options(
+        Some(base_path.clone()),
+        false, // partial
+        false, // failing
+        false, // force_init
+        None,  // load_list
+        None,  // concurrency
+        false, // until_failure
+        true,  // isolated
+    );
+
+    // Verify the command was created successfully
     assert_eq!(cmd.name(), "run");
 }

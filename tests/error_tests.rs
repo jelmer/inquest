@@ -335,6 +335,7 @@ test_command=echo "test1"
         Some("/nonexistent/list.txt".to_string()),
         None,
         false, // until_failure
+        false, // isolated
     );
     let result = cmd.execute(&mut ui);
 

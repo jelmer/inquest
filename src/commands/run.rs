@@ -16,6 +16,7 @@ pub struct RunCommand {
     load_list: Option<String>,
     concurrency: Option<usize>,
     until_failure: bool,
+    isolated: bool,
 }
 
 impl RunCommand {
@@ -28,6 +29,7 @@ impl RunCommand {
             load_list: None,
             concurrency: None,
             until_failure: false,
+            isolated: false,
         }
     }
 
@@ -40,6 +42,7 @@ impl RunCommand {
             load_list: None,
             concurrency: None,
             until_failure: false,
+            isolated: false,
         }
     }
 
@@ -52,6 +55,7 @@ impl RunCommand {
             load_list: None,
             concurrency: None,
             until_failure: false,
+            isolated: false,
         }
     }
 
@@ -69,6 +73,7 @@ impl RunCommand {
             load_list: None,
             concurrency: None,
             until_failure: false,
+            isolated: false,
         }
     }
 
@@ -80,6 +85,7 @@ impl RunCommand {
         load_list: Option<String>,
         concurrency: Option<usize>,
         until_failure: bool,
+        isolated: bool,
     ) -> Self {
         RunCommand {
             base_path,
@@ -89,6 +95,7 @@ impl RunCommand {
             load_list,
             concurrency,
             until_failure,
+            isolated,
         }
     }
 
@@ -290,6 +297,94 @@ impl RunCommand {
             Ok(0)
         }
     }
+
+    /// Run each test in complete isolation (one test per process)
+    fn run_isolated(
+        &self,
+        ui: &mut dyn UI,
+        repo: &mut Box<dyn crate::repository::Repository>,
+        test_cmd: &TestCommand,
+        test_ids: &[crate::repository::TestId],
+        run_id: String,
+    ) -> Result<i32> {
+        use std::collections::HashMap;
+        use std::process::{Command, Stdio};
+
+        ui.output(&format!(
+            "Running {} tests in isolated mode (one test per process)",
+            test_ids.len()
+        ))?;
+
+        let mut all_results = HashMap::new();
+        let mut any_failed = false;
+
+        for (idx, test_id) in test_ids.iter().enumerate() {
+            ui.output(&format!("  [{}/{}] {}", idx + 1, test_ids.len(), test_id))?;
+
+            // Build command for this single test
+            let (cmd_str, _temp_file) = test_cmd.build_command(Some(&[test_id.clone()]), false)?;
+
+            // Spawn process for this test
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(&cmd_str)
+                .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|e| {
+                    crate::error::Error::CommandExecution(format!(
+                        "Failed to execute test {}: {}",
+                        test_id, e
+                    ))
+                })?;
+
+            if !output.status.success() {
+                any_failed = true;
+            }
+
+            // Parse test results
+            let test_run_id = format!("{}-{}", run_id, idx);
+            let test_run = subunit_stream::parse_stream(output.stdout.as_slice(), test_run_id)?;
+
+            // Collect results
+            for (test_id, result) in test_run.results {
+                all_results.insert(test_id, result);
+            }
+        }
+
+        // Create combined test run
+        let mut combined_run = crate::repository::TestRun::new(run_id);
+        combined_run.timestamp = chrono::Utc::now();
+
+        for (_, result) in all_results {
+            combined_run.add_result(result);
+        }
+
+        // Store combined results
+        if self.partial {
+            repo.insert_test_run_partial(combined_run.clone(), true)?;
+        } else {
+            repo.insert_test_run(combined_run.clone())?;
+        }
+
+        // Display summary
+        let total = combined_run.total_tests();
+        let failures = combined_run.count_failures();
+        let successes = combined_run.count_successes();
+
+        ui.output("\nTest run complete:")?;
+        ui.output(&format!("  Total:   {}", total))?;
+        ui.output(&format!("  Passed:  {}", successes))?;
+        ui.output(&format!("  Failed:  {}", failures))?;
+
+        // Return exit code based on results
+        if failures > 0 || any_failed {
+            Ok(1)
+        } else {
+            Ok(0)
+        }
+    }
 }
 
 impl Command for RunCommand {
@@ -340,11 +435,45 @@ impl Command for RunCommand {
             }
         }
 
-        // Check if we should run in parallel
+        // Check if we should run in parallel or isolated
         let concurrency = self.concurrency.unwrap_or(1);
 
-        // Run tests in a loop if --until-failure is set
-        if self.until_failure {
+        // For isolated mode, we need a list of tests
+        if self.isolated {
+            let all_tests = if let Some(ids) = test_ids {
+                ids
+            } else {
+                // Need to list all tests
+                test_cmd.list_tests()?
+            };
+
+            if all_tests.is_empty() {
+                ui.output("No tests to run")?;
+                return Ok(0);
+            }
+
+            // Run in isolated mode with optional until-failure loop
+            if self.until_failure {
+                let mut iteration = 1;
+                loop {
+                    ui.output(&format!("\n=== Iteration {} ===", iteration))?;
+                    let run_id = repo.get_next_run_id()?.to_string();
+                    let exit_code =
+                        self.run_isolated(ui, &mut repo, &test_cmd, &all_tests, run_id)?;
+
+                    if exit_code != 0 {
+                        ui.output(&format!("\nTests failed on iteration {}", iteration))?;
+                        return Ok(exit_code);
+                    }
+
+                    iteration += 1;
+                }
+            } else {
+                let run_id = repo.get_next_run_id()?.to_string();
+                self.run_isolated(ui, &mut repo, &test_cmd, &all_tests, run_id)
+            }
+        } else if self.until_failure {
+            // Run tests in a loop until failure (non-isolated)
             let mut iteration = 1;
             loop {
                 ui.output(&format!("\n=== Iteration {} ===", iteration))?;
@@ -374,7 +503,7 @@ impl Command for RunCommand {
                 iteration += 1;
             }
         } else {
-            // Single run
+            // Single run (non-isolated, non-looping)
             let run_id = repo.get_next_run_id()?.to_string();
 
             if concurrency > 1 {
