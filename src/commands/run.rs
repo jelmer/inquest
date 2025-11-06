@@ -446,8 +446,19 @@ impl Command for RunCommand {
             }
         }
 
-        // Check if we should run in parallel or isolated
-        let concurrency = self.concurrency.unwrap_or(1);
+        // Determine concurrency level
+        // Priority: 1) explicit --parallel flag, 2) test_run_concurrency callout, 3) default to 1
+        let concurrency = if let Some(explicit_concurrency) = self.concurrency {
+            explicit_concurrency
+        } else if let Some(callout_concurrency) = test_cmd.get_concurrency()? {
+            ui.output(&format!(
+                "Using concurrency from test_run_concurrency: {}",
+                callout_concurrency
+            ))?;
+            callout_concurrency
+        } else {
+            1
+        };
 
         // For isolated mode, we need a list of tests
         if self.isolated {

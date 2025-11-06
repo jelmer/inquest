@@ -513,3 +513,30 @@ group_regex=^([^.]+)\.
         Some("^([^.]+)\\.".to_string())
     );
 }
+
+#[test]
+fn test_run_concurrency_callout() {
+    use testrepository::testcommand::TestCommand;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    // Initialize repository
+    let mut ui = TestUI::new();
+    let init_cmd = InitCommand::new(Some(base_path.clone()));
+    init_cmd.execute(&mut ui).unwrap();
+
+    // Create .testr.conf with test_run_concurrency
+    let config = r#"
+[DEFAULT]
+test_command=echo ""
+test_list_option=--list
+test_run_concurrency=echo 2
+"#;
+    fs::write(temp.path().join(".testr.conf"), config).unwrap();
+
+    // Load TestCommand and verify concurrency is determined from callout
+    let test_cmd = TestCommand::from_directory(temp.path()).unwrap();
+    let concurrency = test_cmd.get_concurrency().unwrap();
+    assert_eq!(concurrency, Some(2));
+}

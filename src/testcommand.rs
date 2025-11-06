@@ -36,6 +36,58 @@ impl TestCommand {
         Ok(TestCommand::new(config, dir.to_path_buf()))
     }
 
+    /// Execute the test_run_concurrency callout to determine concurrency
+    ///
+    /// If `test_run_concurrency` is configured, executes the command and parses
+    /// the output as a concurrency number. Returns None if not configured or on error.
+    pub fn get_concurrency(&self) -> Result<Option<usize>> {
+        let Some(ref cmd) = self.config.test_run_concurrency else {
+            return Ok(None);
+        };
+
+        // Execute the command
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(&self.base_dir)
+            .output()
+            .map_err(|e| {
+                Error::CommandExecution(format!("Failed to execute test_run_concurrency: {}", e))
+            })?;
+
+        if !output.status.success() {
+            return Err(Error::CommandExecution(format!(
+                "test_run_concurrency command failed with status: {}",
+                output.status
+            )));
+        }
+
+        // Parse the output as a number
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let trimmed = output_str.trim();
+
+        if trimmed.is_empty() {
+            return Err(Error::CommandExecution(
+                "test_run_concurrency command produced no output".to_string(),
+            ));
+        }
+
+        let concurrency = trimmed.parse::<usize>().map_err(|e| {
+            Error::CommandExecution(format!(
+                "Failed to parse test_run_concurrency output '{}': {}",
+                trimmed, e
+            ))
+        })?;
+
+        if concurrency == 0 {
+            return Err(Error::CommandExecution(
+                "test_run_concurrency must be greater than 0".to_string(),
+            ));
+        }
+
+        Ok(Some(concurrency))
+    }
+
     /// Build the command to execute tests
     pub fn build_command(
         &self,
@@ -260,5 +312,94 @@ test_command=python -m test
 
         let tc = TestCommand::from_directory(temp_dir.path()).unwrap();
         assert_eq!(tc.config().test_command, "python -m test");
+    }
+
+    #[test]
+    fn test_get_concurrency_not_configured() {
+        let config = create_test_config();
+        let temp_dir = TempDir::new().unwrap();
+        let tc = TestCommand::new(config, temp_dir.path().to_path_buf());
+
+        let result = tc.get_concurrency().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_concurrency_success() {
+        let config_str = r#"
+[DEFAULT]
+test_command=echo ""
+test_run_concurrency=echo 4
+"#;
+        let config = TestrConfig::parse(config_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let tc = TestCommand::new(config, temp_dir.path().to_path_buf());
+
+        let result = tc.get_concurrency().unwrap();
+        assert_eq!(result, Some(4));
+    }
+
+    #[test]
+    fn test_get_concurrency_with_nproc() {
+        let config_str = r#"
+[DEFAULT]
+test_command=echo ""
+test_run_concurrency=nproc
+"#;
+        let config = TestrConfig::parse(config_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let tc = TestCommand::new(config, temp_dir.path().to_path_buf());
+
+        let result = tc.get_concurrency().unwrap();
+        assert!(result.is_some());
+        assert!(result.unwrap() > 0);
+    }
+
+    #[test]
+    fn test_get_concurrency_invalid_output() {
+        let config_str = r#"
+[DEFAULT]
+test_command=echo ""
+test_run_concurrency=echo "not a number"
+"#;
+        let config = TestrConfig::parse(config_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let tc = TestCommand::new(config, temp_dir.path().to_path_buf());
+
+        let result = tc.get_concurrency();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("parse"));
+    }
+
+    #[test]
+    fn test_get_concurrency_zero() {
+        let config_str = r#"
+[DEFAULT]
+test_command=echo ""
+test_run_concurrency=echo 0
+"#;
+        let config = TestrConfig::parse(config_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let tc = TestCommand::new(config, temp_dir.path().to_path_buf());
+
+        let result = tc.get_concurrency();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_get_concurrency_command_fails() {
+        let config_str = r#"
+[DEFAULT]
+test_command=echo ""
+test_run_concurrency=exit 1
+"#;
+        let config = TestrConfig::parse(config_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let tc = TestCommand::new(config, temp_dir.path().to_path_buf());
+
+        let result = tc.get_concurrency();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("failed"));
     }
 }
