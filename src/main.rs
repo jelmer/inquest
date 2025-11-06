@@ -110,7 +110,7 @@ enum Commands {
         load_list: Option<String>,
 
         /// Run tests in parallel across multiple workers
-        #[arg(long, short = 'j', value_name = "N")]
+        #[arg(long, short = 'j', value_name = "N", alias = "concurrency")]
         parallel: Option<usize>,
 
         /// Run tests repeatedly until they fail
