@@ -102,6 +102,10 @@ enum Commands {
         /// Run tests in parallel across multiple workers
         #[arg(long, short = 'j', value_name = "N")]
         parallel: Option<usize>,
+
+        /// Run tests repeatedly until they fail
+        #[arg(long)]
+        until_failure: bool,
     },
 }
 
@@ -187,6 +191,7 @@ fn main() {
             partial,
             load_list,
             parallel,
+            until_failure,
         } => {
             let cmd = RunCommand::with_all_options(
                 cli.directory,
@@ -195,6 +200,7 @@ fn main() {
                 force_init,
                 load_list,
                 parallel,
+                until_failure,
             );
             cmd.execute(&mut ui)
         }

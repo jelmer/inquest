@@ -15,6 +15,7 @@ pub struct RunCommand {
     partial: bool,
     load_list: Option<String>,
     concurrency: Option<usize>,
+    until_failure: bool,
 }
 
 impl RunCommand {
@@ -26,6 +27,7 @@ impl RunCommand {
             partial: false,
             load_list: None,
             concurrency: None,
+            until_failure: false,
         }
     }
 
@@ -37,6 +39,7 @@ impl RunCommand {
             partial: true, // --failing implies partial mode
             load_list: None,
             concurrency: None,
+            until_failure: false,
         }
     }
 
@@ -48,6 +51,7 @@ impl RunCommand {
             partial: failing_only, // --failing implies partial mode
             load_list: None,
             concurrency: None,
+            until_failure: false,
         }
     }
 
@@ -64,6 +68,7 @@ impl RunCommand {
             partial,
             load_list: None,
             concurrency: None,
+            until_failure: false,
         }
     }
 
@@ -74,6 +79,7 @@ impl RunCommand {
         force_init: bool,
         load_list: Option<String>,
         concurrency: Option<usize>,
+        until_failure: bool,
     ) -> Self {
         RunCommand {
             base_path,
@@ -82,6 +88,7 @@ impl RunCommand {
             partial,
             load_list,
             concurrency,
+            until_failure,
         }
     }
 
@@ -333,25 +340,57 @@ impl Command for RunCommand {
             }
         }
 
-        // Get the next run ID
-        let run_id = repo.get_next_run_id()?.to_string();
-
         // Check if we should run in parallel
         let concurrency = self.concurrency.unwrap_or(1);
 
-        if concurrency > 1 {
-            // Parallel execution
-            self.run_parallel(
-                ui,
-                &mut repo,
-                &test_cmd,
-                test_ids.as_deref(),
-                run_id,
-                concurrency,
-            )
+        // Run tests in a loop if --until-failure is set
+        if self.until_failure {
+            let mut iteration = 1;
+            loop {
+                ui.output(&format!("\n=== Iteration {} ===", iteration))?;
+
+                // Get the next run ID for this iteration
+                let run_id = repo.get_next_run_id()?.to_string();
+
+                let exit_code = if concurrency > 1 {
+                    self.run_parallel(
+                        ui,
+                        &mut repo,
+                        &test_cmd,
+                        test_ids.as_deref(),
+                        run_id,
+                        concurrency,
+                    )?
+                } else {
+                    self.run_serial(ui, &mut repo, &test_cmd, test_ids.as_deref(), run_id)?
+                };
+
+                // Stop if tests failed
+                if exit_code != 0 {
+                    ui.output(&format!("\nTests failed on iteration {}", iteration))?;
+                    return Ok(exit_code);
+                }
+
+                iteration += 1;
+            }
         } else {
-            // Serial execution
-            self.run_serial(ui, &mut repo, &test_cmd, test_ids.as_deref(), run_id)
+            // Single run
+            let run_id = repo.get_next_run_id()?.to_string();
+
+            if concurrency > 1 {
+                // Parallel execution
+                self.run_parallel(
+                    ui,
+                    &mut repo,
+                    &test_cmd,
+                    test_ids.as_deref(),
+                    run_id,
+                    concurrency,
+                )
+            } else {
+                // Serial execution
+                self.run_serial(ui, &mut repo, &test_cmd, test_ids.as_deref(), run_id)
+            }
         }
     }
 

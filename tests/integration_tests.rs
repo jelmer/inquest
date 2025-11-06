@@ -318,11 +318,12 @@ test_command=python3 -c "import sys; import time; sys.stdout.buffer.write(b'\xb3
     let mut ui = TestUI::new();
     let cmd = RunCommand::with_all_options(
         Some(base_path.clone()),
-        false, // partial
-        false, // failing
-        false, // force_init
-        None,  // load_list
+        false,   // partial
+        false,   // failing
+        false,   // force_init
+        None,    // load_list
         Some(2), // concurrency
+        false,   // until_failure
     );
 
     // Note: This test will fail to actually run because the command is synthetic
@@ -360,4 +361,42 @@ fn test_parallel_execution_with_worker_tags() {
     // Each partition should have at least one test
     assert!(!partitions[0].is_empty());
     assert!(!partitions[1].is_empty());
+}
+
+#[test]
+fn test_until_failure_flag_behavior() {
+    use testrepository::commands::RunCommand;
+    use testrepository::repository::file::FileRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    // Initialize repository
+    let factory = FileRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    // Create a simple test configuration that always succeeds
+    let config = r#"
+[DEFAULT]
+test_command=echo ""
+"#;
+    fs::write(temp.path().join(".testr.conf"), config).unwrap();
+
+    // Create command with until_failure set to true
+    // The test will succeed but we can verify the flag was accepted
+    // by checking that the command can be created
+    let cmd = RunCommand::with_all_options(
+        Some(base_path.clone()),
+        false, // partial
+        false, // failing
+        false, // force_init
+        None,  // load_list
+        None,  // concurrency
+        true,  // until_failure
+    );
+
+    // Verify the command was created successfully
+    // (The actual looping behavior would run infinitely with always-passing tests,
+    // so we just verify the command can be constructed with the flag)
+    assert_eq!(cmd.name(), "run");
 }
