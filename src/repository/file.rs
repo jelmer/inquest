@@ -144,7 +144,6 @@ impl FileRepository {
         Ok(())
     }
 
-    #[allow(dead_code)]
     fn get_test_times_for_ids(&self, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
         let times_path = self.path.join("times.dbm");
 
@@ -304,6 +303,10 @@ impl Repository for FileRepository {
         // 2. Use a different approach (e.g., maintain a separate index)
         // 3. Use get_test_times_for_ids() for specific lookups
         Ok(HashMap::new())
+    }
+
+    fn get_test_times_for_ids(&self, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
+        self.get_test_times_for_ids(test_ids)
     }
 
     fn get_next_run_id(&self) -> Result<u64> {

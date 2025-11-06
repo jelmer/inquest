@@ -188,8 +188,8 @@ impl RunCommand {
             return Ok(0);
         }
 
-        // Get historical test durations
-        let durations = repo.get_test_times()?;
+        // Get historical test durations for these specific tests
+        let durations = repo.get_test_times_for_ids(&all_tests)?;
 
         // Get group_regex from config if present
         let group_regex = test_cmd.config().group_regex.as_deref();

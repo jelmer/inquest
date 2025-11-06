@@ -93,6 +93,9 @@ pub trait Repository {
     /// Get test execution times
     fn get_test_times(&self) -> Result<HashMap<TestId, Duration>>;
 
+    /// Get test execution times for specific test IDs
+    fn get_test_times_for_ids(&self, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>>;
+
     /// Get the next run ID that will be assigned
     fn get_next_run_id(&self) -> Result<u64>;
 
