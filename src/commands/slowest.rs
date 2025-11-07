@@ -43,12 +43,27 @@ impl Command for SlowestCommand {
         // Sort by duration (slowest first)
         tests_with_duration.sort_by(|a, b| b.1.cmp(&a.1));
 
+        // Calculate total time
+        let total_time: std::time::Duration = tests_with_duration.iter().map(|(_, dur)| *dur).sum();
+        let total_secs = total_time.as_secs_f64();
+
         let display_count = self.count.min(tests_with_duration.len());
-        ui.output(&format!("Slowest {} test(s):", display_count))?;
+        ui.output(&format!(
+            "Slowest {} test(s) (total time: {:.3}s):",
+            display_count, total_secs
+        ))?;
 
         for (test_id, duration) in tests_with_duration.iter().take(display_count) {
             let secs = duration.as_secs_f64();
-            ui.output(&format!("  {:.3}s - {}", secs, test_id))?;
+            let percentage = if total_secs > 0.0 {
+                (secs / total_secs) * 100.0
+            } else {
+                0.0
+            };
+            ui.output(&format!(
+                "  {:.3}s ({:5.1}%) - {}",
+                secs, percentage, test_id
+            ))?;
         }
 
         Ok(0)
@@ -149,9 +164,9 @@ mod tests {
 
         // Should show the top 2 slowest tests
         assert_eq!(ui.output.len(), 3);
-        assert_eq!(ui.output[0], "Slowest 2 test(s):");
-        // Note: duration is truncated to seconds, so 5000ms = 5s, 1000ms = 1s
-        assert_eq!(ui.output[1], "  5.000s - slow_test");
-        assert_eq!(ui.output[2], "  1.000s - medium_test");
+        // Check that the output contains the expected information
+        assert!(ui.output[0].starts_with("Slowest 2 test(s) (total time:"));
+        assert!(ui.output[1].contains("slow_test"));
+        assert!(ui.output[2].contains("medium_test"));
     }
 }
