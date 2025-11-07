@@ -32,6 +32,20 @@ pub enum ProgressStatus {
     UnexpectedSuccess,
 }
 
+impl ProgressStatus {
+    /// Get the status indicator character for display
+    pub fn indicator(&self) -> &'static str {
+        match self {
+            ProgressStatus::InProgress => "",
+            ProgressStatus::Success => "✓",
+            ProgressStatus::Failed => "✗",
+            ProgressStatus::Skipped => "⊘",
+            ProgressStatus::ExpectedFailure => "✓",
+            ProgressStatus::UnexpectedSuccess => "✗",
+        }
+    }
+}
+
 /// Parse a subunit stream from a byte slice into a TestRun
 ///
 /// This is optimized for memory-mapped files and avoids copying data.
@@ -44,7 +58,11 @@ pub fn parse_stream_bytes(data: &[u8], run_id: String) -> Result<TestRun> {
 /// The callback is called with (test_id, status) for each test event.
 /// Returns an error if the stream contains corrupted/invalid data or invalid timestamps.
 /// Plain text in the stream is treated as valid (interleaved UTF-8 in subunit v2 protocol).
-pub fn parse_stream_with_progress<R: Read, F>(reader: R, run_id: String, mut progress_callback: F) -> Result<TestRun>
+pub fn parse_stream_with_progress<R: Read, F>(
+    reader: R,
+    run_id: String,
+    mut progress_callback: F,
+) -> Result<TestRun>
 where
     F: FnMut(&str, ProgressStatus),
 {
@@ -91,11 +109,18 @@ where
 
                     // Convert subunit status to our TestStatus
                     let (status, progress_status) = match event.status {
-                        SubunitTestStatus::Success => (TestStatus::Success, ProgressStatus::Success),
+                        SubunitTestStatus::Success => {
+                            (TestStatus::Success, ProgressStatus::Success)
+                        }
                         SubunitTestStatus::Failed => (TestStatus::Failure, ProgressStatus::Failed),
                         SubunitTestStatus::Skipped => (TestStatus::Skip, ProgressStatus::Skipped),
-                        SubunitTestStatus::ExpectedFailure => (TestStatus::ExpectedFailure, ProgressStatus::ExpectedFailure),
-                        SubunitTestStatus::UnexpectedSuccess => (TestStatus::UnexpectedSuccess, ProgressStatus::UnexpectedSuccess),
+                        SubunitTestStatus::ExpectedFailure => {
+                            (TestStatus::ExpectedFailure, ProgressStatus::ExpectedFailure)
+                        }
+                        SubunitTestStatus::UnexpectedSuccess => (
+                            TestStatus::UnexpectedSuccess,
+                            ProgressStatus::UnexpectedSuccess,
+                        ),
                         SubunitTestStatus::Undefined
                         | SubunitTestStatus::Enumeration
                         | SubunitTestStatus::InProgress => {

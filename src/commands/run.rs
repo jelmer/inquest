@@ -120,7 +120,7 @@ impl RunCommand {
         spinner.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.green} {msg}")
-                .unwrap()
+                .unwrap(),
         );
         spinner.set_message("Running tests...");
         spinner.enable_steady_tick(std::time::Duration::from_millis(100));
@@ -150,16 +150,10 @@ impl RunCommand {
             output.stdout.as_slice(),
             run_id,
             |test_id, status| {
-                use crate::subunit_stream::ProgressStatus;
-                let status_str = match status {
-                    ProgressStatus::InProgress => "",
-                    ProgressStatus::Success => "✓",
-                    ProgressStatus::Failed => "✗",
-                    ProgressStatus::Skipped => "⊘",
-                    ProgressStatus::ExpectedFailure => "✓",
-                    ProgressStatus::UnexpectedSuccess => "✗",
-                };
-                spinner.set_message(format!("{} {}", status_str, test_id));
+                let indicator = status.indicator();
+                if !indicator.is_empty() {
+                    spinner.set_message(format!("{} {}", indicator, test_id));
+                }
             },
         )?;
         spinner.finish_and_clear();
@@ -230,11 +224,16 @@ impl RunCommand {
         )
         .map_err(|e| crate::error::Error::Config(format!("Invalid group_regex pattern: {}", e)))?;
 
-        ui.output(&format!(
-            "Running {} tests across {} workers",
-            all_tests.len(),
-            concurrency
-        ))?;
+        // Create multi-progress for tracking all workers
+        let multi_progress = indicatif::MultiProgress::new();
+        let overall_bar = multi_progress.add(ProgressBar::new(all_tests.len() as u64));
+        overall_bar.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} tests")
+                .unwrap()
+                .progress_chars("█▓▒░  "),
+        );
+        overall_bar.set_message(format!("Running across {} workers", concurrency));
 
         // Provision instances if configured
         let instance_ids = test_cmd.provision_instances(concurrency)?;
@@ -248,14 +247,26 @@ impl RunCommand {
             instance_ids: &instance_ids,
         };
 
-        // Spawn worker processes
+        // Spawn worker processes with progress bars
         let mut workers = Vec::new();
+        let mut worker_bars = Vec::new();
         for (worker_id, partition) in partitions.iter().enumerate() {
             if partition.is_empty() {
                 continue;
             }
 
-            ui.output(&format!("Worker {}: {} tests", worker_id, partition.len()))?;
+            // Create a progress bar for this worker
+            let worker_bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
+            worker_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template(&format!(
+                        "Worker {}: [{{bar:20.green/blue}}] {{pos}}/{{len}} {{msg}}",
+                        worker_id
+                    ))
+                    .unwrap()
+                    .progress_chars("█▓▒░  "),
+            );
+            worker_bars.push(worker_bar);
 
             // Build command for this partition with instance ID
             let instance_id = instance_ids.get(worker_id).map(|s| s.as_str());
@@ -283,7 +294,7 @@ impl RunCommand {
         let mut all_results = HashMap::new();
         let mut any_failed = false;
 
-        for (worker_id, child, _temp_file) in workers {
+        for (idx, (worker_id, child, _temp_file)) in workers.into_iter().enumerate() {
             let output = child.wait_with_output().map_err(|e| {
                 crate::error::Error::CommandExecution(format!(
                     "Failed to wait for worker {}: {}",
@@ -292,7 +303,7 @@ impl RunCommand {
             })?;
 
             if !output.status.success() {
-                ui.warning(&format!("Worker {} exited with non-zero status", worker_id))?;
+                worker_bars[idx].abandon_with_message("failed");
                 any_failed = true;
             }
 
@@ -307,7 +318,29 @@ impl RunCommand {
                 output.stdout.as_slice()
             };
 
-            let mut worker_run = subunit_stream::parse_stream(subunit_data, worker_run_id.clone())?;
+            // Parse with progress reporting
+            let worker_bar = worker_bars[idx].clone();
+            let overall_bar_clone = overall_bar.clone();
+            let mut worker_run = subunit_stream::parse_stream_with_progress(
+                subunit_data,
+                worker_run_id.clone(),
+                move |test_id, status| {
+                    let indicator = status.indicator();
+                    if !indicator.is_empty() {
+                        worker_bar.inc(1);
+                        overall_bar_clone.inc(1);
+                        // Truncate test name if too long
+                        let short_name = if test_id.len() > 40 {
+                            &test_id[test_id.len() - 40..]
+                        } else {
+                            test_id
+                        };
+                        worker_bar.set_message(format!("{} {}", indicator, short_name));
+                    }
+                },
+            )?;
+
+            worker_bars[idx].finish_with_message("done");
 
             // Add worker tag to all results
             let worker_tag = format!("worker-{}", worker_id);
@@ -322,6 +355,9 @@ impl RunCommand {
                 all_results.insert(test_id, result);
             }
         }
+
+        // Finish progress bars
+        overall_bar.finish_and_clear();
 
         // Create combined test run
         let mut combined_run = crate::repository::TestRun::new(run_id);
