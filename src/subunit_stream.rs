@@ -15,11 +15,140 @@ use subunit::types::event::Event;
 use subunit::types::stream::ScannedItem;
 use subunit::types::teststatus::TestStatus as SubunitTestStatus;
 
+/// Progress event status for test execution
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressStatus {
+    /// Test is starting
+    InProgress,
+    /// Test passed
+    Success,
+    /// Test failed
+    Failed,
+    /// Test was skipped
+    Skipped,
+    /// Test failed as expected
+    ExpectedFailure,
+    /// Test passed unexpectedly
+    UnexpectedSuccess,
+}
+
 /// Parse a subunit stream from a byte slice into a TestRun
 ///
 /// This is optimized for memory-mapped files and avoids copying data.
 pub fn parse_stream_bytes(data: &[u8], run_id: String) -> Result<TestRun> {
     parse_stream(data, run_id)
+}
+
+/// Parse a subunit stream into a TestRun with progress callback
+///
+/// The callback is called with (test_id, status) for each test event.
+/// Returns an error if the stream contains corrupted/invalid data or invalid timestamps.
+/// Plain text in the stream is treated as valid (interleaved UTF-8 in subunit v2 protocol).
+pub fn parse_stream_with_progress<R: Read, F>(reader: R, run_id: String, mut progress_callback: F) -> Result<TestRun>
+where
+    F: FnMut(&str, ProgressStatus),
+{
+    use std::collections::HashMap;
+
+    let mut test_run = TestRun::new(run_id);
+    let mut start_times: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
+
+    // Iterate over the subunit stream
+    for item in iter_stream(reader) {
+        let item =
+            item.map_err(|e| Error::Subunit(format!("Failed to parse subunit stream: {}", e)))?;
+
+        match item {
+            ScannedItem::Unknown(data, err) => {
+                // Don't silently ignore invalid/corrupted data
+                return Err(Error::Subunit(format!(
+                    "Invalid subunit stream data: {} (got {} bytes)",
+                    err,
+                    data.len()
+                )));
+            }
+            ScannedItem::Bytes(_) => {
+                // Skip non-event data (this is normal in subunit streams)
+                continue;
+            }
+            ScannedItem::Event(event) => {
+                if let Some(ref test_id_str) = event.test_id {
+                    // Track start events for duration calculation
+                    if event.status == SubunitTestStatus::InProgress {
+                        progress_callback(test_id_str, ProgressStatus::InProgress);
+                        if let Some(timestamp) = event.timestamp {
+                            let dt: chrono::DateTime<chrono::Utc> =
+                                timestamp.try_into().map_err(|e| {
+                                    Error::Subunit(format!(
+                                        "Invalid timestamp in start event: {}",
+                                        e
+                                    ))
+                                })?;
+                            start_times.insert(test_id_str.clone(), dt);
+                        }
+                        continue;
+                    }
+
+                    // Convert subunit status to our TestStatus
+                    let (status, progress_status) = match event.status {
+                        SubunitTestStatus::Success => (TestStatus::Success, ProgressStatus::Success),
+                        SubunitTestStatus::Failed => (TestStatus::Failure, ProgressStatus::Failed),
+                        SubunitTestStatus::Skipped => (TestStatus::Skip, ProgressStatus::Skipped),
+                        SubunitTestStatus::ExpectedFailure => (TestStatus::ExpectedFailure, ProgressStatus::ExpectedFailure),
+                        SubunitTestStatus::UnexpectedSuccess => (TestStatus::UnexpectedSuccess, ProgressStatus::UnexpectedSuccess),
+                        SubunitTestStatus::Undefined
+                        | SubunitTestStatus::Enumeration
+                        | SubunitTestStatus::InProgress => {
+                            continue;
+                        }
+                    };
+
+                    progress_callback(test_id_str, progress_status);
+
+                    let test_id = TestId::new(test_id_str.clone());
+
+                    // Extract tags
+                    let tags = event.tags.unwrap_or_default();
+
+                    // Extract file content as message/details
+                    let (message, details) = if let Some((_name, content)) = event.file.file {
+                        let content_str = String::from_utf8_lossy(&content).to_string();
+                        (Some(content_str.clone()), Some(content_str))
+                    } else {
+                        (None, None)
+                    };
+
+                    // Calculate duration from start/stop timestamps
+                    let duration = if let (Some(start_time), Some(end_time)) =
+                        (start_times.get(test_id_str), event.timestamp)
+                    {
+                        let end_time_chrono: chrono::DateTime<chrono::Utc> =
+                            end_time.try_into().map_err(|e| {
+                                Error::Subunit(format!("Invalid timestamp in end event: {}", e))
+                            })?;
+                        let duration_secs = (end_time_chrono - *start_time).num_milliseconds();
+                        if duration_secs >= 0 {
+                            Some(std::time::Duration::from_millis(duration_secs as u64))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    test_run.add_result(TestResult {
+                        test_id,
+                        status,
+                        duration,
+                        message,
+                        details,
+                        tags,
+                    });
+                }
+            }
+        }
+    }
+    Ok(test_run)
 }
 
 /// Parse a subunit stream into a TestRun

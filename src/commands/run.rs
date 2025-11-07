@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 use crate::ui::UI;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 
 pub struct RunCommand {
@@ -114,9 +115,17 @@ impl RunCommand {
         // Build command with test IDs if provided
         let (cmd_str, _temp_file) = test_cmd.build_command(test_ids, false)?;
 
-        // Execute test command
-        ui.output(&format!("Running: {}", cmd_str))?;
+        // Create progress spinner
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")
+                .unwrap()
+        );
+        spinner.set_message("Running tests...");
+        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
+        // Execute test command
         let output = Command::new("sh")
             .arg("-c")
             .arg(&cmd_str)
@@ -125,6 +134,7 @@ impl RunCommand {
             .stderr(Stdio::piped())
             .output()
             .map_err(|e| {
+                spinner.finish_and_clear();
                 crate::error::Error::CommandExecution(format!(
                     "Failed to execute test command: {}",
                     e
@@ -134,8 +144,25 @@ impl RunCommand {
         // Check if command succeeded
         let command_failed = !output.status.success();
 
-        // Parse subunit output
-        let test_run = subunit_stream::parse_stream(output.stdout.as_slice(), run_id)?;
+        // Parse subunit output with progress reporting
+        spinner.set_message("Running tests...");
+        let test_run = subunit_stream::parse_stream_with_progress(
+            output.stdout.as_slice(),
+            run_id,
+            |test_id, status| {
+                use crate::subunit_stream::ProgressStatus;
+                let status_str = match status {
+                    ProgressStatus::InProgress => "",
+                    ProgressStatus::Success => "✓",
+                    ProgressStatus::Failed => "✗",
+                    ProgressStatus::Skipped => "⊘",
+                    ProgressStatus::ExpectedFailure => "✓",
+                    ProgressStatus::UnexpectedSuccess => "✗",
+                };
+                spinner.set_message(format!("{} {}", status_str, test_id));
+            },
+        )?;
+        spinner.finish_and_clear();
 
         // Store results
         if self.partial {
