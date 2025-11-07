@@ -197,6 +197,17 @@ impl TestRun {
         self.results.len()
     }
 
+    /// Calculate total duration of all tests with timing information
+    pub fn total_duration(&self) -> Option<Duration> {
+        let durations: Vec<Duration> = self.results.values().filter_map(|r| r.duration).collect();
+
+        if durations.is_empty() {
+            None
+        } else {
+            Some(durations.into_iter().sum())
+        }
+    }
+
     /// Check if a result matches the given tag filter
     fn matches_filter(result: &TestResult, filter_tags: &[String]) -> bool {
         if filter_tags.is_empty() {
@@ -351,6 +362,35 @@ mod tests {
     fn test_result_with_tag() {
         let result = TestResult::success("test1").with_tag("slow");
         assert_eq!(result.tags, vec!["slow"]);
+    }
+
+    #[test]
+    fn test_total_duration_no_timing() {
+        let mut run = TestRun::new("0".to_string());
+        run.add_result(TestResult::success("test1"));
+        run.add_result(TestResult::success("test2"));
+
+        assert_eq!(run.total_duration(), None);
+    }
+
+    #[test]
+    fn test_total_duration_with_timing() {
+        let mut run = TestRun::new("0".to_string());
+        run.add_result(TestResult::success("test1").with_duration(Duration::from_millis(100)));
+        run.add_result(TestResult::success("test2").with_duration(Duration::from_millis(200)));
+        run.add_result(TestResult::success("test3").with_duration(Duration::from_millis(300)));
+
+        assert_eq!(run.total_duration(), Some(Duration::from_millis(600)));
+    }
+
+    #[test]
+    fn test_total_duration_partial_timing() {
+        let mut run = TestRun::new("0".to_string());
+        run.add_result(TestResult::success("test1").with_duration(Duration::from_millis(100)));
+        run.add_result(TestResult::success("test2")); // No duration
+
+        // Should sum only tests with duration
+        assert_eq!(run.total_duration(), Some(Duration::from_millis(100)));
     }
 
     #[test]

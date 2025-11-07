@@ -45,6 +45,11 @@ impl Command for LastCommand {
         ui.output(&format!("Passed: {}", test_run.count_successes()))?;
         ui.output(&format!("Failed: {}", test_run.count_failures()))?;
 
+        // Show total duration if available
+        if let Some(duration) = test_run.total_duration() {
+            ui.output(&format!("Total time: {:.3}s", duration.as_secs_f64()))?;
+        }
+
         if test_run.count_failures() > 0 {
             ui.output("")?;
             ui.output("Failed tests:")?;
