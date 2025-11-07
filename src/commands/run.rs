@@ -234,7 +234,6 @@ impl RunCommand {
             let instance_id = instance_ids.get(worker_id).map(|s| s.as_str());
             let (cmd_str, _temp_file) =
                 test_cmd.build_command_with_instance(Some(partition), false, instance_id)?;
-
             // Spawn the worker process
             let child = Command::new("sh")
                 .arg("-c")
@@ -272,8 +271,16 @@ impl RunCommand {
 
             // Parse worker results
             let worker_run_id = format!("{}-{}", run_id, worker_id);
-            let mut worker_run =
-                subunit_stream::parse_stream(output.stdout.as_slice(), worker_run_id)?;
+
+            // NOTE: When running tests in a non-TTY environment (like spawned processes),
+            // the test framework may output to stderr instead of stdout. Try both.
+            let subunit_data = if output.stdout.is_empty() && !output.stderr.is_empty() {
+                output.stderr.as_slice()
+            } else {
+                output.stdout.as_slice()
+            };
+
+            let mut worker_run = subunit_stream::parse_stream(subunit_data, worker_run_id.clone())?;
 
             // Add worker tag to all results
             let worker_tag = format!("worker-{}", worker_id);

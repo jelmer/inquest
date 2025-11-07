@@ -46,8 +46,8 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
                     data.len()
                 )));
             }
-            ScannedItem::UTF8chars(_) => {
-                // Skip non-event text data (this is normal in subunit streams)
+            ScannedItem::Bytes(_) => {
+                // Skip non-event data (this is normal in subunit streams)
                 continue;
             }
             ScannedItem::Event(event) => {

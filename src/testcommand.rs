@@ -183,6 +183,9 @@ impl TestCommand {
     }
 
     /// List all available tests
+    ///
+    /// Parses the subunit stream to extract test IDs from enumeration events,
+    /// matching the Python testrepository's parse_enumeration() behavior.
     pub fn list_tests(&self) -> Result<Vec<TestId>> {
         let (cmd, _temp_file) = self.build_command(None, true)?;
 
@@ -202,12 +205,40 @@ impl TestCommand {
             )));
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let test_ids = stdout
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| TestId::new(line.trim()))
-            .collect();
+        // Parse subunit stream to extract test IDs from enumeration events
+        // (matching Python's parse_enumeration which looks for 'exists' status)
+        use subunit::io::sync::iter_stream;
+        use subunit::types::stream::ScannedItem;
+        use subunit::types::teststatus::TestStatus as SubunitTestStatus;
+
+        let mut test_ids = Vec::new();
+
+        for item in iter_stream(&output.stdout[..]) {
+            match item {
+                Ok(ScannedItem::Event(event)) => {
+                    // Enumeration events indicate test existence
+                    if event.status == SubunitTestStatus::Enumeration {
+                        if let Some(test_id) = event.test_id {
+                            test_ids.push(TestId::new(test_id));
+                        }
+                    }
+                }
+                Ok(ScannedItem::Bytes(_)) => {
+                    // Skip interleaved non-event data
+                    continue;
+                }
+                Ok(ScannedItem::Unknown(_, _)) => {
+                    // Skip unknown/corrupted data
+                    continue;
+                }
+                Err(e) => {
+                    return Err(Error::CommandExecution(format!(
+                        "Failed to parse test list: {}",
+                        e
+                    )));
+                }
+            }
+        }
 
         Ok(test_ids)
     }

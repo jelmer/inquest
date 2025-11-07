@@ -765,7 +765,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 [[package]]
 name = "subunit"
 version = "0.2.0"
-source = "git+https://github.com/jelmer/subunit-rust#58fd32f2beaa0dcb062b6e2cf1f500d403af6e90"
+source = "git+https://github.com/jelmer/subunit-rust#b79153d6ea30753b33b13baf53060ca990f6012e"
 dependencies = [
  "async-stream",
  "async-trait",
