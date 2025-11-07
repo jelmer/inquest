@@ -295,6 +295,10 @@ impl RunCommand {
         let mut any_failed = false;
 
         for (idx, (worker_id, child, _temp_file)) in workers.into_iter().enumerate() {
+            // Show spinner while waiting
+            worker_bars[idx].set_message("waiting for tests...");
+            worker_bars[idx].enable_steady_tick(std::time::Duration::from_millis(100));
+
             let output = child.wait_with_output().map_err(|e| {
                 crate::error::Error::CommandExecution(format!(
                     "Failed to wait for worker {}: {}",
@@ -319,6 +323,7 @@ impl RunCommand {
             };
 
             // Parse with progress reporting
+            worker_bars[idx].set_message("parsing results...");
             let worker_bar = worker_bars[idx].clone();
             let overall_bar_clone = overall_bar.clone();
             let mut worker_run = subunit_stream::parse_stream_with_progress(
