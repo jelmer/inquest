@@ -247,9 +247,10 @@ impl RunCommand {
             instance_ids: &instance_ids,
         };
 
-        // Spawn worker processes with progress bars
+        // Spawn worker processes with progress bars and streaming parsers
         let mut workers = Vec::new();
-        let mut worker_bars = Vec::new();
+        let mut parse_threads = Vec::new();
+
         for (worker_id, partition) in partitions.iter().enumerate() {
             if partition.is_empty() {
                 continue;
@@ -266,14 +267,14 @@ impl RunCommand {
                     .unwrap()
                     .progress_chars("█▓▒░  "),
             );
-            worker_bars.push(worker_bar);
 
             // Build command for this partition with instance ID
             let instance_id = instance_ids.get(worker_id).map(|s| s.as_str());
             let (cmd_str, _temp_file) =
                 test_cmd.build_command_with_instance(Some(partition), false, instance_id)?;
+
             // Spawn the worker process
-            let child = Command::new("sh")
+            let mut child = Command::new("sh")
                 .arg("-c")
                 .arg(&cmd_str)
                 .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
@@ -287,68 +288,81 @@ impl RunCommand {
                     ))
                 })?;
 
+            // Take stdout/stderr for streaming
+            let stdout = child.stdout.take().expect("stdout was piped");
+            let stderr = child.stderr.take().expect("stderr was piped");
+
+            // Spawn thread to parse output in real-time
+            let worker_bar_clone = worker_bar.clone();
+            let overall_bar_clone = overall_bar.clone();
+            let worker_run_id = format!("{}-{}", run_id, worker_id);
+
+            let parse_thread = std::thread::spawn(move || {
+                // Prefer stderr if it has data (some test runners output to stderr in subprocesses)
+                // For now, try stdout first, fall back to stderr
+                use std::io::Read;
+                let mut data = Vec::new();
+                std::io::BufReader::new(stdout).read_to_end(&mut data).ok();
+
+                if data.is_empty() {
+                    std::io::BufReader::new(stderr).read_to_end(&mut data).ok();
+                }
+
+                // Parse the stream with progress
+                subunit_stream::parse_stream_with_progress(
+                    &data[..],
+                    worker_run_id,
+                    |test_id, status| {
+                        let indicator = status.indicator();
+                        if !indicator.is_empty() {
+                            worker_bar_clone.inc(1);
+                            overall_bar_clone.inc(1);
+                            let short_name = if test_id.len() > 40 {
+                                &test_id[test_id.len() - 40..]
+                            } else {
+                                test_id
+                            };
+                            worker_bar_clone.set_message(format!("{} {}", indicator, short_name));
+                        }
+                    },
+                )
+            });
+
+            parse_threads.push((worker_id, worker_bar, parse_thread));
             workers.push((worker_id, child, _temp_file));
         }
 
-        // Wait for all workers to complete and collect results
+        // Wait for all workers and parse threads to complete
         let mut all_results = HashMap::new();
         let mut any_failed = false;
 
-        for (idx, (worker_id, child, _temp_file)) in workers.into_iter().enumerate() {
-            // Show spinner while waiting
-            worker_bars[idx].set_message("waiting for tests...");
-            worker_bars[idx].enable_steady_tick(std::time::Duration::from_millis(100));
-
-            let output = child.wait_with_output().map_err(|e| {
+        for (worker_id, mut child, _temp_file) in workers {
+            let status = child.wait().map_err(|e| {
                 crate::error::Error::CommandExecution(format!(
                     "Failed to wait for worker {}: {}",
                     worker_id, e
                 ))
             })?;
 
-            if !output.status.success() {
-                worker_bars[idx].abandon_with_message("failed");
+            if !status.success() {
                 any_failed = true;
             }
+        }
 
-            // Parse worker results
-            let worker_run_id = format!("{}-{}", run_id, worker_id);
+        // Collect results from parse threads
+        for (worker_id, worker_bar, parse_thread) in parse_threads {
+            let worker_run = parse_thread.join().map_err(|_| {
+                crate::error::Error::CommandExecution(format!(
+                    "Parse thread {} panicked",
+                    worker_id
+                ))
+            })??;
 
-            // NOTE: When running tests in a non-TTY environment (like spawned processes),
-            // the test framework may output to stderr instead of stdout. Try both.
-            let subunit_data = if output.stdout.is_empty() && !output.stderr.is_empty() {
-                output.stderr.as_slice()
-            } else {
-                output.stdout.as_slice()
-            };
-
-            // Parse with progress reporting
-            worker_bars[idx].set_message("parsing results...");
-            let worker_bar = worker_bars[idx].clone();
-            let overall_bar_clone = overall_bar.clone();
-            let mut worker_run = subunit_stream::parse_stream_with_progress(
-                subunit_data,
-                worker_run_id.clone(),
-                move |test_id, status| {
-                    let indicator = status.indicator();
-                    if !indicator.is_empty() {
-                        worker_bar.inc(1);
-                        overall_bar_clone.inc(1);
-                        // Truncate test name if too long
-                        let short_name = if test_id.len() > 40 {
-                            &test_id[test_id.len() - 40..]
-                        } else {
-                            test_id
-                        };
-                        worker_bar.set_message(format!("{} {}", indicator, short_name));
-                    }
-                },
-            )?;
-
-            worker_bars[idx].finish_with_message("done");
+            worker_bar.finish_with_message("done");
 
             // Add worker tag to all results
             let worker_tag = format!("worker-{}", worker_id);
+            let mut worker_run = worker_run;
             for (_, result) in worker_run.results.iter_mut() {
                 if !result.tags.contains(&worker_tag) {
                     result.tags.push(worker_tag.clone());
