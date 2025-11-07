@@ -12,6 +12,7 @@ use testrepository::commands::AnalyzeIsolationCommand;
 #[derive(Parser)]
 #[command(name = "testr")]
 #[command(about = "Test repository management tool", long_about = None)]
+#[command(version)]
 #[command(disable_help_subcommand = true)]
 struct Cli {
     /// Repository path (defaults to current directory)
