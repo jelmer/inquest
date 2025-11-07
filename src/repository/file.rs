@@ -152,7 +152,10 @@ impl FileRepository {
         Ok(())
     }
 
-    fn get_test_times_for_ids_impl(&self, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
+    fn get_test_times_for_ids_impl(
+        &self,
+        test_ids: &[TestId],
+    ) -> Result<HashMap<TestId, Duration>> {
         let times_path = self.path.join("times.dbm");
 
         // If the database doesn't exist yet, return empty
@@ -176,7 +179,11 @@ impl FileRepository {
     }
 
     /// Read test times from SQLite database (Python dbm.sqlite3 format)
-    fn read_times_sqlite(&self, path: &std::path::Path, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
+    fn read_times_sqlite(
+        &self,
+        path: &std::path::Path,
+        test_ids: &[TestId],
+    ) -> Result<HashMap<TestId, Duration>> {
         let conn = rusqlite::Connection::open(path)?;
 
         // Python's dbm.sqlite3 uses a table called 'Dict' with columns 'key' and 'value'
@@ -199,7 +206,11 @@ impl FileRepository {
     }
 
     /// Read test times from GDBM database (older Python versions)
-    fn read_times_gdbm(&self, path: &std::path::Path, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
+    fn read_times_gdbm(
+        &self,
+        path: &std::path::Path,
+        test_ids: &[TestId],
+    ) -> Result<HashMap<TestId, Duration>> {
         let db = gdbm::Gdbm::new(path, 0, gdbm::Open::READER, 0o644)
             .map_err(|e| Error::Io(std::io::Error::other(format!("Failed to open GDBM: {}", e))))?;
 

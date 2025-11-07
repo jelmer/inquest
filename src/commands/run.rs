@@ -473,7 +473,10 @@ impl Command for RunCommand {
             if explicit_concurrency == 0 {
                 // --parallel was given without a value, detect CPU count
                 let cpu_count = num_cpus::get();
-                ui.output(&format!("Auto-detected {} CPUs for parallel execution", cpu_count))?;
+                ui.output(&format!(
+                    "Auto-detected {} CPUs for parallel execution",
+                    cpu_count
+                ))?;
                 cpu_count
             } else {
                 explicit_concurrency
