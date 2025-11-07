@@ -80,6 +80,41 @@ test_id_option=$IDLIST
 test_run_concurrency=./scripts/get-worker-count.sh
 ```
 
+### Instance Provisioning
+
+For tests that need isolated environments (e.g., separate databases, ports):
+
+```ini
+[DEFAULT]
+test_command=python -m subunit.run $IDOPTION
+test_id_option=$IDLIST
+# Provision N test databases and return their IDs
+instance_provision=./scripts/provision-db.sh $INSTANCE_COUNT
+# Execute tests against a specific instance
+instance_execute=DB_ID=$INSTANCE_ID python -m subunit.run $IDOPTION
+# Clean up the test database
+instance_dispose=./scripts/dispose-db.sh $INSTANCE_ID
+```
+
+The provision script should output one instance ID per line:
+```bash
+#!/bin/bash
+# provision-db.sh
+for i in $(seq 1 $1); do
+    db_id="test-db-$i"
+    # Create database
+    createdb $db_id
+    echo $db_id
+done
+```
+
+The dispose script receives each instance ID:
+```bash
+#!/bin/bash
+# dispose-db.sh
+dropdb $1
+```
+
 ## Common Usage Patterns
 
 ### Initial Setup

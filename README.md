@@ -169,6 +169,9 @@ The `.testr.conf` file uses INI format with a `[DEFAULT]` section. Key options:
 - `group_regex`: Regex to group related tests together during parallel execution
 - `test_run_concurrency`: Command to determine concurrency level (e.g., `nproc`)
 - `filter_tags`: Tags to filter test results by (for parallel execution)
+- `instance_provision`: Command to provision test instances (receives `$INSTANCE_COUNT`)
+- `instance_execute`: Command template for running tests in an instance (receives `$INSTANCE_ID`)
+- `instance_dispose`: Command to clean up test instances (receives `$INSTANCE_ID`)
 
 ### Variable Substitution
 

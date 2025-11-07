@@ -94,7 +94,24 @@ impl TestCommand {
         test_ids: Option<&[TestId]>,
         list_only: bool,
     ) -> Result<(String, Option<NamedTempFile>)> {
-        let mut cmd = self.config.test_command.clone();
+        self.build_command_with_instance(test_ids, list_only, None)
+    }
+
+    /// Build the command to execute tests with optional instance ID
+    pub fn build_command_with_instance(
+        &self,
+        test_ids: Option<&[TestId]>,
+        list_only: bool,
+        instance_id: Option<&str>,
+    ) -> Result<(String, Option<NamedTempFile>)> {
+        // If instance_execute is configured and we have an instance ID, use that
+        let mut cmd = if let (Some(ref instance_exec), Some(id)) =
+            (&self.config.instance_execute, instance_id)
+        {
+            instance_exec.replace("$INSTANCE_ID", id)
+        } else {
+            self.config.test_command.clone()
+        };
         let mut vars = HashMap::new();
         let mut temp_file = None;
 
@@ -213,6 +230,91 @@ impl TestCommand {
         // We need to handle this more carefully in a real implementation
 
         Ok(child)
+    }
+
+    /// Provision test instances for parallel execution
+    ///
+    /// Calls the instance_provision command to create N isolated test environments.
+    /// Returns a vector of instance IDs (one per line from stdout).
+    pub fn provision_instances(&self, count: usize) -> Result<Vec<String>> {
+        let Some(ref cmd) = self.config.instance_provision else {
+            // No provisioning configured, return simple numeric instance IDs
+            return Ok((0..count).map(|i| i.to_string()).collect());
+        };
+
+        // Execute the provision command with the count
+        let full_cmd = cmd.replace("$INSTANCE_COUNT", &count.to_string());
+
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&full_cmd)
+            .current_dir(&self.base_dir)
+            .output()
+            .map_err(|e| {
+                Error::CommandExecution(format!("Failed to execute instance_provision: {}", e))
+            })?;
+
+        if !output.status.success() {
+            return Err(Error::CommandExecution(format!(
+                "instance_provision command failed with status: {}",
+                output.status
+            )));
+        }
+
+        // Parse instance IDs from stdout (one per line)
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let instance_ids: Vec<String> = output_str
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if instance_ids.len() != count {
+            return Err(Error::CommandExecution(format!(
+                "instance_provision returned {} instances, expected {}",
+                instance_ids.len(),
+                count
+            )));
+        }
+
+        Ok(instance_ids)
+    }
+
+    /// Dispose of test instances
+    ///
+    /// Calls the instance_dispose command to clean up test environments.
+    pub fn dispose_instances(&self, instance_ids: &[String]) -> Result<()> {
+        let Some(ref cmd) = self.config.instance_dispose else {
+            // No disposal configured, nothing to do
+            return Ok(());
+        };
+
+        // Execute dispose for each instance
+        for instance_id in instance_ids {
+            let full_cmd = cmd.replace("$INSTANCE_ID", instance_id);
+
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(&full_cmd)
+                .current_dir(&self.base_dir)
+                .output()
+                .map_err(|e| {
+                    Error::CommandExecution(format!(
+                        "Failed to execute instance_dispose for {}: {}",
+                        instance_id, e
+                    ))
+                })?;
+
+            if !output.status.success() {
+                // Log warning but continue disposing other instances
+                eprintln!(
+                    "Warning: instance_dispose failed for {} with status: {}",
+                    instance_id, output.status
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Get the configuration
@@ -401,5 +503,64 @@ test_run_concurrency=exit 1
         let result = tc.get_concurrency();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("failed"));
+    }
+
+    #[test]
+    fn test_provision_instances_no_config() {
+        let config = create_test_config();
+        let temp_dir = TempDir::new().unwrap();
+        let tc = TestCommand::new(config, temp_dir.path().to_path_buf());
+
+        let instances = tc.provision_instances(3).unwrap();
+        // Without configuration, should return simple numeric IDs
+        assert_eq!(instances, vec!["0", "1", "2"]);
+    }
+
+    #[test]
+    fn test_provision_instances_with_config() {
+        let config_str = r#"
+[DEFAULT]
+test_command=echo ""
+instance_provision=echo "db-0\ndb-1\ndb-2" | head -n $INSTANCE_COUNT
+"#;
+        let config = TestrConfig::parse(config_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let tc = TestCommand::new(config, temp_dir.path().to_path_buf());
+
+        let instances = tc.provision_instances(3).unwrap();
+        assert_eq!(instances, vec!["db-0", "db-1", "db-2"]);
+    }
+
+    #[test]
+    fn test_dispose_instances_no_config() {
+        let config = create_test_config();
+        let temp_dir = TempDir::new().unwrap();
+        let tc = TestCommand::new(config, temp_dir.path().to_path_buf());
+
+        let instances = vec!["0".to_string(), "1".to_string()];
+        // Should succeed without error even without configuration
+        tc.dispose_instances(&instances).unwrap();
+    }
+
+    #[test]
+    fn test_build_command_with_instance() {
+        let config_str = r#"
+[DEFAULT]
+test_command=python -m test
+instance_execute=python -m test --instance=$INSTANCE_ID
+"#;
+        let config = TestrConfig::parse(config_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let tc = TestCommand::new(config, temp_dir.path().to_path_buf());
+
+        // Without instance ID, should use normal test_command
+        let (cmd, _) = tc.build_command_with_instance(None, false, None).unwrap();
+        assert_eq!(cmd, "python -m test");
+
+        // With instance ID, should use instance_execute
+        let (cmd, _) = tc
+            .build_command_with_instance(None, false, Some("worker-0"))
+            .unwrap();
+        assert_eq!(cmd, "python -m test --instance=worker-0");
     }
 }

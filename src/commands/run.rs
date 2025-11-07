@@ -209,6 +209,18 @@ impl RunCommand {
             concurrency
         ))?;
 
+        // Provision instances if configured
+        let instance_ids = test_cmd.provision_instances(concurrency)?;
+        if test_cmd.config().instance_provision.is_some() {
+            ui.output(&format!("Provisioned {} instances", instance_ids.len()))?;
+        }
+
+        // Ensure instances are disposed even if we panic or error
+        let dispose_guard = InstanceDisposeGuard {
+            test_cmd,
+            instance_ids: &instance_ids,
+        };
+
         // Spawn worker processes
         let mut workers = Vec::new();
         for (worker_id, partition) in partitions.iter().enumerate() {
@@ -218,8 +230,10 @@ impl RunCommand {
 
             ui.output(&format!("Worker {}: {} tests", worker_id, partition.len()))?;
 
-            // Build command for this partition
-            let (cmd_str, _temp_file) = test_cmd.build_command(Some(partition), false)?;
+            // Build command for this partition with instance ID
+            let instance_id = instance_ids.get(worker_id).map(|s| s.as_str());
+            let (cmd_str, _temp_file) =
+                test_cmd.build_command_with_instance(Some(partition), false, instance_id)?;
 
             // Spawn the worker process
             let child = Command::new("sh")
@@ -288,6 +302,13 @@ impl RunCommand {
             repo.insert_test_run_partial(combined_run.clone(), true)?;
         } else {
             repo.insert_test_run(combined_run.clone())?;
+        }
+
+        // Dispose instances (done explicitly before drop to handle errors)
+        drop(dispose_guard);
+        test_cmd.dispose_instances(&instance_ids)?;
+        if test_cmd.config().instance_provision.is_some() {
+            ui.output("Disposed instances")?;
         }
 
         // Display summary
@@ -551,6 +572,22 @@ impl Command for RunCommand {
 
     fn help(&self) -> &str {
         "Run tests and load results into the repository"
+    }
+}
+
+/// RAII guard to ensure test instances are disposed
+///
+/// This struct ensures that test instances are properly cleaned up even if
+/// an error occurs or panic happens during test execution.
+struct InstanceDisposeGuard<'a> {
+    test_cmd: &'a TestCommand,
+    instance_ids: &'a [String],
+}
+
+impl<'a> Drop for InstanceDisposeGuard<'a> {
+    fn drop(&mut self) {
+        // Best effort cleanup - ignore errors during drop
+        let _ = self.test_cmd.dispose_instances(self.instance_ids);
     }
 }
 
