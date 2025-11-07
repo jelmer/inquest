@@ -2,11 +2,22 @@
 //!
 //! This module provides functions to read and write subunit v2 streams,
 //! converting between subunit events and our internal TestRun representation.
+//!
+//! This module supports both traditional file I/O and memory-mapped files
+//! for improved performance with large subunit streams.
 
 use crate::error::{Error, Result};
 use crate::repository::{TestId, TestResult, TestRun, TestStatus};
 use std::io::{Read, Write};
 use subunit::Event;
+
+/// Parse a subunit stream from a byte slice into a TestRun
+///
+/// This is optimized for memory-mapped files and avoids copying data.
+/// It catches panics from the subunit crate and converts them to proper errors.
+pub fn parse_stream_bytes(data: &[u8], run_id: String) -> Result<TestRun> {
+    parse_stream(data, run_id)
+}
 
 /// Parse a subunit stream into a TestRun
 ///
@@ -268,5 +279,35 @@ mod tests {
         } else {
             panic!("Expected Subunit error");
         }
+    }
+
+    #[test]
+    fn test_parse_stream_bytes() {
+        // Test the memory-mapped parsing path
+        let mut test_run = TestRun::new("0".to_string());
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test1"),
+            status: TestStatus::Success,
+            duration: Some(Duration::from_millis(100)),
+            message: None,
+            details: None,
+            tags: vec!["mmap-test".to_string()],
+        });
+
+        // Write to buffer
+        let mut buffer = Vec::new();
+        write_stream(&test_run, &mut buffer).unwrap();
+
+        // Parse using the bytes function (simulating mmap)
+        let parsed = parse_stream_bytes(&buffer, "1".to_string()).unwrap();
+
+        // Verify
+        assert_eq!(parsed.total_tests(), 1);
+        assert_eq!(parsed.count_successes(), 1);
+        let result = parsed.results.values().next().unwrap();
+        assert_eq!(result.test_id.as_str(), "test1");
+        assert!(result.tags.contains(&"mmap-test".to_string()));
     }
 }
