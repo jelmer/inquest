@@ -152,7 +152,7 @@ impl FileRepository {
         Ok(())
     }
 
-    fn get_test_times_for_ids(&self, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
+    fn get_test_times_for_ids_impl(&self, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
         let times_path = self.path.join("times.dbm");
 
         // If the database doesn't exist yet, return empty
@@ -160,28 +160,55 @@ impl FileRepository {
             return Ok(HashMap::new());
         }
 
-        // Open the GDBM database for reading
-        let db = gdbm::Gdbm::new(&times_path, 0, gdbm::Open::READER, 0o644).map_err(|e| {
-            Error::Io(std::io::Error::other(format!(
-                "Failed to open times database: {}",
-                e
-            )))
-        })?;
+        // Try SQLite first (Python's dbm.sqlite3 format - most common on modern systems)
+        if let Ok(result) = self.read_times_sqlite(&times_path, test_ids) {
+            return Ok(result);
+        }
+
+        // Fall back to GDBM (older Python versions or explicit GDBM usage)
+        if let Ok(result) = self.read_times_gdbm(&times_path, test_ids) {
+            return Ok(result);
+        }
+
+        // If neither format works, return empty (with warning)
+        eprintln!("Warning: Could not read times database in SQLite or GDBM format, continuing without historical timing data");
+        Ok(HashMap::new())
+    }
+
+    /// Read test times from SQLite database (Python dbm.sqlite3 format)
+    fn read_times_sqlite(&self, path: &std::path::Path, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
+        let conn = rusqlite::Connection::open(path)?;
+
+        // Python's dbm.sqlite3 uses a table called 'Dict' with columns 'key' and 'value'
+        let mut stmt = conn.prepare("SELECT key, value FROM Dict WHERE key = ?")?;
+        let mut result = HashMap::new();
+
+        for test_id in test_ids {
+            if let Ok(duration_str) = stmt.query_row([test_id.as_str().as_bytes()], |row| {
+                row.get::<_, Vec<u8>>(1)
+            }) {
+                if let Ok(s) = String::from_utf8(duration_str) {
+                    if let Ok(seconds) = s.parse::<f64>() {
+                        result.insert(test_id.clone(), Duration::from_secs_f64(seconds));
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Read test times from GDBM database (older Python versions)
+    fn read_times_gdbm(&self, path: &std::path::Path, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
+        let db = gdbm::Gdbm::new(path, 0, gdbm::Open::READER, 0o644)
+            .map_err(|e| Error::Io(std::io::Error::other(format!("Failed to open GDBM: {}", e))))?;
 
         let mut result = HashMap::new();
 
-        // Fetch times for specific test IDs
         for test_id in test_ids {
-            match db.fetch_string(test_id.as_str().as_bytes()) {
-                Ok(duration_str) => {
-                    if let Ok(seconds) = duration_str.parse::<f64>() {
-                        let duration = Duration::from_secs_f64(seconds);
-                        result.insert(test_id.clone(), duration);
-                    }
-                }
-                Err(_) => {
-                    // Key doesn't exist, skip it
-                    continue;
+            if let Ok(duration_str) = db.fetch_string(test_id.as_str().as_bytes()) {
+                if let Ok(seconds) = duration_str.parse::<f64>() {
+                    result.insert(test_id.clone(), Duration::from_secs_f64(seconds));
                 }
             }
         }
@@ -196,26 +223,25 @@ impl FileRepository {
 
         let times_path = self.path.join("times.dbm");
 
-        // Open the GDBM database for writing (create if doesn't exist)
-        // mode 0o644 = readable by all, writable by owner
-        let db = gdbm::Gdbm::new(&times_path, 0, gdbm::Open::WRCREAT, 0o644).map_err(|e| {
-            Error::Io(std::io::Error::other(format!(
-                "Failed to open times database: {}",
-                e
-            )))
-        })?;
+        // Use SQLite to match Python's dbm.sqlite3 format
+        let conn = rusqlite::Connection::open(&times_path)?;
 
-        // Update each test time
+        // Create the Dict table if it doesn't exist (Python dbm.sqlite3 format)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS Dict (
+                key BLOB PRIMARY KEY,
+                value BLOB
+            )",
+            [],
+        )?;
+
+        // Update each test time using UPSERT (INSERT OR REPLACE)
+        let mut stmt = conn.prepare("INSERT OR REPLACE INTO Dict (key, value) VALUES (?, ?)")?;
+
         for (test_id, duration) in times {
             let key = test_id.as_str().as_bytes();
             let value = duration.as_secs_f64().to_string();
-            db.store(key, value.as_bytes(), true) // true = replace if exists
-                .map_err(|e| {
-                    Error::Io(std::io::Error::other(format!(
-                        "Failed to store test time: {}",
-                        e
-                    )))
-                })?;
+            stmt.execute([key, value.as_bytes()])?;
         }
 
         Ok(())
@@ -325,7 +351,8 @@ impl Repository for FileRepository {
     }
 
     fn get_test_times_for_ids(&self, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
-        self.get_test_times_for_ids(test_ids)
+        // Call the private implementation method to avoid infinite recursion
+        self.get_test_times_for_ids_impl(test_ids)
     }
 
     fn get_next_run_id(&self) -> Result<u64> {

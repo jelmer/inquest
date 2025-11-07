@@ -37,6 +37,9 @@ pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
 
+    #[error("Database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
     #[error("Subunit protocol error: {0}")]
     Subunit(String),
 
