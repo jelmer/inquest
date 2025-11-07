@@ -470,7 +470,14 @@ impl Command for RunCommand {
         // Determine concurrency level
         // Priority: 1) explicit --parallel flag, 2) test_run_concurrency callout, 3) default to 1
         let concurrency = if let Some(explicit_concurrency) = self.concurrency {
-            explicit_concurrency
+            if explicit_concurrency == 0 {
+                // --parallel was given without a value, detect CPU count
+                let cpu_count = num_cpus::get();
+                ui.output(&format!("Auto-detected {} CPUs for parallel execution", cpu_count))?;
+                cpu_count
+            } else {
+                explicit_concurrency
+            }
         } else if let Some(callout_concurrency) = test_cmd.get_concurrency()? {
             ui.output(&format!(
                 "Using concurrency from test_run_concurrency: {}",

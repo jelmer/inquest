@@ -110,8 +110,8 @@ enum Commands {
         #[arg(long)]
         load_list: Option<String>,
 
-        /// Run tests in parallel across multiple workers
-        #[arg(long, short = 'j', value_name = "N", alias = "concurrency")]
+        /// Run tests in parallel across multiple workers (defaults to number of CPUs if no value given)
+        #[arg(long, short = 'j', value_name = "N", alias = "concurrency", num_args = 0..=1, default_missing_value = "0")]
         parallel: Option<usize>,
 
         /// Run tests repeatedly until they fail
