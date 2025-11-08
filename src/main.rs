@@ -121,6 +121,14 @@ enum Commands {
         /// Run each test in a separate process (completely isolated)
         #[arg(long)]
         isolated: bool,
+
+        /// Test ID filters (regex patterns to filter which tests to run)
+        #[arg(value_name = "TESTFILTER")]
+        testfilters: Vec<String>,
+
+        /// Additional arguments to pass to the test command (use after --)
+        #[arg(last = true, value_name = "TESTARGS")]
+        testargs: Vec<String>,
     },
 }
 
@@ -212,6 +220,8 @@ fn main() {
             parallel,
             until_failure,
             isolated,
+            testfilters,
+            testargs,
         } => {
             let cmd = RunCommand::with_all_options(
                 cli.directory,
@@ -222,6 +232,16 @@ fn main() {
                 parallel,
                 until_failure,
                 isolated,
+                if testfilters.is_empty() {
+                    None
+                } else {
+                    Some(testfilters)
+                },
+                if testargs.is_empty() {
+                    None
+                } else {
+                    Some(testargs)
+                },
             );
             cmd.execute(&mut ui)
         }

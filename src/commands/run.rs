@@ -18,6 +18,8 @@ pub struct RunCommand {
     concurrency: Option<usize>,
     until_failure: bool,
     isolated: bool,
+    test_filters: Option<Vec<String>>,
+    test_args: Option<Vec<String>>,
 }
 
 impl RunCommand {
@@ -31,6 +33,8 @@ impl RunCommand {
             concurrency: None,
             until_failure: false,
             isolated: false,
+            test_filters: None,
+            test_args: None,
         }
     }
 
@@ -44,6 +48,8 @@ impl RunCommand {
             concurrency: None,
             until_failure: false,
             isolated: false,
+            test_filters: None,
+            test_args: None,
         }
     }
 
@@ -57,6 +63,8 @@ impl RunCommand {
             concurrency: None,
             until_failure: false,
             isolated: false,
+            test_filters: None,
+            test_args: None,
         }
     }
 
@@ -75,6 +83,8 @@ impl RunCommand {
             concurrency: None,
             until_failure: false,
             isolated: false,
+            test_filters: None,
+            test_args: None,
         }
     }
 
@@ -88,6 +98,8 @@ impl RunCommand {
         concurrency: Option<usize>,
         until_failure: bool,
         isolated: bool,
+        test_filters: Option<Vec<String>>,
+        test_args: Option<Vec<String>>,
     ) -> Self {
         RunCommand {
             base_path,
@@ -98,6 +110,8 @@ impl RunCommand {
             concurrency,
             until_failure,
             isolated,
+            test_filters,
+            test_args,
         }
     }
 
@@ -120,7 +134,12 @@ impl RunCommand {
         };
 
         // Build command with test IDs if provided
-        let (cmd_str, _temp_file) = test_cmd.build_command(test_ids, false)?;
+        let (cmd_str, _temp_file) = test_cmd.build_command_full(
+            test_ids,
+            false,
+            None,
+            self.test_args.as_deref(),
+        )?;
 
         // Create progress bar
         let progress_bar = ProgressBar::new(test_count as u64);
@@ -294,8 +313,12 @@ impl RunCommand {
 
             // Build command for this partition with instance ID
             let instance_id = instance_ids.get(worker_id).map(|s| s.as_str());
-            let (cmd_str, _temp_file) =
-                test_cmd.build_command_with_instance(Some(partition), false, instance_id)?;
+            let (cmd_str, _temp_file) = test_cmd.build_command_full(
+                Some(partition),
+                false,
+                instance_id,
+                self.test_args.as_deref(),
+            )?;
 
             // Spawn the worker process
             let mut child = Command::new("sh")
@@ -454,8 +477,12 @@ impl RunCommand {
             ui.output(&format!("  [{}/{}] {}", idx + 1, test_ids.len(), test_id))?;
 
             // Build command for this single test
-            let (cmd_str, _temp_file) =
-                test_cmd.build_command(Some(std::slice::from_ref(test_id)), false)?;
+            let (cmd_str, _temp_file) = test_cmd.build_command_full(
+                Some(std::slice::from_ref(test_id)),
+                false,
+                None,
+                self.test_args.as_deref(),
+            )?;
 
             // Spawn process for this test
             let output = Command::new("sh")
@@ -566,6 +593,40 @@ impl Command for RunCommand {
                 // Use load-list verbatim
                 test_ids = Some(load_list_ids);
             }
+        }
+
+        // Apply test_filters if provided
+        if let Some(ref filters) = self.test_filters {
+            use regex::Regex;
+
+            // Compile all filter patterns
+            let compiled_filters: Result<Vec<Regex>> = filters
+                .iter()
+                .map(|pattern| {
+                    Regex::new(pattern).map_err(|e| {
+                        crate::error::Error::Config(format!("Invalid test filter regex '{}': {}", pattern, e))
+                    })
+                })
+                .collect();
+            let compiled_filters = compiled_filters?;
+
+            // If we don't have test_ids yet, we need to list all tests first
+            let all_test_ids = if let Some(ids) = test_ids {
+                ids
+            } else {
+                test_cmd.list_tests()?
+            };
+
+            // Filter test IDs using the patterns (union of all matches)
+            let filtered_ids: Vec<_> = all_test_ids
+                .into_iter()
+                .filter(|test_id| {
+                    // Include test if ANY filter matches (using search, not match)
+                    compiled_filters.iter().any(|re| re.is_match(test_id.as_str()))
+                })
+                .collect();
+
+            test_ids = Some(filtered_ids);
         }
 
         // Determine concurrency level

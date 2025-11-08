@@ -104,6 +104,17 @@ impl TestCommand {
         list_only: bool,
         instance_id: Option<&str>,
     ) -> Result<(String, Option<NamedTempFile>)> {
+        self.build_command_full(test_ids, list_only, instance_id, None)
+    }
+
+    /// Build the command to execute tests with all options
+    pub fn build_command_full(
+        &self,
+        test_ids: Option<&[TestId]>,
+        list_only: bool,
+        instance_id: Option<&str>,
+        test_args: Option<&[String]>,
+    ) -> Result<(String, Option<NamedTempFile>)> {
         // If instance_execute is configured and we have an instance ID, use that
         let mut cmd = if let (Some(ref instance_exec), Some(id)) =
             (&self.config.instance_execute, instance_id)
@@ -178,6 +189,14 @@ impl TestCommand {
 
         // Substitute all variables
         cmd = self.config.substitute_variables(&cmd, &vars);
+
+        // Append test_args if provided (like Python's testargs)
+        if let Some(args) = test_args {
+            if !args.is_empty() {
+                cmd.push(' ');
+                cmd.push_str(&args.join(" "));
+            }
+        }
 
         Ok((cmd, temp_file))
     }
