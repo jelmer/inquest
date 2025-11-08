@@ -140,6 +140,8 @@ impl RunCommand {
         // Create progress bar with dynamic width
         let term_width = console::Term::stdout().size().1 as usize;
         let bar_width = term_width.saturating_sub(40).max(20); // Reserve space for time/counters
+                                                               // Calculate max message length: term_width - bar - time/counters - padding
+        let max_msg_len = term_width.saturating_sub(bar_width + 40).max(30);
 
         let progress_bar = ProgressBar::new(test_count as u64);
         progress_bar.set_style(
@@ -193,18 +195,26 @@ impl RunCommand {
                             failures += 1;
                         }
 
-                        let short_name = if test_id.len() > 60 {
-                            &test_id[test_id.len() - 60..]
-                        } else {
-                            test_id
-                        };
-
                         let fail_msg = if failures > 0 {
                             console::style(format!(" [failures: {}]", failures))
                                 .red()
                                 .to_string()
                         } else {
                             String::new()
+                        };
+
+                        // Truncate test name to fit in available space
+                        // Account for: indicator (1) + space (1) + fail_msg
+                        let fail_len = if failures > 0 {
+                            12 + failures.to_string().len()
+                        } else {
+                            0
+                        };
+                        let max_name = max_msg_len.saturating_sub(2 + fail_len);
+                        let short_name = if test_id.len() > max_name {
+                            &test_id[test_id.len().saturating_sub(max_name)..]
+                        } else {
+                            test_id
                         };
 
                         progress_bar_clone
@@ -350,6 +360,9 @@ impl RunCommand {
 
             // Create a progress bar for this worker
             let worker_bar_width = (term_width.saturating_sub(60) / concurrency.min(4)).max(15);
+            // Calculate max message for worker: account for "Worker N: " prefix and counters
+            let worker_max_msg = term_width.saturating_sub(worker_bar_width + 35).max(25);
+
             let worker_bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
             worker_bar.set_style(
                 ProgressStyle::default_bar()
@@ -421,18 +434,25 @@ impl RunCommand {
                                 overall_bar_clone.set_message(msg);
                             }
 
-                            let short_name = if test_id.len() > 40 {
-                                &test_id[test_id.len() - 40..]
-                            } else {
-                                test_id
-                            };
-
                             let fail_msg = if failures > 0 {
                                 console::style(format!(" [fail: {}]", failures))
                                     .red()
                                     .to_string()
                             } else {
                                 String::new()
+                            };
+
+                            // Truncate test name to fit in available space
+                            let fail_len = if failures > 0 {
+                                9 + failures.to_string().len()
+                            } else {
+                                0
+                            };
+                            let max_name = worker_max_msg.saturating_sub(2 + fail_len);
+                            let short_name = if test_id.len() > max_name {
+                                &test_id[test_id.len().saturating_sub(max_name)..]
+                            } else {
+                                test_id
                             };
 
                             worker_bar_clone
