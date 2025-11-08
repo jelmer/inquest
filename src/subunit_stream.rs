@@ -56,8 +56,8 @@ pub fn parse_stream_bytes(data: &[u8], run_id: String) -> Result<TestRun> {
 /// Parse a subunit stream into a TestRun with progress callback
 ///
 /// The callback is called with (test_id, status) for each test event.
-/// Returns an error if the stream contains corrupted/invalid data or invalid timestamps.
-/// Plain text in the stream is treated as valid (interleaved UTF-8 in subunit v2 protocol).
+/// If the stream is incomplete or interrupted, returns partial results collected before the error.
+/// Returns an error only for invalid timestamps in otherwise valid events.
 pub fn parse_stream_with_progress<R: Read, F>(
     reader: R,
     run_id: String,
@@ -73,17 +73,20 @@ where
 
     // Iterate over the subunit stream
     for item in iter_stream(reader) {
-        let item =
-            item.map_err(|e| Error::Subunit(format!("Failed to parse subunit stream: {}", e)))?;
+        let item = match item {
+            Ok(item) => item,
+            Err(_e) => {
+                // Stream parsing failed (e.g., incomplete data from interrupted run)
+                // Return the partial results we've collected so far
+                break;
+            }
+        };
 
         match item {
-            ScannedItem::Unknown(data, err) => {
-                // Don't silently ignore invalid/corrupted data
-                return Err(Error::Subunit(format!(
-                    "Invalid subunit stream data: {} (got {} bytes)",
-                    err,
-                    data.len()
-                )));
+            ScannedItem::Unknown(_data, _err) => {
+                // Incomplete or corrupted data at end of stream (e.g., from Ctrl+C)
+                // Return the partial results we've collected so far
+                break;
             }
             ScannedItem::Bytes(_) => {
                 // Skip non-event data (this is normal in subunit streams)
@@ -178,8 +181,8 @@ where
 
 /// Parse a subunit stream into a TestRun
 ///
-/// Returns an error if the stream contains corrupted/invalid data or invalid timestamps.
-/// Plain text in the stream is treated as valid (interleaved UTF-8 in subunit v2 protocol).
+/// If the stream is incomplete or interrupted, returns partial results collected before the error.
+/// Returns an error only for invalid timestamps in otherwise valid events.
 pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
     use std::collections::HashMap;
 
@@ -188,17 +191,20 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
 
     // Iterate over the subunit stream
     for item in iter_stream(reader) {
-        let item =
-            item.map_err(|e| Error::Subunit(format!("Failed to parse subunit stream: {}", e)))?;
+        let item = match item {
+            Ok(item) => item,
+            Err(_e) => {
+                // Stream parsing failed (e.g., incomplete data from interrupted run)
+                // Return the partial results we've collected so far
+                break;
+            }
+        };
 
         match item {
-            ScannedItem::Unknown(data, err) => {
-                // Don't silently ignore invalid/corrupted data
-                return Err(Error::Subunit(format!(
-                    "Invalid subunit stream data: {} (got {} bytes)",
-                    err,
-                    data.len()
-                )));
+            ScannedItem::Unknown(_data, _err) => {
+                // Incomplete or corrupted data at end of stream (e.g., from Ctrl+C)
+                // Return the partial results we've collected so far
+                break;
             }
             ScannedItem::Bytes(_) => {
                 // Skip non-event data (this is normal in subunit streams)
