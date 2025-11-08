@@ -298,20 +298,10 @@ impl RunCommand {
             let worker_run_id = format!("{}-{}", run_id, worker_id);
 
             let parse_thread = std::thread::spawn(move || {
-                // Prefer stderr if it has data (some test runners output to stderr in subprocesses)
-                // For now, try stdout first, fall back to stderr
-                use std::io::Read;
-                let mut data = Vec::new();
-                std::io::BufReader::new(stdout).read_to_end(&mut data).ok();
-
-                if data.is_empty() {
-                    std::io::BufReader::new(stderr).read_to_end(&mut data).ok();
-                }
-
-                // Parse the stream with progress
-                subunit_stream::parse_stream_with_progress(
-                    &data[..],
-                    worker_run_id,
+                // Parse stdout stream directly for real-time progress
+                let result = subunit_stream::parse_stream_with_progress(
+                    stdout,
+                    worker_run_id.clone(),
                     |test_id, status| {
                         let indicator = status.indicator();
                         if !indicator.is_empty() {
@@ -325,7 +315,34 @@ impl RunCommand {
                             worker_bar_clone.set_message(format!("{} {}", indicator, short_name));
                         }
                     },
-                )
+                );
+
+                // If stdout parsing failed and stderr has content, try stderr
+                if result.is_err() {
+                    use std::io::Read;
+                    let mut stderr_data = Vec::new();
+                    if std::io::BufReader::new(stderr).read_to_end(&mut stderr_data).is_ok() && !stderr_data.is_empty() {
+                        return subunit_stream::parse_stream_with_progress(
+                            &stderr_data[..],
+                            worker_run_id,
+                            |test_id, status| {
+                                let indicator = status.indicator();
+                                if !indicator.is_empty() {
+                                    worker_bar_clone.inc(1);
+                                    overall_bar_clone.inc(1);
+                                    let short_name = if test_id.len() > 40 {
+                                        &test_id[test_id.len() - 40..]
+                                    } else {
+                                        test_id
+                                    };
+                                    worker_bar_clone.set_message(format!("{} {}", indicator, short_name));
+                                }
+                            },
+                        );
+                    }
+                }
+
+                result
             });
 
             parse_threads.push((worker_id, worker_bar, parse_thread));
