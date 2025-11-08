@@ -112,51 +112,75 @@ impl RunCommand {
     ) -> Result<i32> {
         use std::process::{Command, Stdio};
 
+        // Get test count for progress bar
+        let test_count = if let Some(ids) = test_ids {
+            ids.len()
+        } else {
+            test_cmd.list_tests()?.len()
+        };
+
         // Build command with test IDs if provided
         let (cmd_str, _temp_file) = test_cmd.build_command(test_ids, false)?;
 
-        // Create progress spinner
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .unwrap(),
+        // Create progress bar
+        let progress_bar = ProgressBar::new(test_count as u64);
+        progress_bar.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
+                .unwrap()
+                .progress_chars("█▓▒░  "),
         );
-        spinner.set_message("Running tests...");
-        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
-        // Execute test command
-        let output = Command::new("sh")
+        // Spawn test command
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg(&cmd_str)
             .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
+            .spawn()
             .map_err(|e| {
-                spinner.finish_and_clear();
+                progress_bar.finish_and_clear();
                 crate::error::Error::CommandExecution(format!(
                     "Failed to execute test command: {}",
                     e
                 ))
             })?;
 
-        // Check if command succeeded
-        let command_failed = !output.status.success();
+        // Take stdout for streaming (stderr goes to terminal like Python version)
+        let stdout = child.stdout.take().expect("stdout was piped");
 
-        // Parse subunit output with progress reporting
-        spinner.set_message("Running tests...");
-        let test_run = subunit_stream::parse_stream_with_progress(
-            output.stdout.as_slice(),
-            run_id,
-            |test_id, status| {
+        // Parse stdout stream in a thread for real-time progress
+        let progress_bar_clone = progress_bar.clone();
+        let parse_thread = std::thread::spawn(move || {
+            subunit_stream::parse_stream_with_progress(stdout, run_id, |test_id, status| {
                 let indicator = status.indicator();
                 if !indicator.is_empty() {
-                    spinner.set_message(format!("{} {}", indicator, test_id));
+                    progress_bar_clone.inc(1);
+                    let short_name = if test_id.len() > 60 {
+                        &test_id[test_id.len() - 60..]
+                    } else {
+                        test_id
+                    };
+                    progress_bar_clone.set_message(format!("{} {}", indicator, short_name));
                 }
-            },
-        )?;
-        spinner.finish_and_clear();
+            })
+        });
+
+        // Wait for process to complete
+        let status = child.wait().map_err(|e| {
+            progress_bar.finish_and_clear();
+            crate::error::Error::CommandExecution(format!("Failed to wait for test command: {}", e))
+        })?;
+
+        let command_failed = !status.success();
+
+        // Get results from parse thread
+        let test_run = parse_thread.join().map_err(|_| {
+            progress_bar.finish_and_clear();
+            crate::error::Error::CommandExecution("Parse thread panicked".to_string())
+        })??;
+
+        progress_bar.finish_and_clear();
 
         // Store results
         if self.partial {
@@ -279,7 +303,6 @@ impl RunCommand {
                 .arg(&cmd_str)
                 .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| {
                     crate::error::Error::CommandExecution(format!(
@@ -288,9 +311,8 @@ impl RunCommand {
                     ))
                 })?;
 
-            // Take stdout/stderr for streaming
+            // Take stdout for streaming (stderr goes to terminal like Python version)
             let stdout = child.stdout.take().expect("stdout was piped");
-            let stderr = child.stderr.take().expect("stderr was piped");
 
             // Spawn thread to parse output in real-time
             let worker_bar_clone = worker_bar.clone();
@@ -299,9 +321,9 @@ impl RunCommand {
 
             let parse_thread = std::thread::spawn(move || {
                 // Parse stdout stream directly for real-time progress
-                let result = subunit_stream::parse_stream_with_progress(
+                subunit_stream::parse_stream_with_progress(
                     stdout,
-                    worker_run_id.clone(),
+                    worker_run_id,
                     |test_id, status| {
                         let indicator = status.indicator();
                         if !indicator.is_empty() {
@@ -315,34 +337,7 @@ impl RunCommand {
                             worker_bar_clone.set_message(format!("{} {}", indicator, short_name));
                         }
                     },
-                );
-
-                // If stdout parsing failed and stderr has content, try stderr
-                if result.is_err() {
-                    use std::io::Read;
-                    let mut stderr_data = Vec::new();
-                    if std::io::BufReader::new(stderr).read_to_end(&mut stderr_data).is_ok() && !stderr_data.is_empty() {
-                        return subunit_stream::parse_stream_with_progress(
-                            &stderr_data[..],
-                            worker_run_id,
-                            |test_id, status| {
-                                let indicator = status.indicator();
-                                if !indicator.is_empty() {
-                                    worker_bar_clone.inc(1);
-                                    overall_bar_clone.inc(1);
-                                    let short_name = if test_id.len() > 40 {
-                                        &test_id[test_id.len() - 40..]
-                                    } else {
-                                        test_id
-                                    };
-                                    worker_bar_clone.set_message(format!("{} {}", indicator, short_name));
-                                }
-                            },
-                        );
-                    }
-                }
-
-                result
+                )
             });
 
             parse_threads.push((worker_id, worker_bar, parse_thread));
