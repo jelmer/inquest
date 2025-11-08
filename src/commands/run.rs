@@ -175,6 +175,7 @@ impl RunCommand {
         let run_id_clone = run_id.clone();
         let parse_thread = std::thread::spawn(move || {
             let mut failures = 0;
+            let progress_bar_for_bytes = progress_bar_clone.clone();
             let result = subunit_stream::parse_stream_with_progress(
                 stdout,
                 run_id_clone,
@@ -209,6 +210,15 @@ impl RunCommand {
                         progress_bar_clone
                             .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
                     }
+                },
+                |bytes| {
+                    // Print non-subunit output above the progress bar
+                    // Write raw bytes to preserve any non-UTF8 content
+                    use std::io::Write;
+                    progress_bar_for_bytes.suspend(|| {
+                        let _ = std::io::stdout().write_all(bytes);
+                        let _ = std::io::stdout().flush();
+                    });
                 },
             );
             result
@@ -385,6 +395,7 @@ impl RunCommand {
 
             let parse_thread = std::thread::spawn(move || {
                 let mut failures = 0;
+                let worker_bar_for_bytes = worker_bar_clone.clone();
                 // Parse stdout stream directly for real-time progress
                 subunit_stream::parse_stream_with_progress(
                     stdout,
@@ -427,6 +438,15 @@ impl RunCommand {
                             worker_bar_clone
                                 .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
                         }
+                    },
+                    |bytes| {
+                        // Print non-subunit output from this worker
+                        // Write raw bytes to preserve any non-UTF8 content
+                        use std::io::Write;
+                        worker_bar_for_bytes.suspend(|| {
+                            let _ = std::io::stdout().write_all(bytes);
+                            let _ = std::io::stdout().flush();
+                        });
                     },
                 )
             });

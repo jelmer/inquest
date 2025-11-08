@@ -56,15 +56,18 @@ pub fn parse_stream_bytes(data: &[u8], run_id: String) -> Result<TestRun> {
 /// Parse a subunit stream into a TestRun with progress callback
 ///
 /// The callback is called with (test_id, status) for each test event.
+/// The bytes_callback is called with non-subunit output (e.g., print statements).
 /// If the stream is incomplete or interrupted, returns partial results collected before the error.
 /// Returns an error only for invalid timestamps in otherwise valid events.
-pub fn parse_stream_with_progress<R: Read, F>(
+pub fn parse_stream_with_progress<R: Read, F, B>(
     reader: R,
     run_id: String,
     mut progress_callback: F,
+    mut bytes_callback: B,
 ) -> Result<TestRun>
 where
     F: FnMut(&str, ProgressStatus),
+    B: FnMut(&[u8]),
 {
     use std::collections::HashMap;
 
@@ -107,9 +110,10 @@ where
                 // Silently skip unknown items to drain the pipe
                 continue;
             }
-            ScannedItem::Bytes(_) => {
-                // Skip non-event data (this is normal in subunit streams)
+            ScannedItem::Bytes(bytes) => {
+                // Non-event data (e.g., print statements from tests)
                 consecutive_errors = 0; // Reset on any valid item
+                bytes_callback(&bytes);
                 continue;
             }
             ScannedItem::Event(event) => {
