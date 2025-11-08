@@ -852,6 +852,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "console",
  "gdbm",
  "indicatif",
  "memmap2",

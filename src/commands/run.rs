@@ -137,11 +137,17 @@ impl RunCommand {
         let (cmd_str, _temp_file) =
             test_cmd.build_command_full(test_ids, false, None, self.test_args.as_deref())?;
 
-        // Create progress bar
+        // Create progress bar with dynamic width
+        let term_width = console::Term::stdout().size().1 as usize;
+        let bar_width = term_width.saturating_sub(40).max(20); // Reserve space for time/counters
+
         let progress_bar = ProgressBar::new(test_count as u64);
         progress_bar.set_style(
             ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
+                .template(&format!(
+                    "[{{elapsed_precise}}] {{bar:{}.cyan/blue}} {{pos}}/{{len}} {{msg}}",
+                    bar_width
+                ))
                 .unwrap()
                 .progress_chars("█▓▒░  "),
         );
@@ -169,31 +175,42 @@ impl RunCommand {
         let run_id_clone = run_id.clone();
         let parse_thread = std::thread::spawn(move || {
             let mut failures = 0;
-            let result = subunit_stream::parse_stream_with_progress(stdout, run_id_clone, |test_id, status| {
-                let indicator = status.indicator();
-                if !indicator.is_empty() {
-                    progress_bar_clone.inc(1);
+            let result = subunit_stream::parse_stream_with_progress(
+                stdout,
+                run_id_clone,
+                |test_id, status| {
+                    let indicator = status.indicator();
+                    if !indicator.is_empty() {
+                        progress_bar_clone.inc(1);
 
-                    // Track failures
-                    if matches!(status, subunit_stream::ProgressStatus::Failed | subunit_stream::ProgressStatus::UnexpectedSuccess) {
-                        failures += 1;
+                        // Track failures
+                        if matches!(
+                            status,
+                            subunit_stream::ProgressStatus::Failed
+                                | subunit_stream::ProgressStatus::UnexpectedSuccess
+                        ) {
+                            failures += 1;
+                        }
+
+                        let short_name = if test_id.len() > 60 {
+                            &test_id[test_id.len() - 60..]
+                        } else {
+                            test_id
+                        };
+
+                        let fail_msg = if failures > 0 {
+                            console::style(format!(" [failures: {}]", failures))
+                                .red()
+                                .to_string()
+                        } else {
+                            String::new()
+                        };
+
+                        progress_bar_clone
+                            .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
                     }
-
-                    let short_name = if test_id.len() > 60 {
-                        &test_id[test_id.len() - 60..]
-                    } else {
-                        test_id
-                    };
-
-                    let fail_msg = if failures > 0 {
-                        format!(" [failures: {}]", failures)
-                    } else {
-                        String::new()
-                    };
-
-                    progress_bar_clone.set_message(format!("{} {}{}", indicator, short_name, fail_msg));
-                }
-            });
+                },
+            );
             result
         });
 
@@ -282,11 +299,17 @@ impl RunCommand {
         .map_err(|e| crate::error::Error::Config(format!("Invalid group_regex pattern: {}", e)))?;
 
         // Create multi-progress for tracking all workers
+        let term_width = console::Term::stdout().size().1 as usize;
+        let overall_bar_width = term_width.saturating_sub(40).max(20);
+
         let multi_progress = indicatif::MultiProgress::new();
         let overall_bar = multi_progress.add(ProgressBar::new(all_tests.len() as u64));
         overall_bar.set_style(
             ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
+                .template(&format!(
+                    "[{{elapsed_precise}}] {{bar:{}.cyan/blue}} {{pos}}/{{len}} {{msg}}",
+                    overall_bar_width
+                ))
                 .unwrap()
                 .progress_chars("█▓▒░  "),
         );
@@ -316,12 +339,13 @@ impl RunCommand {
             }
 
             // Create a progress bar for this worker
+            let worker_bar_width = (term_width.saturating_sub(60) / concurrency.min(4)).max(15);
             let worker_bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
             worker_bar.set_style(
                 ProgressStyle::default_bar()
                     .template(&format!(
-                        "Worker {}: [{{bar:20.green/blue}}] {{pos}}/{{len}} {{msg}}",
-                        worker_id
+                        "Worker {}: [{{bar:{}.green/blue}}] {{pos}}/{{len}} {{msg}}",
+                        worker_id, worker_bar_width
                     ))
                     .unwrap()
                     .progress_chars("█▓▒░  "),
@@ -372,10 +396,18 @@ impl RunCommand {
                             overall_bar_clone.inc(1);
 
                             // Track failures
-                            if matches!(status, subunit_stream::ProgressStatus::Failed | subunit_stream::ProgressStatus::UnexpectedSuccess) {
+                            if matches!(
+                                status,
+                                subunit_stream::ProgressStatus::Failed
+                                    | subunit_stream::ProgressStatus::UnexpectedSuccess
+                            ) {
                                 failures += 1;
-                                let total = total_failures_clone.fetch_add(1, Ordering::Relaxed) + 1;
-                                overall_bar_clone.set_message(format!("failures: {}", total));
+                                let total =
+                                    total_failures_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                                let msg = console::style(format!("failures: {}", total))
+                                    .red()
+                                    .to_string();
+                                overall_bar_clone.set_message(msg);
                             }
 
                             let short_name = if test_id.len() > 40 {
@@ -385,12 +417,15 @@ impl RunCommand {
                             };
 
                             let fail_msg = if failures > 0 {
-                                format!(" [fail: {}]", failures)
+                                console::style(format!(" [fail: {}]", failures))
+                                    .red()
+                                    .to_string()
                             } else {
                                 String::new()
                             };
 
-                            worker_bar_clone.set_message(format!("{} {}{}", indicator, short_name, fail_msg));
+                            worker_bar_clone
+                                .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
                         }
                     },
                 )
