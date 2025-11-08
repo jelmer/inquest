@@ -9,6 +9,105 @@ use crate::ui::UI;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 
+/// Helper to truncate test name to fit in available space
+fn truncate_test_name(test_id: &str, max_len: usize, fail_msg_len: usize) -> String {
+    let max_name = max_len.saturating_sub(2 + fail_msg_len); // 2 for indicator + space
+    if test_id.len() > max_name {
+        test_id[test_id.len().saturating_sub(max_name)..].to_string()
+    } else {
+        test_id.to_string()
+    }
+}
+
+/// Helper to format failure message with color
+fn format_failure_msg(failures: usize, short_label: bool) -> String {
+    if failures > 0 {
+        let label = if short_label { "fail" } else { "failures" };
+        console::style(format!(" [{}: {}]", label, failures))
+            .red()
+            .to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Helper to write non-subunit bytes to stdout
+fn write_non_subunit_output(progress_bar: &ProgressBar, bytes: &[u8]) {
+    use std::io::Write;
+    progress_bar.suspend(|| {
+        let _ = std::io::stdout().write_all(bytes);
+        let _ = std::io::stdout().flush();
+    });
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_test_name_no_truncation_needed() {
+        let name = "short_test";
+        let result = truncate_test_name(name, 50, 0);
+        assert_eq!(result, "short_test");
+    }
+
+    #[test]
+    fn test_truncate_test_name_with_truncation() {
+        let name = "very.long.test.module.name.TestClass.test_method_name";
+        let result = truncate_test_name(name, 30, 0);
+        // Should show the end (most specific part)
+        assert_eq!(result.len(), 28); // 30 - 2 for indicator and space
+        assert!(result.ends_with("test_method_name"));
+    }
+
+    #[test]
+    fn test_truncate_test_name_with_fail_msg() {
+        let name = "some.long.test.name.that.needs.truncating";
+        let result = truncate_test_name(name, 30, 15); // Reserve 15 chars for " [failures: 99]"
+        assert_eq!(result.len(), 13); // 30 - 2 - 15 = 13
+        assert!(result.ends_with("truncating"));
+    }
+
+    #[test]
+    fn test_format_failure_msg_no_failures() {
+        let msg = format_failure_msg(0, false);
+        assert_eq!(msg, "");
+    }
+
+    #[test]
+    fn test_format_failure_msg_with_failures_long() {
+        let msg = format_failure_msg(5, false);
+        assert!(msg.contains("[failures: 5]"));
+        // In tests, console::style may or may not add colors depending on the environment
+        // Just verify the message contains the expected text
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn test_format_failure_msg_with_failures_short() {
+        let msg = format_failure_msg(3, true);
+        assert!(msg.contains("[fail: 3]"));
+        // In tests, console::style may or may not add colors depending on the environment
+        // Just verify the message contains the expected text
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn test_truncate_edge_case_exact_fit() {
+        let name = "exactly_twenty_chars";
+        let result = truncate_test_name(name, 22, 0); // 22 - 2 = 20
+        assert_eq!(result, "exactly_twenty_chars");
+    }
+
+    #[test]
+    fn test_truncate_edge_case_very_small_max() {
+        let name = "some.long.test.name";
+        let result = truncate_test_name(name, 5, 0);
+        assert_eq!(result.len(), 3); // 5 - 2 = 3
+        assert_eq!(result, "ame"); // Last 3 chars
+    }
+}
+
 pub struct RunCommand {
     base_path: Option<String>,
     failing_only: bool,
@@ -195,40 +294,20 @@ impl RunCommand {
                             failures += 1;
                         }
 
-                        let fail_msg = if failures > 0 {
-                            console::style(format!(" [failures: {}]", failures))
-                                .red()
-                                .to_string()
-                        } else {
-                            String::new()
-                        };
-
-                        // Truncate test name to fit in available space
-                        // Account for: indicator (1) + space (1) + fail_msg
+                        let fail_msg = format_failure_msg(failures, false);
                         let fail_len = if failures > 0 {
                             12 + failures.to_string().len()
                         } else {
                             0
                         };
-                        let max_name = max_msg_len.saturating_sub(2 + fail_len);
-                        let short_name = if test_id.len() > max_name {
-                            &test_id[test_id.len().saturating_sub(max_name)..]
-                        } else {
-                            test_id
-                        };
+                        let short_name = truncate_test_name(test_id, max_msg_len, fail_len);
 
                         progress_bar_clone
                             .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
                     }
                 },
                 |bytes| {
-                    // Print non-subunit output above the progress bar
-                    // Write raw bytes to preserve any non-UTF8 content
-                    use std::io::Write;
-                    progress_bar_for_bytes.suspend(|| {
-                        let _ = std::io::stdout().write_all(bytes);
-                        let _ = std::io::stdout().flush();
-                    });
+                    write_non_subunit_output(&progress_bar_for_bytes, bytes);
                 },
             );
             result
@@ -434,39 +513,20 @@ impl RunCommand {
                                 overall_bar_clone.set_message(msg);
                             }
 
-                            let fail_msg = if failures > 0 {
-                                console::style(format!(" [fail: {}]", failures))
-                                    .red()
-                                    .to_string()
-                            } else {
-                                String::new()
-                            };
-
-                            // Truncate test name to fit in available space
+                            let fail_msg = format_failure_msg(failures, true);
                             let fail_len = if failures > 0 {
                                 9 + failures.to_string().len()
                             } else {
                                 0
                             };
-                            let max_name = worker_max_msg.saturating_sub(2 + fail_len);
-                            let short_name = if test_id.len() > max_name {
-                                &test_id[test_id.len().saturating_sub(max_name)..]
-                            } else {
-                                test_id
-                            };
+                            let short_name = truncate_test_name(test_id, worker_max_msg, fail_len);
 
                             worker_bar_clone
                                 .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
                         }
                     },
                     |bytes| {
-                        // Print non-subunit output from this worker
-                        // Write raw bytes to preserve any non-UTF8 content
-                        use std::io::Write;
-                        worker_bar_for_bytes.suspend(|| {
-                            let _ = std::io::stdout().write_all(bytes);
-                            let _ = std::io::stdout().flush();
-                        });
+                        write_non_subunit_output(&worker_bar_for_bytes, bytes);
                     },
                 )
             });
