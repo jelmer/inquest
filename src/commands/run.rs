@@ -168,18 +168,33 @@ impl RunCommand {
         let progress_bar_clone = progress_bar.clone();
         let run_id_clone = run_id.clone();
         let parse_thread = std::thread::spawn(move || {
-            subunit_stream::parse_stream_with_progress(stdout, run_id_clone, |test_id, status| {
+            let mut failures = 0;
+            let result = subunit_stream::parse_stream_with_progress(stdout, run_id_clone, |test_id, status| {
                 let indicator = status.indicator();
                 if !indicator.is_empty() {
                     progress_bar_clone.inc(1);
+
+                    // Track failures
+                    if matches!(status, subunit_stream::ProgressStatus::Failed | subunit_stream::ProgressStatus::UnexpectedSuccess) {
+                        failures += 1;
+                    }
+
                     let short_name = if test_id.len() > 60 {
                         &test_id[test_id.len() - 60..]
                     } else {
                         test_id
                     };
-                    progress_bar_clone.set_message(format!("{} {}", indicator, short_name));
+
+                    let fail_msg = if failures > 0 {
+                        format!(" [failures: {}]", failures)
+                    } else {
+                        String::new()
+                    };
+
+                    progress_bar_clone.set_message(format!("{} {}{}", indicator, short_name, fail_msg));
                 }
-            })
+            });
+            result
         });
 
         // Wait for process to complete
@@ -235,6 +250,8 @@ impl RunCommand {
     ) -> Result<i32> {
         use std::collections::HashMap;
         use std::process::{Command, Stdio};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
 
         // Get the list of tests to run
         let all_tests = if let Some(ids) = test_ids {
@@ -269,11 +286,13 @@ impl RunCommand {
         let overall_bar = multi_progress.add(ProgressBar::new(all_tests.len() as u64));
         overall_bar.set_style(
             ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} tests")
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
                 .unwrap()
                 .progress_chars("█▓▒░  "),
         );
-        overall_bar.set_message(format!("Running across {} workers", concurrency));
+
+        // Shared failure counter across all workers
+        let total_failures = Arc::new(AtomicUsize::new(0));
 
         // Provision instances if configured
         let instance_ids = test_cmd.provision_instances(concurrency)?;
@@ -338,8 +357,10 @@ impl RunCommand {
             let worker_bar_clone = worker_bar.clone();
             let overall_bar_clone = overall_bar.clone();
             let worker_run_id = format!("{}-{}", run_id, worker_id);
+            let total_failures_clone = Arc::clone(&total_failures);
 
             let parse_thread = std::thread::spawn(move || {
+                let mut failures = 0;
                 // Parse stdout stream directly for real-time progress
                 subunit_stream::parse_stream_with_progress(
                     stdout,
@@ -349,12 +370,27 @@ impl RunCommand {
                         if !indicator.is_empty() {
                             worker_bar_clone.inc(1);
                             overall_bar_clone.inc(1);
+
+                            // Track failures
+                            if matches!(status, subunit_stream::ProgressStatus::Failed | subunit_stream::ProgressStatus::UnexpectedSuccess) {
+                                failures += 1;
+                                let total = total_failures_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                                overall_bar_clone.set_message(format!("failures: {}", total));
+                            }
+
                             let short_name = if test_id.len() > 40 {
                                 &test_id[test_id.len() - 40..]
                             } else {
                                 test_id
                             };
-                            worker_bar_clone.set_message(format!("{} {}", indicator, short_name));
+
+                            let fail_msg = if failures > 0 {
+                                format!(" [fail: {}]", failures)
+                            } else {
+                                String::new()
+                            };
+
+                            worker_bar_clone.set_message(format!("{} {}{}", indicator, short_name, fail_msg));
                         }
                     },
                 )
