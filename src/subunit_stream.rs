@@ -209,29 +209,43 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
 
     let mut test_run = TestRun::new(run_id.clone());
     let mut start_times: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
+    let mut consecutive_errors = 0;
+    const MAX_CONSECUTIVE_ERRORS: usize = 100;
 
     // Iterate over the subunit stream
     for item in iter_stream(reader) {
         let item = match item {
-            Ok(item) => item,
+            Ok(item) => {
+                consecutive_errors = 0; // Reset on success
+                item
+            }
             Err(_e) => {
                 // Stream parsing failed (e.g., incomplete data from interrupted run)
-                // Return the partial results we've collected so far
-                break;
+                // Continue reading to handle partial data gracefully
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    break;
+                }
+                continue;
             }
         };
 
         match item {
             ScannedItem::Unknown(_data, _err) => {
-                // Incomplete or corrupted data at end of stream (e.g., from Ctrl+C)
-                // Return the partial results we've collected so far
-                break;
+                // Incomplete or corrupted data - continue reading to handle gracefully
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    break;
+                }
+                continue;
             }
             ScannedItem::Bytes(_) => {
                 // Skip non-event data (this is normal in subunit streams)
+                consecutive_errors = 0; // Reset on any valid item
                 continue;
             }
             ScannedItem::Event(event) => {
+                consecutive_errors = 0; // Reset on any valid event
                 if let Some(ref test_id_str) = event.test_id {
                     // Track start events for duration calculation
                     if event.status == SubunitTestStatus::InProgress {
