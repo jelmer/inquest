@@ -68,31 +68,52 @@ where
 {
     use std::collections::HashMap;
 
-    let mut test_run = TestRun::new(run_id);
+    let mut test_run = TestRun::new(run_id.clone());
     let mut start_times: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
+    let mut consecutive_errors = 0;
+    const MAX_CONSECUTIVE_ERRORS: usize = 100;
 
     // Iterate over the subunit stream
     for item in iter_stream(reader) {
         let item = match item {
-            Ok(item) => item,
-            Err(_e) => {
+            Ok(item) => {
+                consecutive_errors = 0; // Reset on success
+                item
+            }
+            Err(e) => {
                 // Stream parsing failed (e.g., incomplete data from interrupted run)
-                // Return the partial results we've collected so far
-                break;
+                // Continue reading to drain the pipe (prevents BrokenPipeError in child process)
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    eprintln!("WARNING: Too many consecutive parsing errors in run {}, stopping early (collected {} results)",
+                             run_id, test_run.results.len());
+                    break;
+                }
+                // Silently skip individual parsing errors to drain the pipe
+                continue;
             }
         };
 
         match item {
             ScannedItem::Unknown(_data, _err) => {
-                // Incomplete or corrupted data at end of stream (e.g., from Ctrl+C)
-                // Return the partial results we've collected so far
-                break;
+                // Incomplete or corrupted data - continue reading to drain the pipe
+                // This prevents BrokenPipeError in the child process that's still writing
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    eprintln!("WARNING: Too many unknown items in run {}, stopping early (collected {} results)",
+                             run_id, test_run.results.len());
+                    break;
+                }
+                // Silently skip unknown items to drain the pipe
+                continue;
             }
             ScannedItem::Bytes(_) => {
                 // Skip non-event data (this is normal in subunit streams)
+                consecutive_errors = 0; // Reset on any valid item
                 continue;
             }
             ScannedItem::Event(event) => {
+                consecutive_errors = 0; // Reset on any valid event
                 if let Some(ref test_id_str) = event.test_id {
                     // Track start events for duration calculation
                     if event.status == SubunitTestStatus::InProgress {
@@ -186,7 +207,7 @@ where
 pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
     use std::collections::HashMap;
 
-    let mut test_run = TestRun::new(run_id);
+    let mut test_run = TestRun::new(run_id.clone());
     let mut start_times: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
 
     // Iterate over the subunit stream
@@ -344,11 +365,17 @@ pub fn write_stream<W: Write>(test_run: &TestRun, mut writer: W) -> Result<()> {
         }
 
         // Write event - errors from subunit crate are properly handled
-        event
-            .build()
-            .serialize(&mut writer)
-            .map_err(|e| Error::Subunit(format!("Failed to write subunit event: {}", e)))?;
+        event.build().serialize(&mut writer).map_err(|e| {
+            Error::Subunit(format!(
+                "Failed to write subunit event for {}: {}",
+                result.test_id.as_str(),
+                e
+            ))
+        })?;
     }
+
+    // Explicitly flush to ensure all data is written to disk
+    writer.flush().map_err(Error::Io)?;
 
     Ok(())
 }

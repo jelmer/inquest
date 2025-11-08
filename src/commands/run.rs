@@ -134,12 +134,8 @@ impl RunCommand {
         };
 
         // Build command with test IDs if provided
-        let (cmd_str, _temp_file) = test_cmd.build_command_full(
-            test_ids,
-            false,
-            None,
-            self.test_args.as_deref(),
-        )?;
+        let (cmd_str, _temp_file) =
+            test_cmd.build_command_full(test_ids, false, None, self.test_args.as_deref())?;
 
         // Create progress bar
         let progress_bar = ProgressBar::new(test_count as u64);
@@ -170,8 +166,9 @@ impl RunCommand {
 
         // Parse stdout stream in a thread for real-time progress
         let progress_bar_clone = progress_bar.clone();
+        let run_id_clone = run_id.clone();
         let parse_thread = std::thread::spawn(move || {
-            subunit_stream::parse_stream_with_progress(stdout, run_id, |test_id, status| {
+            subunit_stream::parse_stream_with_progress(stdout, run_id_clone, |test_id, status| {
                 let indicator = status.indicator();
                 if !indicator.is_empty() {
                     progress_bar_clone.inc(1);
@@ -213,7 +210,7 @@ impl RunCommand {
         let failures = test_run.count_failures();
         let successes = test_run.count_successes();
 
-        ui.output("\nTest run complete:")?;
+        ui.output(&format!("\nTest run {}:", run_id))?;
         ui.output(&format!("  Total:   {}", total))?;
         ui.output(&format!("  Passed:  {}", successes))?;
         ui.output(&format!("  Failed:  {}", failures))?;
@@ -367,24 +364,14 @@ impl RunCommand {
             workers.push((worker_id, child, _temp_file));
         }
 
-        // Wait for all workers and parse threads to complete
+        // Collect results from parse threads and wait for workers to complete
+        // IMPORTANT: We must collect from parse threads FIRST (while workers are still running)
+        // to avoid deadlock. If we wait for workers first, the pipe buffer can fill up and
+        // the worker process will block trying to write, while we're blocked waiting for it to finish.
         let mut all_results = HashMap::new();
         let mut any_failed = false;
 
-        for (worker_id, mut child, _temp_file) in workers {
-            let status = child.wait().map_err(|e| {
-                crate::error::Error::CommandExecution(format!(
-                    "Failed to wait for worker {}: {}",
-                    worker_id, e
-                ))
-            })?;
-
-            if !status.success() {
-                any_failed = true;
-            }
-        }
-
-        // Collect results from parse threads
+        // First, collect results from ALL parse threads (this will also consume stdout, preventing deadlock)
         for (worker_id, worker_bar, parse_thread) in parse_threads {
             let worker_run = parse_thread.join().map_err(|_| {
                 crate::error::Error::CommandExecution(format!(
@@ -410,10 +397,25 @@ impl RunCommand {
             }
         }
 
+        // Now wait for all worker processes to complete
+        for (worker_id, mut child, _temp_file) in workers {
+            let status = child.wait().map_err(|e| {
+                crate::error::Error::CommandExecution(format!(
+                    "Failed to wait for worker {}: {}",
+                    worker_id, e
+                ))
+            })?;
+
+            if !status.success() {
+                any_failed = true;
+            }
+        }
+
         // Finish progress bars
         overall_bar.finish_and_clear();
 
         // Create combined test run
+        let run_id_for_display = run_id.clone();
         let mut combined_run = crate::repository::TestRun::new(run_id);
         combined_run.timestamp = chrono::Utc::now();
 
@@ -440,7 +442,7 @@ impl RunCommand {
         let failures = combined_run.count_failures();
         let successes = combined_run.count_successes();
 
-        ui.output("\nTest run complete:")?;
+        ui.output(&format!("\nTest run {}:", run_id_for_display))?;
         ui.output(&format!("  Total:   {}", total))?;
         ui.output(&format!("  Passed:  {}", successes))?;
         ui.output(&format!("  Failed:  {}", failures))?;
@@ -514,6 +516,7 @@ impl RunCommand {
         }
 
         // Create combined test run
+        let run_id_for_display = run_id.clone();
         let mut combined_run = crate::repository::TestRun::new(run_id);
         combined_run.timestamp = chrono::Utc::now();
 
@@ -533,7 +536,7 @@ impl RunCommand {
         let failures = combined_run.count_failures();
         let successes = combined_run.count_successes();
 
-        ui.output("\nTest run complete:")?;
+        ui.output(&format!("\nTest run {}:", run_id_for_display))?;
         ui.output(&format!("  Total:   {}", total))?;
         ui.output(&format!("  Passed:  {}", successes))?;
         ui.output(&format!("  Failed:  {}", failures))?;
@@ -604,7 +607,10 @@ impl Command for RunCommand {
                 .iter()
                 .map(|pattern| {
                     Regex::new(pattern).map_err(|e| {
-                        crate::error::Error::Config(format!("Invalid test filter regex '{}': {}", pattern, e))
+                        crate::error::Error::Config(format!(
+                            "Invalid test filter regex '{}': {}",
+                            pattern, e
+                        ))
                     })
                 })
                 .collect();
@@ -622,7 +628,9 @@ impl Command for RunCommand {
                 .into_iter()
                 .filter(|test_id| {
                     // Include test if ANY filter matches (using search, not match)
-                    compiled_filters.iter().any(|re| re.is_match(test_id.as_str()))
+                    compiled_filters
+                        .iter()
+                        .any(|re| re.is_match(test_id.as_str()))
                 })
                 .collect();
 

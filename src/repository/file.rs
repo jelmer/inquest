@@ -271,14 +271,16 @@ impl Repository for FileRepository {
 
         // Check file size - only use mmap for files larger than 4KB
         let metadata = file.metadata()?;
-        if metadata.len() > 4096 {
+        let test_run = if metadata.len() > 4096 {
             // Safety: We're only reading from the file, not modifying it
             let mmap = unsafe { memmap2::Mmap::map(&file)? };
             subunit_stream::parse_stream_bytes(&mmap, run_id.to_string())
         } else {
             // For small files, regular I/O is faster
             subunit_stream::parse_stream(file, run_id.to_string())
-        }
+        }?;
+
+        Ok(test_run)
     }
 
     fn insert_test_run(&mut self, run: TestRun) -> Result<String> {
