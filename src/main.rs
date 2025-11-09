@@ -53,6 +53,10 @@ enum Commands {
         /// Show output as a subunit stream
         #[arg(long)]
         subunit: bool,
+
+        /// Don't show test output/tracebacks for failed tests
+        #[arg(long)]
+        no_output: bool,
     },
 
     /// Show failing tests from the last run
@@ -126,6 +130,10 @@ enum Commands {
         #[arg(long)]
         subunit: bool,
 
+        /// Show test output for all tests (by default only failed/unexpected success tests show output)
+        #[arg(long)]
+        all_output: bool,
+
         /// Test ID filters (regex patterns to filter which tests to run)
         #[arg(value_name = "TESTFILTER")]
         testfilters: Vec<String>,
@@ -181,9 +189,11 @@ fn main() {
             let cmd = LoadCommand::with_partial(cli.directory, partial, force_init);
             cmd.execute(&mut ui)
         }
-        Commands::Last { subunit } => {
+        Commands::Last { subunit, no_output } => {
             let cmd = if subunit {
                 LastCommand::with_subunit(cli.directory)
+            } else if no_output {
+                LastCommand::with_output_control(cli.directory, false)
             } else {
                 LastCommand::new(cli.directory)
             };
@@ -225,6 +235,7 @@ fn main() {
             until_failure,
             isolated,
             subunit,
+            all_output,
             testfilters,
             testargs,
         } => {
@@ -238,6 +249,7 @@ fn main() {
                 until_failure,
                 isolated,
                 subunit,
+                all_output,
                 if testfilters.is_empty() {
                     None
                 } else {

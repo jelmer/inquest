@@ -63,8 +63,8 @@ impl Command for LoadCommand {
             open_repository(self.base_path.as_deref())?
         };
 
-        // Get the next run ID
-        let run_id = repo.get_next_run_id()?.to_string();
+        // Begin the test run and get a writer for streaming raw bytes
+        let (run_id, mut raw_writer) = repo.begin_test_run_raw()?;
 
         // Read from stdin or provided input
         let mut input: Box<dyn Read> = if let Some(ref _inp) = self.input {
@@ -74,16 +74,47 @@ impl Command for LoadCommand {
             Box::new(io::stdin())
         };
 
-        // Parse the subunit stream
-        let test_run = subunit_stream::parse_stream(&mut *input, run_id.clone())?;
+        // Read all data into memory (LoadCommand typically deals with file input, not huge streams)
+        let mut all_data = Vec::new();
+        input
+            .read_to_end(&mut all_data)
+            .map_err(crate::error::Error::Io)?;
 
-        // Insert into repository (with partial mode support)
-        let inserted_id = repo.insert_test_run_partial(test_run.clone(), self.partial)?;
+        // Tee the stream: write raw bytes AND parse
+        use std::io::Write;
+
+        // Write raw bytes to file
+        raw_writer
+            .write_all(&all_data)
+            .map_err(crate::error::Error::Io)?;
+        raw_writer.flush().map_err(crate::error::Error::Io)?;
+
+        // Parse the subunit stream
+        let test_run = subunit_stream::parse_stream(&all_data[..], run_id.clone())?;
+
+        // Update failing tests (raw stream is already stored)
+        if self.partial {
+            repo.update_failing_tests(&test_run)?;
+        } else {
+            repo.replace_failing_tests(&test_run)?;
+        }
+
+        // Update test times
+        use std::collections::HashMap;
+        let mut times = HashMap::new();
+        for result in test_run.results.values() {
+            if let Some(duration) = result.duration {
+                times.insert(result.test_id.clone(), duration);
+            }
+        }
+        if !times.is_empty() {
+            repo.update_test_times(&times)?;
+        }
 
         ui.output(&format!(
             "Loaded {} test(s) as run {}",
             test_run.total_tests(),
-            inserted_id
+            run_id
         ))?;
 
         if test_run.count_failures() > 0 {

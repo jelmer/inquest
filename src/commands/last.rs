@@ -8,6 +8,7 @@ use crate::ui::UI;
 pub struct LastCommand {
     base_path: Option<String>,
     subunit: bool,
+    show_output: bool,
 }
 
 impl LastCommand {
@@ -15,6 +16,7 @@ impl LastCommand {
         LastCommand {
             base_path,
             subunit: false,
+            show_output: true, // By default, show output for failed tests (matches Python behavior)
         }
     }
 
@@ -22,6 +24,15 @@ impl LastCommand {
         LastCommand {
             base_path,
             subunit: true,
+            show_output: false, // Subunit mode doesn't show formatted output
+        }
+    }
+
+    pub fn with_output_control(base_path: Option<String>, show_output: bool) -> Self {
+        LastCommand {
+            base_path,
+            subunit: false,
+            show_output,
         }
     }
 }
@@ -53,8 +64,31 @@ impl Command for LastCommand {
         if test_run.count_failures() > 0 {
             ui.output("")?;
             ui.output("Failed tests:")?;
-            for test_id in test_run.get_failing_tests() {
-                ui.output(&format!("  {}", test_id))?;
+
+            if self.show_output {
+                // Show detailed output for each failed test
+                for test_id in test_run.get_failing_tests() {
+                    ui.output("")?;
+                    ui.output(&format!("{}:", test_id))?;
+
+                    // Get the test result to show details
+                    if let Some(result) = test_run.results.get(test_id) {
+                        if let Some(ref details) = result.details {
+                            // Show the traceback/details
+                            for line in details.lines() {
+                                ui.output(&format!("  {}", line))?;
+                            }
+                        } else if let Some(ref message) = result.message {
+                            // Show just the message if no details
+                            ui.output(&format!("  {}", message))?;
+                        }
+                    }
+                }
+            } else {
+                // Just list the test IDs
+                for test_id in test_run.get_failing_tests() {
+                    ui.output(&format!("  {}", test_id))?;
+                }
             }
             Ok(1)
         } else {

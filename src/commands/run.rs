@@ -263,6 +263,7 @@ pub struct RunCommand {
     until_failure: bool,
     isolated: bool,
     subunit: bool,
+    all_output: bool,
     test_filters: Option<Vec<String>>,
     test_args: Option<Vec<String>>,
 }
@@ -279,6 +280,7 @@ impl RunCommand {
             until_failure: false,
             isolated: false,
             subunit: false,
+            all_output: false,
             test_filters: None,
             test_args: None,
         }
@@ -295,6 +297,7 @@ impl RunCommand {
             until_failure: false,
             isolated: false,
             subunit: false,
+            all_output: false,
             test_filters: None,
             test_args: None,
         }
@@ -311,6 +314,7 @@ impl RunCommand {
             until_failure: false,
             isolated: false,
             subunit: false,
+            all_output: false,
             test_filters: None,
             test_args: None,
         }
@@ -332,6 +336,7 @@ impl RunCommand {
             until_failure: false,
             isolated: false,
             subunit: false,
+            all_output: false,
             test_filters: None,
             test_args: None,
         }
@@ -348,6 +353,7 @@ impl RunCommand {
         until_failure: bool,
         isolated: bool,
         subunit: bool,
+        all_output: bool,
         test_filters: Option<Vec<String>>,
         test_args: Option<Vec<String>>,
     ) -> Self {
@@ -361,6 +367,7 @@ impl RunCommand {
             until_failure,
             isolated,
             subunit,
+            all_output,
             test_filters,
             test_args,
         }
@@ -373,20 +380,25 @@ impl RunCommand {
         repo: &mut Box<dyn crate::repository::Repository>,
         test_cmd: &TestCommand,
         test_ids: Option<&[crate::repository::TestId]>,
-        run_id: String,
+        _run_id: String,
     ) -> Result<i32> {
-        use std::process::Command;
+        use std::io::{Read, Write};
+        use std::process::{Command, Stdio};
 
         // Build command with test IDs if provided
         let (cmd_str, _temp_file) =
             test_cmd.build_command_full(test_ids, false, None, self.test_args.as_deref())?;
 
-        // Spawn test command
-        let output = Command::new("sh")
+        // Begin the test run and get a writer for streaming raw bytes
+        let (run_id, raw_writer) = repo.begin_test_run_raw()?;
+
+        // Spawn test command with piped stdout
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg(&cmd_str)
             .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
-            .output()
+            .stdout(Stdio::piped())
+            .spawn()
             .map_err(|e| {
                 crate::error::Error::CommandExecution(format!(
                     "Failed to execute test command: {}",
@@ -394,21 +406,83 @@ impl RunCommand {
                 ))
             })?;
 
-        // Write stdout (raw subunit stream) directly to UI
-        ui.output_bytes(&output.stdout)?;
+        let mut stdout = child.stdout.take().expect("stdout was piped");
 
-        // Parse the subunit stream to store results
-        let test_run = subunit_stream::parse_stream(output.stdout.as_slice(), run_id)?;
+        // Create a tee writer that writes to both file and UI
+        struct TeeWriter<W1: Write, W2: Write> {
+            writer1: W1,
+            writer2: W2,
+        }
 
-        // Store results
+        impl<W1: Write, W2: Write> Write for TeeWriter<W1, W2> {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.writer1.write_all(buf)?;
+                self.writer2.write_all(buf)?;
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.writer1.flush()?;
+                self.writer2.flush()?;
+                Ok(())
+            }
+        }
+
+        // Create a writer that outputs to UI
+        struct UIWriter<'a> {
+            ui: &'a mut dyn UI,
+        }
+
+        impl<'a> Write for UIWriter<'a> {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.ui
+                    .output_bytes(buf)
+                    .map_err(|e| std::io::Error::other(e))?;
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // Stream to both repository file and UI output
+        let mut tee = TeeWriter {
+            writer1: raw_writer,
+            writer2: UIWriter { ui },
+        };
+
+        std::io::copy(&mut stdout, &mut tee).map_err(crate::error::Error::Io)?;
+        tee.flush().map_err(crate::error::Error::Io)?;
+
+        // Wait for process to complete
+        let status = child.wait().map_err(|e| {
+            crate::error::Error::CommandExecution(format!("Failed to wait for test command: {}", e))
+        })?;
+
+        // Parse the stored stream to update failing tests
+        let test_run = repo.get_test_run(&run_id)?;
+
         if self.partial {
-            repo.insert_test_run_partial(test_run.clone(), true)?;
+            repo.update_failing_tests(&test_run)?;
         } else {
-            repo.insert_test_run(test_run.clone())?;
+            repo.replace_failing_tests(&test_run)?;
+        }
+
+        // Update test times
+        use std::collections::HashMap;
+        let mut times = HashMap::new();
+        for result in test_run.results.values() {
+            if let Some(duration) = result.duration {
+                times.insert(result.test_id.clone(), duration);
+            }
+        }
+        if !times.is_empty() {
+            repo.update_test_times(&times)?;
         }
 
         // Return exit code based on test command exit code
-        if output.status.success() {
+        if status.success() {
             Ok(0)
         } else {
             Ok(1)
@@ -422,7 +496,6 @@ impl RunCommand {
         repo: &mut Box<dyn crate::repository::Repository>,
         test_cmd: &TestCommand,
         test_ids: Option<&[crate::repository::TestId]>,
-        run_id: String,
     ) -> Result<i32> {
         use std::process::{Command, Stdio};
 
@@ -436,6 +509,9 @@ impl RunCommand {
         // Build command with test IDs if provided
         let (cmd_str, _temp_file) =
             test_cmd.build_command_full(test_ids, false, None, self.test_args.as_deref())?;
+
+        // Begin the test run and get a writer for streaming raw bytes
+        let (run_id, raw_writer) = repo.begin_test_run_raw()?;
 
         // Create progress bar with dynamic width
         let term_width = console::Term::stdout().size().1 as usize;
@@ -470,51 +546,178 @@ impl RunCommand {
             })?;
 
         // Take stdout for streaming (stderr goes to terminal like Python version)
-        let stdout = child.stdout.take().expect("stdout was piped");
+        let mut stdout = child.stdout.take().expect("stdout was piped");
+
+        // Tee the stream: capture raw bytes for storage AND parse for progress display
+        use std::io::{Read, Write};
+
+        // Create a tee writer that writes to both file and channel
+        struct TeeWriter<W: Write> {
+            writer: W,
+            tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+        }
+
+        impl<W: Write> Write for TeeWriter<W> {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                // Write to file
+                self.writer.write_all(buf)?;
+                // Send to parser (ignore if receiver dropped)
+                let _ = self.tx.send(buf.to_vec());
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.writer.flush()
+            }
+        }
+
+        // Thread to read stdout and tee it to both storage and parsing
+        let (tx, rx) = std::sync::mpsc::sync_channel(100);
+        let tee_thread = std::thread::spawn(move || -> std::io::Result<()> {
+            let mut tee = TeeWriter {
+                writer: raw_writer,
+                tx,
+            };
+            std::io::copy(&mut stdout, &mut tee)?;
+            tee.flush()?;
+            Ok(())
+        });
 
         // Parse stdout stream in a thread for real-time progress
         let progress_bar_clone = progress_bar.clone();
         let run_id_clone = run_id.clone();
+
+        // Create a reader from the channel
+        struct ChannelReader {
+            rx: std::sync::mpsc::Receiver<Vec<u8>>,
+            buffer: Vec<u8>,
+            pos: usize,
+        }
+
+        impl Read for ChannelReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                // If we have buffered data, use it first
+                if self.pos < self.buffer.len() {
+                    let remaining = self.buffer.len() - self.pos;
+                    let to_copy = remaining.min(buf.len());
+                    buf[..to_copy].copy_from_slice(&self.buffer[self.pos..self.pos + to_copy]);
+                    self.pos += to_copy;
+                    return Ok(to_copy);
+                }
+
+                // Try to get more data from channel
+                match self.rx.recv() {
+                    Ok(data) => {
+                        self.buffer = data;
+                        self.pos = 0;
+                        self.read(buf) // Recursive call to copy from new buffer
+                    }
+                    Err(_) => Ok(0), // Channel closed, EOF
+                }
+            }
+        }
+
+        let channel_reader = ChannelReader {
+            rx,
+            buffer: Vec::new(),
+            pos: 0,
+        };
+
+        let show_all_output = self.all_output;
         let parse_thread = std::thread::spawn(move || {
             let mut failures = 0;
             let progress_bar_for_bytes = progress_bar_clone.clone();
-            let result = subunit_stream::parse_stream_with_progress(
-                stdout,
-                run_id_clone,
-                |test_id, status| {
-                    let indicator = status.indicator();
-                    if !indicator.is_empty() {
-                        progress_bar_clone.inc(1);
+            let progress_bar_for_style = progress_bar_clone.clone();
 
-                        // Track failures
-                        if matches!(
-                            status,
-                            subunit_stream::ProgressStatus::Failed
-                                | subunit_stream::ProgressStatus::UnexpectedSuccess
-                        ) {
-                            failures += 1;
+            let result = if show_all_output {
+                // Show all output immediately
+                subunit_stream::parse_stream_with_progress(
+                    channel_reader,
+                    run_id_clone,
+                    |test_id, status| {
+                        let indicator = status.indicator();
+                        if !indicator.is_empty() {
+                            progress_bar_clone.inc(1);
+
+                            // Track failures
+                            if matches!(
+                                status,
+                                subunit_stream::ProgressStatus::Failed
+                                    | subunit_stream::ProgressStatus::UnexpectedSuccess
+                            ) {
+                                failures += 1;
+                            }
+
+                            // Update progress bar color based on failure rate
+                            let completed = progress_bar_clone.position();
+                            update_progress_bar_style(
+                                &progress_bar_for_style,
+                                bar_width,
+                                completed,
+                                failures,
+                            );
+
+                            let fail_msg = format_failure_msg(failures, false);
+                            let fail_len = if failures > 0 {
+                                12 + failures.to_string().len()
+                            } else {
+                                0
+                            };
+                            let short_name = truncate_test_name(test_id, max_msg_len, fail_len);
+
+                            progress_bar_clone
+                                .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
                         }
+                    },
+                    |bytes| {
+                        write_non_subunit_output(&progress_bar_for_bytes, bytes);
+                    },
+                )
+            } else {
+                // Use filtered parser - only show output from failed tests by default
+                subunit_stream::parse_stream_with_progress_only_failures(
+                    channel_reader,
+                    run_id_clone,
+                    |test_id, status| {
+                        let indicator = status.indicator();
+                        if !indicator.is_empty() {
+                            progress_bar_clone.inc(1);
 
-                        // Update progress bar color based on failure rate
-                        let completed = progress_bar_clone.position();
-                        update_progress_bar_style(&progress_bar_clone, bar_width, completed, failures);
+                            // Track failures
+                            if matches!(
+                                status,
+                                subunit_stream::ProgressStatus::Failed
+                                    | subunit_stream::ProgressStatus::UnexpectedSuccess
+                            ) {
+                                failures += 1;
+                            }
 
-                        let fail_msg = format_failure_msg(failures, false);
-                        let fail_len = if failures > 0 {
-                            12 + failures.to_string().len()
-                        } else {
-                            0
-                        };
-                        let short_name = truncate_test_name(test_id, max_msg_len, fail_len);
+                            // Update progress bar color based on failure rate
+                            let completed = progress_bar_clone.position();
+                            update_progress_bar_style(
+                                &progress_bar_for_style,
+                                bar_width,
+                                completed,
+                                failures,
+                            );
 
-                        progress_bar_clone
-                            .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
-                    }
-                },
-                |bytes| {
-                    write_non_subunit_output(&progress_bar_for_bytes, bytes);
-                },
-            );
+                            let fail_msg = format_failure_msg(failures, false);
+                            let fail_len = if failures > 0 {
+                                12 + failures.to_string().len()
+                            } else {
+                                0
+                            };
+                            let short_name = truncate_test_name(test_id, max_msg_len, fail_len);
+
+                            progress_bar_clone
+                                .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
+                        }
+                    },
+                    |bytes| {
+                        write_non_subunit_output(&progress_bar_for_bytes, bytes);
+                    },
+                )
+            };
             result
         });
 
@@ -532,13 +735,37 @@ impl RunCommand {
             crate::error::Error::CommandExecution("Parse thread panicked".to_string())
         })??;
 
+        // Wait for tee thread to finish writing raw bytes
+        tee_thread
+            .join()
+            .map_err(|_| {
+                progress_bar.finish_and_clear();
+                crate::error::Error::CommandExecution("Tee thread panicked".to_string())
+            })?
+            .map_err(|e| {
+                progress_bar.finish_and_clear();
+                crate::error::Error::Io(e)
+            })?;
+
         progress_bar.finish_and_clear();
 
-        // Store results
+        // Update failing tests (raw stream is already stored)
         if self.partial {
-            repo.insert_test_run_partial(test_run.clone(), true)?;
+            repo.update_failing_tests(&test_run)?;
         } else {
-            repo.insert_test_run(test_run.clone())?;
+            repo.replace_failing_tests(&test_run)?;
+        }
+
+        // Update test times
+        use std::collections::HashMap;
+        let mut times = HashMap::new();
+        for result in test_run.results.values() {
+            if let Some(duration) = result.duration {
+                times.insert(result.test_id.clone(), duration);
+            }
+        }
+        if !times.is_empty() {
+            repo.update_test_times(&times)?;
         }
 
         // Display summary
@@ -566,13 +793,15 @@ impl RunCommand {
         repo: &mut Box<dyn crate::repository::Repository>,
         test_cmd: &TestCommand,
         test_ids: Option<&[crate::repository::TestId]>,
-        run_id: String,
         concurrency: usize,
     ) -> Result<i32> {
         use std::collections::HashMap;
         use std::process::{Command, Stdio};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+
+        // Get the base run ID - each worker will write to run_id-{worker_id}
+        let base_run_id = repo.get_next_run_id()?;
 
         // Get the list of tests to run
         let all_tests = if let Some(ids) = test_ids {
@@ -682,21 +911,96 @@ impl RunCommand {
                 })?;
 
             // Take stdout for streaming (stderr goes to terminal like Python version)
-            let stdout = child.stdout.take().expect("stdout was piped");
+            let mut stdout = child.stdout.take().expect("stdout was piped");
+
+            // Get a writer for this worker's raw output
+            let worker_run_id = format!("{}-{}", base_run_id, worker_id);
+            let (_, raw_writer) = repo.begin_test_run_raw()?;
+
+            // Tee the stream: capture raw bytes for storage AND parse for progress display
+            use std::io::{Read, Write};
+
+            // Create a tee writer that writes to both file and channel
+            struct TeeWriter<W: Write> {
+                writer: W,
+                tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+            }
+
+            impl<W: Write> Write for TeeWriter<W> {
+                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                    // Write to file
+                    self.writer.write_all(buf)?;
+                    // Send to parser (ignore if receiver dropped)
+                    let _ = self.tx.send(buf.to_vec());
+                    Ok(buf.len())
+                }
+
+                fn flush(&mut self) -> std::io::Result<()> {
+                    self.writer.flush()
+                }
+            }
+
+            // Thread to read stdout and tee it to both storage and parsing
+            let (tx, rx) = std::sync::mpsc::sync_channel(100);
+            let tee_thread = std::thread::spawn(move || -> std::io::Result<()> {
+                let mut tee = TeeWriter {
+                    writer: raw_writer,
+                    tx,
+                };
+                std::io::copy(&mut stdout, &mut tee)?;
+                tee.flush()?;
+                Ok(())
+            });
+
+            // Create a reader from the channel
+            struct ChannelReader {
+                rx: std::sync::mpsc::Receiver<Vec<u8>>,
+                buffer: Vec<u8>,
+                pos: usize,
+            }
+
+            impl Read for ChannelReader {
+                fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                    // If we have buffered data, use it first
+                    if self.pos < self.buffer.len() {
+                        let remaining = self.buffer.len() - self.pos;
+                        let to_copy = remaining.min(buf.len());
+                        buf[..to_copy].copy_from_slice(&self.buffer[self.pos..self.pos + to_copy]);
+                        self.pos += to_copy;
+                        return Ok(to_copy);
+                    }
+
+                    // Try to get more data from channel
+                    match self.rx.recv() {
+                        Ok(data) => {
+                            self.buffer = data;
+                            self.pos = 0;
+                            self.read(buf) // Recursive call to copy from new buffer
+                        }
+                        Err(_) => Ok(0), // Channel closed, EOF
+                    }
+                }
+            }
+
+            let channel_reader = ChannelReader {
+                rx,
+                buffer: Vec::new(),
+                pos: 0,
+            };
 
             // Spawn thread to parse output in real-time
             let worker_bar_clone = worker_bar.clone();
             let overall_bar_clone = overall_bar.clone();
-            let worker_run_id = format!("{}-{}", run_id, worker_id);
+            let worker_run_id_clone = worker_run_id.clone();
             let total_failures_clone = Arc::clone(&total_failures);
 
             let parse_thread = std::thread::spawn(move || {
                 let mut failures = 0;
                 let worker_bar_for_bytes = worker_bar_clone.clone();
-                // Parse stdout stream directly for real-time progress
+                // Parse stdout stream for real-time progress
                 subunit_stream::parse_stream_with_progress(
-                    stdout,
-                    worker_run_id,
+                    channel_reader,
+                    worker_run_id_clone,
                     |test_id, status| {
                         let indicator = status.indicator();
                         if !indicator.is_empty() {
@@ -715,7 +1019,12 @@ impl RunCommand {
 
                                 // Update progress bar color based on failure rate
                                 let completed = overall_bar_clone.position();
-                                update_progress_bar_style(&overall_bar_clone, overall_bar_width, completed, total as usize);
+                                update_progress_bar_style(
+                                    &overall_bar_clone,
+                                    overall_bar_width,
+                                    completed,
+                                    total,
+                                );
 
                                 let msg = console::style(format!("failures: {}", total))
                                     .red()
@@ -741,7 +1050,7 @@ impl RunCommand {
                 )
             });
 
-            parse_threads.push((worker_id, worker_bar, parse_thread));
+            parse_threads.push((worker_id, worker_bar, parse_thread, tee_thread));
             workers.push((worker_id, child, _temp_file));
         }
 
@@ -753,13 +1062,24 @@ impl RunCommand {
         let mut any_failed = false;
 
         // First, collect results from ALL parse threads (this will also consume stdout, preventing deadlock)
-        for (worker_id, worker_bar, parse_thread) in parse_threads {
+        for (worker_id, worker_bar, parse_thread, tee_thread) in parse_threads {
             let worker_run = parse_thread.join().map_err(|_| {
                 crate::error::Error::CommandExecution(format!(
                     "Parse thread {} panicked",
                     worker_id
                 ))
             })??;
+
+            // Wait for tee thread to finish writing raw bytes
+            tee_thread
+                .join()
+                .map_err(|_| {
+                    crate::error::Error::CommandExecution(format!(
+                        "Tee thread {} panicked",
+                        worker_id
+                    ))
+                })?
+                .map_err(crate::error::Error::Io)?;
 
             worker_bar.finish_with_message("done");
 
@@ -796,19 +1116,30 @@ impl RunCommand {
         overall_bar.finish_and_clear();
 
         // Create combined test run
-        let run_id_for_display = run_id.clone();
-        let mut combined_run = crate::repository::TestRun::new(run_id);
+        let run_id_for_display = base_run_id.to_string();
+        let mut combined_run = crate::repository::TestRun::new(run_id_for_display.clone());
         combined_run.timestamp = chrono::Utc::now();
 
         for (_, result) in all_results {
             combined_run.add_result(result);
         }
 
-        // Store combined results
+        // Update failing tests (raw streams are already stored in worker files)
         if self.partial {
-            repo.insert_test_run_partial(combined_run.clone(), true)?;
+            repo.update_failing_tests(&combined_run)?;
         } else {
-            repo.insert_test_run(combined_run.clone())?;
+            repo.replace_failing_tests(&combined_run)?;
+        }
+
+        // Update test times
+        let mut times = HashMap::new();
+        for result in combined_run.results.values() {
+            if let Some(duration) = result.duration {
+                times.insert(result.test_id.clone(), duration);
+            }
+        }
+        if !times.is_empty() {
+            repo.update_test_times(&times)?;
         }
 
         // Dispose instances (done explicitly before drop to handle errors)
@@ -843,10 +1174,12 @@ impl RunCommand {
         repo: &mut Box<dyn crate::repository::Repository>,
         test_cmd: &TestCommand,
         test_ids: &[crate::repository::TestId],
-        run_id: String,
     ) -> Result<i32> {
         use std::collections::HashMap;
         use std::process::{Command, Stdio};
+
+        // Get the base run ID - each isolated test will write to its own file
+        let base_run_id = repo.get_next_run_id()?;
 
         ui.output(&format!(
             "Running {} tests in isolated mode (one test per process)",
@@ -887,7 +1220,7 @@ impl RunCommand {
             }
 
             // Parse test results
-            let test_run_id = format!("{}-{}", run_id, idx);
+            let test_run_id = format!("{}-{}", base_run_id, idx);
             let test_run = subunit_stream::parse_stream(output.stdout.as_slice(), test_run_id)?;
 
             // Collect results
@@ -897,19 +1230,30 @@ impl RunCommand {
         }
 
         // Create combined test run
-        let run_id_for_display = run_id.clone();
-        let mut combined_run = crate::repository::TestRun::new(run_id);
+        let run_id_for_display = base_run_id.to_string();
+        let mut combined_run = crate::repository::TestRun::new(run_id_for_display.clone());
         combined_run.timestamp = chrono::Utc::now();
 
         for (_, result) in all_results {
             combined_run.add_result(result);
         }
 
-        // Store combined results
+        // Update failing tests (raw streams are already stored in worker files)
         if self.partial {
-            repo.insert_test_run_partial(combined_run.clone(), true)?;
+            repo.update_failing_tests(&combined_run)?;
         } else {
-            repo.insert_test_run(combined_run.clone())?;
+            repo.replace_failing_tests(&combined_run)?;
+        }
+
+        // Update test times
+        let mut times = HashMap::new();
+        for result in combined_run.results.values() {
+            if let Some(duration) = result.duration {
+                times.insert(result.test_id.clone(), duration);
+            }
+        }
+        if !times.is_empty() {
+            repo.update_test_times(&times)?;
         }
 
         // Display summary
@@ -1067,9 +1411,7 @@ impl Command for RunCommand {
                 let mut iteration = 1;
                 loop {
                     ui.output(&format!("\n=== Iteration {} ===", iteration))?;
-                    let run_id = repo.get_next_run_id()?.to_string();
-                    let exit_code =
-                        self.run_isolated(ui, &mut repo, &test_cmd, &all_tests, run_id)?;
+                    let exit_code = self.run_isolated(ui, &mut repo, &test_cmd, &all_tests)?;
 
                     if exit_code != 0 {
                         ui.output(&format!("\nTests failed on iteration {}", iteration))?;
@@ -1079,8 +1421,7 @@ impl Command for RunCommand {
                     iteration += 1;
                 }
             } else {
-                let run_id = repo.get_next_run_id()?.to_string();
-                self.run_isolated(ui, &mut repo, &test_cmd, &all_tests, run_id)
+                self.run_isolated(ui, &mut repo, &test_cmd, &all_tests)
             }
         } else if self.until_failure {
             // Run tests in a loop until failure (non-isolated)
@@ -1088,20 +1429,10 @@ impl Command for RunCommand {
             loop {
                 ui.output(&format!("\n=== Iteration {} ===", iteration))?;
 
-                // Get the next run ID for this iteration
-                let run_id = repo.get_next_run_id()?.to_string();
-
                 let exit_code = if concurrency > 1 {
-                    self.run_parallel(
-                        ui,
-                        &mut repo,
-                        &test_cmd,
-                        test_ids.as_deref(),
-                        run_id,
-                        concurrency,
-                    )?
+                    self.run_parallel(ui, &mut repo, &test_cmd, test_ids.as_deref(), concurrency)?
                 } else {
-                    self.run_serial(ui, &mut repo, &test_cmd, test_ids.as_deref(), run_id)?
+                    self.run_serial(ui, &mut repo, &test_cmd, test_ids.as_deref())?
                 };
 
                 // Stop if tests failed
@@ -1114,21 +1445,12 @@ impl Command for RunCommand {
             }
         } else {
             // Single run (non-isolated, non-looping)
-            let run_id = repo.get_next_run_id()?.to_string();
-
             if concurrency > 1 {
                 // Parallel execution
-                self.run_parallel(
-                    ui,
-                    &mut repo,
-                    &test_cmd,
-                    test_ids.as_deref(),
-                    run_id,
-                    concurrency,
-                )
+                self.run_parallel(ui, &mut repo, &test_cmd, test_ids.as_deref(), concurrency)
             } else {
                 // Serial execution
-                self.run_serial(ui, &mut repo, &test_cmd, test_ids.as_deref(), run_id)
+                self.run_serial(ui, &mut repo, &test_cmd, test_ids.as_deref())
             }
         }
     }

@@ -54,10 +54,40 @@ pub trait Repository {
     /// Get a specific test run by ID
     fn get_test_run(&self, run_id: &str) -> Result<TestRun>;
 
-    /// Insert a test run, returning the assigned run ID
-    fn insert_test_run(&mut self, run: TestRun) -> Result<String>;
+    /// Begin inserting a raw test run stream, returning (run_id, writer)
+    /// This preserves the original stream byte-for-byte including non-subunit output
+    /// The caller should write the raw subunit bytes to the returned writer
+    fn begin_test_run_raw(&mut self) -> Result<(String, Box<dyn std::io::Write + Send>)>;
 
-    /// Insert a partial test run
+    /// Insert a test run (convenience method for tests - prefer begin_test_run_raw in production)
+    ///
+    /// This is a convenience wrapper around begin_test_run_raw() for test code.
+    /// Production code should prefer the streaming API for better performance.
+    fn insert_test_run(&mut self, run: TestRun) -> Result<String> {
+        use std::io::Write;
+
+        let (run_id, mut writer) = self.begin_test_run_raw()?;
+        crate::subunit_stream::write_stream(&run, &mut *writer)?;
+        writer.flush()?;
+        drop(writer);
+
+        // Update failing tests and times
+        self.replace_failing_tests(&run)?;
+
+        let mut times = std::collections::HashMap::new();
+        for result in run.results.values() {
+            if let Some(duration) = result.duration {
+                times.insert(result.test_id.clone(), duration);
+            }
+        }
+        if !times.is_empty() {
+            self.update_test_times(&times)?;
+        }
+
+        Ok(run_id)
+    }
+
+    /// Insert a partial test run (convenience method for tests - prefer begin_test_run_raw in production)
     ///
     /// In partial mode, the failing test tracking is additive:
     /// - Keeps existing failures
@@ -66,16 +96,32 @@ pub trait Repository {
     ///
     /// In full (non-partial) mode, all previous failures are cleared.
     fn insert_test_run_partial(&mut self, run: TestRun, partial: bool) -> Result<String> {
+        use std::io::Write;
+
+        let (run_id, mut writer) = self.begin_test_run_raw()?;
+        crate::subunit_stream::write_stream(&run, &mut *writer)?;
+        writer.flush()?;
+        drop(writer);
+
+        // Update failing tests based on mode
         if partial {
-            // Update the failing tests before inserting
             self.update_failing_tests(&run)?;
         } else {
-            // Clear and replace failing tests
             self.replace_failing_tests(&run)?;
         }
 
-        // Insert the run normally
-        self.insert_test_run(run)
+        // Update times
+        let mut times = std::collections::HashMap::new();
+        for result in run.results.values() {
+            if let Some(duration) = result.duration {
+                times.insert(result.test_id.clone(), duration);
+            }
+        }
+        if !times.is_empty() {
+            self.update_test_times(&times)?;
+        }
+
+        Ok(run_id)
     }
 
     /// Update failing tests additively (for partial runs)
@@ -95,6 +141,9 @@ pub trait Repository {
 
     /// Get test execution times for specific test IDs
     fn get_test_times_for_ids(&self, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>>;
+
+    /// Update test execution times
+    fn update_test_times(&mut self, times: &HashMap<TestId, Duration>) -> Result<()>;
 
     /// Get the next run ID that will be assigned
     fn get_next_run_id(&self) -> Result<u64>;

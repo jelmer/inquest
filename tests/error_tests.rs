@@ -351,6 +351,10 @@ test_command=echo "test1"
         None,
         false, // until_failure
         false, // isolated
+        false, // subunit
+        false, // all_output
+        None,  // test_filters
+        None,  // test_args
     );
     let result = cmd.execute(&mut ui);
 

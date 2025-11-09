@@ -227,7 +227,7 @@ impl FileRepository {
         Ok(result)
     }
 
-    fn update_test_times(&self, times: &HashMap<TestId, Duration>) -> Result<()> {
+    fn update_test_times_impl(&mut self, times: &HashMap<TestId, Duration>) -> Result<()> {
         if times.is_empty() {
             return Ok(());
         }
@@ -283,26 +283,14 @@ impl Repository for FileRepository {
         Ok(test_run)
     }
 
-    fn insert_test_run(&mut self, run: TestRun) -> Result<String> {
+    fn begin_test_run_raw(&mut self) -> Result<(String, Box<dyn std::io::Write + Send>)> {
         let run_id = self.increment_next_stream()?;
         let run_id_str = run_id.to_string();
 
         let path = self.get_run_path(&run_id_str);
         let file = File::create(&path)?;
-        subunit_stream::write_stream(&run, file)?;
 
-        // Extract and store test durations
-        let mut times = HashMap::new();
-        for result in run.results.values() {
-            if let Some(duration) = result.duration {
-                times.insert(result.test_id.clone(), duration);
-            }
-        }
-        if !times.is_empty() {
-            self.update_test_times(&times)?;
-        }
-
-        Ok(run_id_str)
+        Ok((run_id_str, Box::new(file)))
     }
 
     fn get_latest_run(&self) -> Result<TestRun> {
@@ -366,6 +354,10 @@ impl Repository for FileRepository {
     fn get_test_times_for_ids(&self, test_ids: &[TestId]) -> Result<HashMap<TestId, Duration>> {
         // Call the private implementation method to avoid infinite recursion
         self.get_test_times_for_ids_impl(test_ids)
+    }
+
+    fn update_test_times(&mut self, times: &HashMap<TestId, Duration>) -> Result<()> {
+        self.update_test_times_impl(times)
     }
 
     fn get_next_run_id(&self) -> Result<u64> {
@@ -453,8 +445,13 @@ mod tests {
 
         let mut repo = factory.initialise(temp.path()).unwrap();
 
+        // Use begin_test_run_raw to stream the test run
         let run = TestRun::new("0".to_string());
-        let run_id = repo.insert_test_run(run).unwrap();
+        let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
+
+        // Write the test run as subunit stream
+        crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
+        drop(writer);
 
         assert_eq!(run_id, "0");
         assert_eq!(repo.get_next_run_id().unwrap(), 1);
@@ -473,8 +470,16 @@ mod tests {
 
         assert_eq!(repo.list_run_ids().unwrap().len(), 0);
 
-        repo.insert_test_run(TestRun::new("0".to_string())).unwrap();
-        repo.insert_test_run(TestRun::new("1".to_string())).unwrap();
+        // Insert test runs using streaming API
+        let run = TestRun::new("0".to_string());
+        let (_, mut writer) = repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
+        drop(writer);
+
+        let run = TestRun::new("1".to_string());
+        let (_, mut writer) = repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
+        drop(writer);
 
         let ids = repo.list_run_ids().unwrap();
         assert_eq!(ids.len(), 2);
@@ -489,7 +494,11 @@ mod tests {
         let mut repo = factory.initialise(temp.path()).unwrap();
         assert_eq!(repo.count().unwrap(), 0);
 
-        repo.insert_test_run(TestRun::new("0".to_string())).unwrap();
+        let run = TestRun::new("0".to_string());
+        let (_, mut writer) = repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
+        drop(writer);
+
         assert_eq!(repo.count().unwrap(), 1);
     }
 
@@ -515,7 +524,11 @@ mod tests {
         run1.add_result(TestResult::failure("test1", "Failed"));
         run1.add_result(TestResult::success("test2"));
 
-        repo.insert_test_run_partial(run1, false).unwrap();
+        // Stream and store first run
+        let (_, mut writer) = repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run1, &mut writer).unwrap();
+        drop(writer);
+        repo.replace_failing_tests(&run1).unwrap();
 
         // Check failing tests after first run
         let failing = repo.get_failing_tests().unwrap();
@@ -528,7 +541,11 @@ mod tests {
         run2.add_result(TestResult::success("test1")); // Now passes
         run2.add_result(TestResult::failure("test3", "Failed")); // New failure
 
-        repo.insert_test_run_partial(run2, true).unwrap(); // Partial mode
+        // Stream and store second run
+        let (_, mut writer) = repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run2, &mut writer).unwrap();
+        drop(writer);
+        repo.update_failing_tests(&run2).unwrap(); // Partial mode
 
         // Check failing tests after partial run
         let failing = repo.get_failing_tests().unwrap();
@@ -550,7 +567,10 @@ mod tests {
         run1.add_result(TestResult::failure("test1", "Failed"));
         run1.add_result(TestResult::failure("test2", "Failed"));
 
-        repo.insert_test_run_partial(run1, false).unwrap();
+        let (_, mut writer) = repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run1, &mut writer).unwrap();
+        drop(writer);
+        repo.replace_failing_tests(&run1).unwrap();
 
         let failing = repo.get_failing_tests().unwrap();
         assert_eq!(failing.len(), 2);
@@ -562,7 +582,10 @@ mod tests {
         run2.add_result(TestResult::success("test2"));
         run2.add_result(TestResult::failure("test3", "Failed"));
 
-        repo.insert_test_run_partial(run2, false).unwrap(); // Full mode
+        let (_, mut writer) = repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run2, &mut writer).unwrap();
+        drop(writer);
+        repo.replace_failing_tests(&run2).unwrap(); // Full mode
 
         // Check that failing tests were replaced, not updated
         let failing = repo.get_failing_tests().unwrap();
@@ -594,7 +617,19 @@ mod tests {
         run.add_result(TestResult::success("test3").with_duration(Duration::from_secs_f64(2.25)));
 
         // Insert the run (should write times to database)
-        file_repo.insert_test_run(run).unwrap();
+        let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
+        drop(writer);
+
+        // Update times
+        use std::collections::HashMap;
+        let mut times = HashMap::new();
+        for result in run.results.values() {
+            if let Some(duration) = result.duration {
+                times.insert(result.test_id.clone(), duration);
+            }
+        }
+        file_repo.update_test_times(&times).unwrap();
 
         // Verify times.dbm file was created
         let times_path = repo_path.join("times.dbm");
@@ -635,13 +670,36 @@ mod tests {
         let mut run1 = TestRun::new("0".to_string());
         run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run1.add_result(TestResult::success("test1").with_duration(Duration::from_secs_f64(1.0)));
-        file_repo.insert_test_run(run1).unwrap();
+
+        let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run1, &mut writer).unwrap();
+        drop(writer);
+
+        use std::collections::HashMap;
+        let mut times = HashMap::new();
+        for result in run1.results.values() {
+            if let Some(duration) = result.duration {
+                times.insert(result.test_id.clone(), duration);
+            }
+        }
+        file_repo.update_test_times(&times).unwrap();
 
         // Second run with updated time for test1
         let mut run2 = TestRun::new("1".to_string());
         run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
         run2.add_result(TestResult::success("test1").with_duration(Duration::from_secs_f64(2.0)));
-        file_repo.insert_test_run(run2).unwrap();
+
+        let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run2, &mut writer).unwrap();
+        drop(writer);
+
+        let mut times = HashMap::new();
+        for result in run2.results.values() {
+            if let Some(duration) = result.duration {
+                times.insert(result.test_id.clone(), duration);
+            }
+        }
+        file_repo.update_test_times(&times).unwrap();
 
         // Verify that the time was updated (not accumulated)
         let test_ids = vec![TestId::new("test1")];

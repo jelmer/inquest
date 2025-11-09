@@ -92,8 +92,10 @@ fn test_full_workflow_init_load_last() {
     let result = last_cmd.execute(&mut ui);
     assert_eq!(result.unwrap(), 1); // Exit code 1 because there's a failure
 
-    // Verify exact output structure
-    assert_eq!(ui.output.len(), 8);
+    // Verify exact output structure (with detailed failure output)
+    // Note: After round-trip through subunit serialization, the error message/details
+    // might not be preserved, so we only get the test ID
+    assert_eq!(ui.output.len(), 9);
     assert_eq!(ui.output[0], "Test run: 0");
     assert!(ui.output[1].starts_with("Timestamp: "));
     assert_eq!(ui.output[2], "Total tests: 3");
@@ -101,7 +103,8 @@ fn test_full_workflow_init_load_last() {
     assert_eq!(ui.output[4], "Failed: 1");
     assert_eq!(ui.output[5], "");
     assert_eq!(ui.output[6], "Failed tests:");
-    assert_eq!(ui.output[7], "  test2");
+    assert_eq!(ui.output[7], ""); // Empty line before detailed output
+    assert_eq!(ui.output[8], "test2:"); // Test ID with colon (no message after subunit round-trip)
 }
 
 #[test]
@@ -327,6 +330,10 @@ test_command=python3 -c "import sys; import time; sys.stdout.buffer.write(b'\xb3
         Some(2), // concurrency
         false,   // until_failure
         false,   // isolated
+        false,   // subunit
+        false,   // all_output
+        None,    // test_filters
+        None,    // test_args
     );
 
     // Note: This test will fail to actually run because the command is synthetic
@@ -397,6 +404,10 @@ test_command=echo ""
         None,  // concurrency
         true,  // until_failure
         false, // isolated
+        false, // subunit
+        false, // all_output
+        None,  // test_filters
+        None,  // test_args
     );
 
     // Verify the command was created successfully
@@ -434,6 +445,10 @@ test_command=echo ""
         None,  // concurrency
         false, // until_failure
         true,  // isolated
+        false, // subunit
+        false, // all_output
+        None,  // test_filters
+        None,  // test_args
     );
 
     // Verify the command was created successfully
