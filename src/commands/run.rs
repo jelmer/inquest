@@ -40,6 +40,48 @@ fn write_non_subunit_output(progress_bar: &ProgressBar, bytes: &[u8]) {
     });
 }
 
+/// Choose progress bar colors based on failure rate
+/// Returns (filled_color, empty_color) tuple
+fn get_progress_bar_colors(failure_rate: f64) -> (&'static str, &'static str) {
+    if failure_rate == 0.0 {
+        ("green", "blue")
+    } else if failure_rate < 0.1 {
+        ("yellow", "blue")
+    } else if failure_rate < 0.25 {
+        ("yellow", "red")
+    } else if failure_rate < 0.5 {
+        ("red", "yellow")
+    } else {
+        ("red", "red")
+    }
+}
+
+/// Update progress bar style based on current failure rate
+fn update_progress_bar_style(
+    progress_bar: &ProgressBar,
+    bar_width: usize,
+    completed: u64,
+    failures: usize,
+) {
+    let failure_rate = if completed > 0 {
+        failures as f64 / completed as f64
+    } else {
+        0.0
+    };
+
+    let (filled_color, empty_color) = get_progress_bar_colors(failure_rate);
+
+    progress_bar.set_style(
+        ProgressStyle::default_bar()
+            .template(&format!(
+                "[{{elapsed_precise}}] {{bar:{}.{}/{}}} {{pos}}/{{len}} {{msg}}",
+                bar_width, filled_color, empty_color
+            ))
+            .unwrap()
+            .progress_chars("█▓▒░  "),
+    );
+}
+
 #[cfg(test)]
 mod helper_tests {
     use super::*;
@@ -66,6 +108,109 @@ mod helper_tests {
         let result = truncate_test_name(name, 30, 15); // Reserve 15 chars for " [failures: 99]"
         assert_eq!(result.len(), 13); // 30 - 2 - 15 = 13
         assert!(result.ends_with("truncating"));
+    }
+
+    #[test]
+    fn test_get_progress_bar_colors_all_passing() {
+        let (filled, empty) = get_progress_bar_colors(0.0);
+        assert_eq!(filled, "green");
+        assert_eq!(empty, "blue");
+    }
+
+    #[test]
+    fn test_get_progress_bar_colors_few_failures() {
+        let (filled, empty) = get_progress_bar_colors(0.05); // 5% failure
+        assert_eq!(filled, "yellow");
+        assert_eq!(empty, "blue");
+    }
+
+    #[test]
+    fn test_get_progress_bar_colors_boundary_10_percent() {
+        // Just under 10%
+        let (filled, empty) = get_progress_bar_colors(0.09);
+        assert_eq!(filled, "yellow");
+        assert_eq!(empty, "blue");
+
+        // At 10%
+        let (filled, empty) = get_progress_bar_colors(0.1);
+        assert_eq!(filled, "yellow");
+        assert_eq!(empty, "red");
+    }
+
+    #[test]
+    fn test_get_progress_bar_colors_moderate_failures() {
+        let (filled, empty) = get_progress_bar_colors(0.15); // 15% failure
+        assert_eq!(filled, "yellow");
+        assert_eq!(empty, "red");
+    }
+
+    #[test]
+    fn test_get_progress_bar_colors_boundary_25_percent() {
+        // Just under 25%
+        let (filled, empty) = get_progress_bar_colors(0.24);
+        assert_eq!(filled, "yellow");
+        assert_eq!(empty, "red");
+
+        // At 25%
+        let (filled, empty) = get_progress_bar_colors(0.25);
+        assert_eq!(filled, "red");
+        assert_eq!(empty, "yellow");
+    }
+
+    #[test]
+    fn test_get_progress_bar_colors_many_failures() {
+        let (filled, empty) = get_progress_bar_colors(0.4); // 40% failure
+        assert_eq!(filled, "red");
+        assert_eq!(empty, "yellow");
+    }
+
+    #[test]
+    fn test_get_progress_bar_colors_boundary_50_percent() {
+        // Just under 50%
+        let (filled, empty) = get_progress_bar_colors(0.49);
+        assert_eq!(filled, "red");
+        assert_eq!(empty, "yellow");
+
+        // At 50%
+        let (filled, empty) = get_progress_bar_colors(0.5);
+        assert_eq!(filled, "red");
+        assert_eq!(empty, "red");
+    }
+
+    #[test]
+    fn test_get_progress_bar_colors_most_failures() {
+        let (filled, empty) = get_progress_bar_colors(0.75); // 75% failure
+        assert_eq!(filled, "red");
+        assert_eq!(empty, "red");
+    }
+
+    #[test]
+    fn test_get_progress_bar_colors_all_failures() {
+        let (filled, empty) = get_progress_bar_colors(1.0); // 100% failure
+        assert_eq!(filled, "red");
+        assert_eq!(empty, "red");
+    }
+
+    #[test]
+    fn test_update_progress_bar_style_doesnt_panic() {
+        // Test that the function can be called without panicking
+        // We can't easily test the visual output, but we can verify it executes
+        let pb = ProgressBar::new(10);
+
+        // Test with no failures (0%)
+        update_progress_bar_style(&pb, 50, 5, 0);
+
+        // Test with some failures (20%)
+        update_progress_bar_style(&pb, 50, 5, 1);
+
+        // Test with many failures (60%)
+        update_progress_bar_style(&pb, 50, 5, 3);
+
+        // Test with all failures (100%)
+        update_progress_bar_style(&pb, 50, 5, 5);
+
+        // Test with zero completed (edge case)
+        update_progress_bar_style(&pb, 50, 0, 0);
     }
 
     #[test]
@@ -350,6 +495,10 @@ impl RunCommand {
                             failures += 1;
                         }
 
+                        // Update progress bar color based on failure rate
+                        let completed = progress_bar_clone.position();
+                        update_progress_bar_style(&progress_bar_clone, bar_width, completed, failures);
+
                         let fail_msg = format_failure_msg(failures, false);
                         let fail_len = if failures > 0 {
                             12 + failures.to_string().len()
@@ -563,6 +712,11 @@ impl RunCommand {
                                 failures += 1;
                                 let total =
                                     total_failures_clone.fetch_add(1, Ordering::Relaxed) + 1;
+
+                                // Update progress bar color based on failure rate
+                                let completed = overall_bar_clone.position();
+                                update_progress_bar_style(&overall_bar_clone, overall_bar_width, completed, total as usize);
+
                                 let msg = console::style(format!("failures: {}", total))
                                     .red()
                                     .to_string();
