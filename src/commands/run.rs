@@ -117,6 +117,7 @@ pub struct RunCommand {
     concurrency: Option<usize>,
     until_failure: bool,
     isolated: bool,
+    subunit: bool,
     test_filters: Option<Vec<String>>,
     test_args: Option<Vec<String>>,
 }
@@ -132,6 +133,7 @@ impl RunCommand {
             concurrency: None,
             until_failure: false,
             isolated: false,
+            subunit: false,
             test_filters: None,
             test_args: None,
         }
@@ -147,6 +149,7 @@ impl RunCommand {
             concurrency: None,
             until_failure: false,
             isolated: false,
+            subunit: false,
             test_filters: None,
             test_args: None,
         }
@@ -162,6 +165,7 @@ impl RunCommand {
             concurrency: None,
             until_failure: false,
             isolated: false,
+            subunit: false,
             test_filters: None,
             test_args: None,
         }
@@ -182,6 +186,7 @@ impl RunCommand {
             concurrency: None,
             until_failure: false,
             isolated: false,
+            subunit: false,
             test_filters: None,
             test_args: None,
         }
@@ -197,6 +202,7 @@ impl RunCommand {
         concurrency: Option<usize>,
         until_failure: bool,
         isolated: bool,
+        subunit: bool,
         test_filters: Option<Vec<String>>,
         test_args: Option<Vec<String>>,
     ) -> Self {
@@ -209,8 +215,58 @@ impl RunCommand {
             concurrency,
             until_failure,
             isolated,
+            subunit,
             test_filters,
             test_args,
+        }
+    }
+
+    /// Run tests and output raw subunit stream (no progress bars)
+    fn run_subunit(
+        &self,
+        ui: &mut dyn UI,
+        repo: &mut Box<dyn crate::repository::Repository>,
+        test_cmd: &TestCommand,
+        test_ids: Option<&[crate::repository::TestId]>,
+        run_id: String,
+    ) -> Result<i32> {
+        use std::process::Command;
+
+        // Build command with test IDs if provided
+        let (cmd_str, _temp_file) =
+            test_cmd.build_command_full(test_ids, false, None, self.test_args.as_deref())?;
+
+        // Spawn test command
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&cmd_str)
+            .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
+            .output()
+            .map_err(|e| {
+                crate::error::Error::CommandExecution(format!(
+                    "Failed to execute test command: {}",
+                    e
+                ))
+            })?;
+
+        // Write stdout (raw subunit stream) directly to UI
+        ui.output_bytes(&output.stdout)?;
+
+        // Parse the subunit stream to store results
+        let test_run = subunit_stream::parse_stream(output.stdout.as_slice(), run_id)?;
+
+        // Store results
+        if self.partial {
+            repo.insert_test_run_partial(test_run.clone(), true)?;
+        } else {
+            repo.insert_test_run(test_run.clone())?;
+        }
+
+        // Return exit code based on test command exit code
+        if output.status.success() {
+            Ok(0)
+        } else {
+            Ok(1)
         }
     }
 
@@ -806,6 +862,12 @@ impl Command for RunCommand {
                 .collect();
 
             test_ids = Some(filtered_ids);
+        }
+
+        // If subunit mode is requested, run and output raw subunit stream
+        if self.subunit {
+            let run_id = repo.get_next_run_id()?.to_string();
+            return self.run_subunit(ui, &mut repo, &test_cmd, test_ids.as_deref(), run_id);
         }
 
         // Determine concurrency level

@@ -122,6 +122,10 @@ enum Commands {
         #[arg(long)]
         isolated: bool,
 
+        /// Show output as a subunit stream
+        #[arg(long)]
+        subunit: bool,
+
         /// Test ID filters (regex patterns to filter which tests to run)
         #[arg(value_name = "TESTFILTER")]
         testfilters: Vec<String>,
@@ -220,6 +224,7 @@ fn main() {
             parallel,
             until_failure,
             isolated,
+            subunit,
             testfilters,
             testargs,
         } => {
@@ -232,6 +237,7 @@ fn main() {
                 parallel,
                 until_failure,
                 isolated,
+                subunit,
                 if testfilters.is_empty() {
                     None
                 } else {
