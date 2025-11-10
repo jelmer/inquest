@@ -263,7 +263,6 @@ pub struct RunCommand {
     until_failure: bool,
     isolated: bool,
     subunit: bool,
-    all_output: bool,
     test_filters: Option<Vec<String>>,
     test_args: Option<Vec<String>>,
 }
@@ -280,7 +279,6 @@ impl RunCommand {
             until_failure: false,
             isolated: false,
             subunit: false,
-            all_output: false,
             test_filters: None,
             test_args: None,
         }
@@ -297,7 +295,6 @@ impl RunCommand {
             until_failure: false,
             isolated: false,
             subunit: false,
-            all_output: false,
             test_filters: None,
             test_args: None,
         }
@@ -314,7 +311,6 @@ impl RunCommand {
             until_failure: false,
             isolated: false,
             subunit: false,
-            all_output: false,
             test_filters: None,
             test_args: None,
         }
@@ -336,7 +332,6 @@ impl RunCommand {
             until_failure: false,
             isolated: false,
             subunit: false,
-            all_output: false,
             test_filters: None,
             test_args: None,
         }
@@ -353,7 +348,6 @@ impl RunCommand {
         until_failure: bool,
         isolated: bool,
         subunit: bool,
-        all_output: bool,
         test_filters: Option<Vec<String>>,
         test_args: Option<Vec<String>>,
     ) -> Self {
@@ -367,7 +361,6 @@ impl RunCommand {
             until_failure,
             isolated,
             subunit,
-            all_output,
             test_filters,
             test_args,
         }
@@ -382,7 +375,7 @@ impl RunCommand {
         test_ids: Option<&[crate::repository::TestId]>,
         _run_id: String,
     ) -> Result<i32> {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::process::{Command, Stdio};
 
         // Build command with test IDs if provided
@@ -437,7 +430,7 @@ impl RunCommand {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
                 self.ui
                     .output_bytes(buf)
-                    .map_err(|e| std::io::Error::other(e))?;
+                    .map_err(std::io::Error::other)?;
                 Ok(buf.len())
             }
 
@@ -623,101 +616,54 @@ impl RunCommand {
             pos: 0,
         };
 
-        let show_all_output = self.all_output;
         let parse_thread = std::thread::spawn(move || {
             let mut failures = 0;
             let progress_bar_for_bytes = progress_bar_clone.clone();
             let progress_bar_for_style = progress_bar_clone.clone();
 
-            let result = if show_all_output {
-                // Show all output immediately
-                subunit_stream::parse_stream_with_progress(
-                    channel_reader,
-                    run_id_clone,
-                    |test_id, status| {
-                        let indicator = status.indicator();
-                        if !indicator.is_empty() {
-                            progress_bar_clone.inc(1);
+            // Always show all non-subunit output immediately, matching Python behavior
+            let result = subunit_stream::parse_stream_with_progress(
+                channel_reader,
+                run_id_clone,
+                |test_id, status| {
+                    let indicator = status.indicator();
+                    if !indicator.is_empty() {
+                        progress_bar_clone.inc(1);
 
-                            // Track failures
-                            if matches!(
-                                status,
-                                subunit_stream::ProgressStatus::Failed
-                                    | subunit_stream::ProgressStatus::UnexpectedSuccess
-                            ) {
-                                failures += 1;
-                            }
-
-                            // Update progress bar color based on failure rate
-                            let completed = progress_bar_clone.position();
-                            update_progress_bar_style(
-                                &progress_bar_for_style,
-                                bar_width,
-                                completed,
-                                failures,
-                            );
-
-                            let fail_msg = format_failure_msg(failures, false);
-                            let fail_len = if failures > 0 {
-                                12 + failures.to_string().len()
-                            } else {
-                                0
-                            };
-                            let short_name = truncate_test_name(test_id, max_msg_len, fail_len);
-
-                            progress_bar_clone
-                                .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
+                        // Track failures
+                        if matches!(
+                            status,
+                            subunit_stream::ProgressStatus::Failed
+                                | subunit_stream::ProgressStatus::UnexpectedSuccess
+                        ) {
+                            failures += 1;
                         }
-                    },
-                    |bytes| {
-                        write_non_subunit_output(&progress_bar_for_bytes, bytes);
-                    },
-                )
-            } else {
-                // Use filtered parser - only show output from failed tests by default
-                subunit_stream::parse_stream_with_progress_only_failures(
-                    channel_reader,
-                    run_id_clone,
-                    |test_id, status| {
-                        let indicator = status.indicator();
-                        if !indicator.is_empty() {
-                            progress_bar_clone.inc(1);
 
-                            // Track failures
-                            if matches!(
-                                status,
-                                subunit_stream::ProgressStatus::Failed
-                                    | subunit_stream::ProgressStatus::UnexpectedSuccess
-                            ) {
-                                failures += 1;
-                            }
+                        // Update progress bar color based on failure rate
+                        let completed = progress_bar_clone.position();
+                        update_progress_bar_style(
+                            &progress_bar_for_style,
+                            bar_width,
+                            completed,
+                            failures,
+                        );
 
-                            // Update progress bar color based on failure rate
-                            let completed = progress_bar_clone.position();
-                            update_progress_bar_style(
-                                &progress_bar_for_style,
-                                bar_width,
-                                completed,
-                                failures,
-                            );
+                        let fail_msg = format_failure_msg(failures, false);
+                        let fail_len = if failures > 0 {
+                            12 + failures.to_string().len()
+                        } else {
+                            0
+                        };
+                        let short_name = truncate_test_name(test_id, max_msg_len, fail_len);
 
-                            let fail_msg = format_failure_msg(failures, false);
-                            let fail_len = if failures > 0 {
-                                12 + failures.to_string().len()
-                            } else {
-                                0
-                            };
-                            let short_name = truncate_test_name(test_id, max_msg_len, fail_len);
-
-                            progress_bar_clone
-                                .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
-                        }
-                    },
-                    |bytes| {
-                        write_non_subunit_output(&progress_bar_for_bytes, bytes);
-                    },
-                )
-            };
+                        progress_bar_clone
+                            .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
+                    }
+                },
+                |bytes| {
+                    write_non_subunit_output(&progress_bar_for_bytes, bytes);
+                },
+            );
             result
         });
 

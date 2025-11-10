@@ -331,7 +331,6 @@ test_command=python3 -c "import sys; import time; sys.stdout.buffer.write(b'\xb3
         false,   // until_failure
         false,   // isolated
         false,   // subunit
-        false,   // all_output
         None,    // test_filters
         None,    // test_args
     );
@@ -405,7 +404,6 @@ test_command=echo ""
         true,  // until_failure
         false, // isolated
         false, // subunit
-        false, // all_output
         None,  // test_filters
         None,  // test_args
     );
@@ -446,7 +444,6 @@ test_command=echo ""
         false, // until_failure
         true,  // isolated
         false, // subunit
-        false, // all_output
         None,  // test_filters
         None,  // test_args
     );

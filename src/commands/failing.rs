@@ -10,7 +10,6 @@ pub struct FailingCommand {
     base_path: Option<String>,
     list_only: bool,
     subunit: bool,
-    show_output: bool,
 }
 
 impl FailingCommand {
@@ -19,7 +18,6 @@ impl FailingCommand {
             base_path,
             list_only: false,
             subunit: false,
-            show_output: true, // By default, show output for failed tests
         }
     }
 
@@ -28,7 +26,6 @@ impl FailingCommand {
             base_path,
             list_only: true,
             subunit: false,
-            show_output: false, // List mode doesn't show output
         }
     }
 
@@ -37,16 +34,6 @@ impl FailingCommand {
             base_path,
             list_only: false,
             subunit: true,
-            show_output: false, // Subunit mode doesn't show formatted output
-        }
-    }
-
-    pub fn with_output_control(base_path: Option<String>, show_output: bool) -> Self {
-        FailingCommand {
-            base_path,
-            list_only: false,
-            subunit: false,
-            show_output,
         }
     }
 }

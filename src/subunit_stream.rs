@@ -53,18 +53,18 @@ pub fn parse_stream_bytes(data: &[u8], run_id: String) -> Result<TestRun> {
     parse_stream(data, run_id)
 }
 
-/// Parse a subunit stream into a TestRun with progress callback and conditional output
+/// Parse a subunit stream into a TestRun with progress callback
 ///
 /// The callback is called with (test_id, status) for each test event.
-/// The bytes_callback is called with non-subunit output, but only for failed tests if filter_output is true.
+/// The bytes_callback is called with all non-subunit output (print statements, warnings, etc.)
+/// immediately as it arrives, matching Python testrepository behavior.
 /// If the stream is incomplete or interrupted, returns partial results collected before the error.
 /// Returns an error only for invalid timestamps in otherwise valid events.
-pub fn parse_stream_with_progress_filtered<R: Read, F, B>(
+pub fn parse_stream_with_progress<R: Read, F, B>(
     reader: R,
     run_id: String,
     mut progress_callback: F,
     mut bytes_callback: B,
-    filter_output: bool,
 ) -> Result<TestRun>
 where
     F: FnMut(&str, ProgressStatus),
@@ -77,10 +77,6 @@ where
     let mut consecutive_errors = 0;
     const MAX_CONSECUTIVE_ERRORS: usize = 100;
 
-    // Track current test and buffer output if filtering
-    let mut output_buffer: Vec<u8> = Vec::new();
-    let mut has_failures = false;
-
     // Iterate over the subunit stream
     for item in iter_stream(reader) {
         let item = match item {
@@ -88,7 +84,7 @@ where
                 consecutive_errors = 0; // Reset on success
                 item
             }
-            Err(e) => {
+            Err(_e) => {
                 // Stream parsing failed (e.g., incomplete data from interrupted run)
                 // Continue reading to drain the pipe (prevents BrokenPipeError in child process)
                 consecutive_errors += 1;
@@ -117,15 +113,9 @@ where
             }
             ScannedItem::Bytes(bytes) => {
                 // Non-event data (e.g., print statements from tests)
+                // Always show non-subunit output immediately, just like Python version
                 consecutive_errors = 0; // Reset on any valid item
-
-                if filter_output {
-                    // Buffer the output for the current test
-                    output_buffer.extend_from_slice(&bytes);
-                } else {
-                    // Show all output immediately
-                    bytes_callback(&bytes);
-                }
+                bytes_callback(&bytes);
                 continue;
             }
             ScannedItem::Event(event) => {
@@ -144,9 +134,6 @@ where
                                 })?;
                             start_times.insert(test_id_str.clone(), dt);
                         }
-
-                        // Clear buffer for new test
-                        output_buffer.clear();
                         continue;
                     }
 
@@ -172,25 +159,6 @@ where
                     };
 
                     progress_callback(test_id_str, progress_status);
-
-                    // Track if any test failed
-                    if matches!(
-                        progress_status,
-                        ProgressStatus::Failed | ProgressStatus::UnexpectedSuccess
-                    ) {
-                        has_failures = true;
-                    }
-
-                    // If filtering output, only flush buffer for failed/unexpected success tests
-                    if filter_output && !output_buffer.is_empty() {
-                        if matches!(
-                            progress_status,
-                            ProgressStatus::Failed | ProgressStatus::UnexpectedSuccess
-                        ) {
-                            bytes_callback(&output_buffer);
-                        }
-                        output_buffer.clear();
-                    }
 
                     let test_id = TestId::new(test_id_str.clone());
 
@@ -236,51 +204,7 @@ where
         }
     }
 
-    // Flush any remaining buffered output at the end
-    // This handles output that arrives after all tests complete
-    // Only show it if we're filtering AND there were failures
-    if filter_output && !output_buffer.is_empty() && has_failures {
-        bytes_callback(&output_buffer);
-    }
-
     Ok(test_run)
-}
-
-/// Parse a subunit stream into a TestRun with progress callback
-///
-/// The callback is called with (test_id, status) for each test event.
-/// The bytes_callback is called with non-subunit output (e.g., print statements).
-/// If the stream is incomplete or interrupted, returns partial results collected before the error.
-/// Returns an error only for invalid timestamps in otherwise valid events.
-pub fn parse_stream_with_progress<R: Read, F, B>(
-    reader: R,
-    run_id: String,
-    progress_callback: F,
-    bytes_callback: B,
-) -> Result<TestRun>
-where
-    F: FnMut(&str, ProgressStatus),
-    B: FnMut(&[u8]),
-{
-    // Call the filtered version with filter_output=false to show all output
-    parse_stream_with_progress_filtered(reader, run_id, progress_callback, bytes_callback, false)
-}
-
-/// Parse a subunit stream with filtered output (only failed tests)
-///
-/// Same as parse_stream_with_progress but only shows output for failed/unexpected success tests.
-pub fn parse_stream_with_progress_only_failures<R: Read, F, B>(
-    reader: R,
-    run_id: String,
-    progress_callback: F,
-    bytes_callback: B,
-) -> Result<TestRun>
-where
-    F: FnMut(&str, ProgressStatus),
-    B: FnMut(&[u8]),
-{
-    // Call the filtered version with filter_output=true to only show failed test output
-    parse_stream_with_progress_filtered(reader, run_id, progress_callback, bytes_callback, true)
 }
 
 /// Parse a subunit stream into a TestRun
