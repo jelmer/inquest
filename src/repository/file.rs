@@ -13,6 +13,7 @@ use crate::subunit_stream;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use subunit::serialize::Serializable;
 use std::time::Duration;
 
 const REPOSITORY_FORMAT: &str = "1";
@@ -128,26 +129,97 @@ impl FileRepository {
         Ok(test_run.results)
     }
 
-    fn write_failing_run(&self, failing: &HashMap<TestId, TestResult>) -> Result<()> {
-        let path = self.get_failing_path();
+    fn write_failing_run_from_raw(&self, run_id: &str) -> Result<()> {
+        let failing_path = self.get_failing_path();
+        let run_path = self.get_run_path(run_id);
 
-        if failing.is_empty() {
-            // Remove the failing file if there are no failures
-            if path.exists() {
-                fs::remove_file(&path)?;
+        // Read the raw test run and filter for failing tests
+        let reader = File::open(&run_path)?;
+        let writer = File::create(&failing_path)?;
+
+        subunit_stream::filter_failing_tests(reader, writer)?;
+
+        // Check if the failing file is empty and remove it if so
+        let metadata = std::fs::metadata(&failing_path)?;
+        if metadata.len() == 0 {
+            fs::remove_file(&failing_path)?;
+        }
+
+        Ok(())
+    }
+
+    fn update_failing_run_from_raw(&self, run_id: &str) -> Result<()> {
+        use std::io::Write;
+
+        // Get existing failing tests
+        let mut existing_failing = self.read_failing_run().unwrap_or_default();
+
+        // Get results from the new run
+        let new_run = self.get_test_run(run_id)?;
+
+        // Update the failing map based on new results
+        for result in new_run.results.values() {
+            if result.status.is_failure() {
+                existing_failing.insert(result.test_id.clone(), result.clone());
+            } else if result.status.is_success() {
+                existing_failing.remove(&result.test_id);
+            }
+        }
+
+        // If no failures remain, remove the failing file
+        if existing_failing.is_empty() {
+            let failing_path = self.get_failing_path();
+            if failing_path.exists() {
+                fs::remove_file(&failing_path)?;
             }
             return Ok(());
         }
 
-        // Create a synthetic test run with just the failing tests
-        let mut test_run = TestRun::new("failing".to_string());
-        // Use a fixed timestamp for the failing run
-        test_run.timestamp =
-            chrono::DateTime::from_timestamp(1000000000, 0).unwrap_or_else(chrono::Utc::now);
-        test_run.results = failing.clone();
+        // Write updated failing tests by merging streams
+        // TODO: This could be optimized by streaming instead of buffering
+        let failing_path = self.get_failing_path();
+        let temp_path = failing_path.with_extension("tmp");
 
-        let file = File::create(&path)?;
-        subunit_stream::write_stream(&test_run, file)?;
+        {
+            let mut writer = File::create(&temp_path)?;
+
+            // Write events from the new run for newly failing tests
+            let new_run_reader = File::open(&self.get_run_path(run_id))?;
+            let new_failing_test_ids: std::collections::HashSet<_> = new_run.results.values()
+                .filter(|r| r.status.is_failure())
+                .map(|r| r.test_id.clone())
+                .collect();
+
+            // Filter new run for failing tests
+            let mut new_run_buffer = Vec::new();
+            subunit_stream::filter_failing_tests(new_run_reader, &mut new_run_buffer)?;
+
+            // If there's an existing failing file, copy events for tests that are still failing
+            if failing_path.exists() {
+                let existing_reader = File::open(&failing_path)?;
+                let existing_test_ids: std::collections::HashSet<_> = existing_failing.keys().cloned().collect();
+
+                // Copy events from existing failing file for tests not in the new run
+                for item in subunit::io::sync::iter_stream(existing_reader) {
+                    if let Ok(subunit::types::stream::ScannedItem::Event(event)) = item {
+                        if let Some(ref test_id) = event.test_id {
+                            // Keep if still failing and not updated in new run
+                            if existing_test_ids.contains(&TestId::new(test_id))
+                                && !new_run.results.contains_key(&TestId::new(test_id)) {
+                                event.serialize(&mut writer)
+                                    .map_err(|e| crate::error::Error::Subunit(format!("Failed to serialize: {}", e)))?;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Write new failing tests
+            writer.write_all(&new_run_buffer)?;
+        }
+
+        // Replace the failing file with the temp file
+        fs::rename(&temp_path, &failing_path)?;
 
         Ok(())
     }
@@ -310,41 +382,24 @@ impl Repository for FileRepository {
     }
 
     fn update_failing_tests(&mut self, run: &TestRun) -> Result<()> {
-        // Read existing failing tests
-        let mut failing = self.read_failing_run()?;
-
-        // Update with results from this run
-        for result in run.results.values() {
-            if result.status.is_failure() {
-                // Add or update failure
-                failing.insert(result.test_id.clone(), result.clone());
-            } else if result.status.is_success() {
-                // Remove from failures if it passed
-                failing.remove(&result.test_id);
-            }
-        }
-
-        // Write back
-        self.write_failing_run(&failing)?;
-        Ok(())
+        // For update mode (partial runs), merge with existing failing tests
+        self.update_failing_run_from_raw(&run.id)
     }
 
     fn replace_failing_tests(&mut self, run: &TestRun) -> Result<()> {
-        // Collect all failing tests from this run
-        let failing: HashMap<TestId, TestResult> = run
-            .results
-            .values()
-            .filter(|r| r.status.is_failure())
-            .map(|r| (r.test_id.clone(), r.clone()))
-            .collect();
-
-        self.write_failing_run(&failing)?;
-        Ok(())
+        // For replace mode (full runs), completely replace the failing file
+        self.write_failing_run_from_raw(&run.id)
     }
 
     fn get_failing_tests(&self) -> Result<Vec<TestId>> {
         let failing = self.read_failing_run()?;
         Ok(failing.keys().cloned().collect())
+    }
+
+    fn get_failing_tests_raw(&self) -> Result<Box<dyn std::io::Read>> {
+        let failing_path = self.path.join("failing");
+        let file = File::open(&failing_path)?;
+        Ok(Box::new(file))
     }
 
     fn get_test_times(&self) -> Result<HashMap<TestId, Duration>> {

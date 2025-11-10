@@ -139,6 +139,9 @@ pub trait Repository {
     /// Get the list of currently failing tests
     fn get_failing_tests(&self) -> Result<Vec<TestId>>;
 
+    /// Get the raw subunit stream for failing tests as a reader
+    fn get_failing_tests_raw(&self) -> Result<Box<dyn std::io::Read>>;
+
     /// Get test execution times
     fn get_test_times(&self) -> Result<HashMap<TestId, Duration>>;
 

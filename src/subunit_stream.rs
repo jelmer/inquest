@@ -475,6 +475,61 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
     Ok(test_run)
 }
 
+/// Filter a raw subunit stream to only include failing tests
+///
+/// This preserves the complete subunit events including file attachments (log, traceback)
+/// for tests that have failing status.
+pub fn filter_failing_tests<R: Read, W: Write>(mut reader: R, mut writer: W) -> Result<()> {
+    use std::collections::HashSet;
+
+    // First pass: identify which tests are failures
+    let mut buffer = Vec::new();
+    reader.read_to_end(&mut buffer)?;
+
+    let mut failing_tests = HashSet::new();
+
+    for item in iter_stream(&buffer[..]) {
+        if let Ok(ScannedItem::Event(event)) = item {
+            if let Some(ref test_id) = event.test_id {
+                let is_failure = match event.status {
+                    SubunitTestStatus::Failed => true,
+                    SubunitTestStatus::UnexpectedSuccess => true,
+                    _ => false,
+                };
+
+                if is_failure {
+                    failing_tests.insert(test_id.clone());
+                }
+            }
+        }
+    }
+
+    // Second pass: write events only for failing tests
+    for item in iter_stream(&buffer[..]) {
+        match item {
+            Ok(ScannedItem::Event(event)) => {
+                if let Some(ref test_id) = event.test_id {
+                    if failing_tests.contains(test_id) {
+                        event.serialize(&mut writer)
+                            .map_err(|e| Error::Subunit(format!("Failed to serialize event: {}", e)))?;
+                    }
+                }
+            }
+            Ok(ScannedItem::Bytes(_bytes)) => {
+                // Skip non-subunit content
+            }
+            Ok(ScannedItem::Unknown(_, _)) => {
+                // Skip unknown items
+            }
+            Err(_) => {
+                // Skip errors
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Write a TestRun as a subunit stream
 ///
 /// Returns an error if timestamp conversion fails or if the event is too large to serialize.

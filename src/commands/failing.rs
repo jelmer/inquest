@@ -4,7 +4,6 @@ use crate::commands::utils::open_repository;
 use crate::commands::Command;
 use crate::error::Result;
 use crate::ui::UI;
-use std::path::Path;
 
 pub struct FailingCommand {
     base_path: Option<String>,
@@ -40,7 +39,6 @@ impl FailingCommand {
 
 impl Command for FailingCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
-        let base = Path::new(self.base_path.as_deref().unwrap_or("."));
         let repo = open_repository(self.base_path.as_deref())?;
 
         // Get failing tests from the repository's failing file
@@ -54,17 +52,13 @@ impl Command for FailingCommand {
         }
 
         if self.subunit {
-            // Output the failing tests as a subunit stream
-            // We need to reconstruct a TestRun from the failing file
-            use std::fs::File;
-            let failing_path = base.join(".testrepository").join("failing");
-            if failing_path.exists() {
-                let file = File::open(&failing_path)?;
-                let test_run = crate::subunit_stream::parse_stream(file, "failing".to_string())?;
-                let mut buffer = Vec::new();
-                crate::subunit_stream::write_stream(&test_run, &mut buffer)?;
-                ui.output_bytes(&buffer)?;
-            }
+            // Output the failing tests as a raw subunit stream
+            // The failing file is already a subunit stream with all attachments
+            use std::io::Read;
+            let mut stream = repo.get_failing_tests_raw()?;
+            let mut buffer = Vec::new();
+            stream.read_to_end(&mut buffer)?;
+            ui.output_bytes(&buffer)?;
             return Ok(0); // Exit code 0 if we successfully wrote the stream
         }
 
