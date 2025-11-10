@@ -5,12 +5,20 @@ use crate::commands::Command;
 use crate::error::Result;
 use crate::ui::UI;
 
+/// Command to show the slowest tests from the last run.
+///
+/// Displays test execution times sorted from slowest to fastest,
+/// with timing information and percentage of total time.
 pub struct SlowestCommand {
     base_path: Option<String>,
     count: usize,
 }
 
 impl SlowestCommand {
+    /// Creates a new slowest command showing the top 10 slowest tests.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
     pub fn new(base_path: Option<String>) -> Self {
         SlowestCommand {
             base_path,
@@ -18,6 +26,11 @@ impl SlowestCommand {
         }
     }
 
+    /// Creates a slowest command with a custom number of tests to display.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
+    /// * `count` - Number of slowest tests to show
     pub fn with_count(base_path: Option<String>, count: usize) -> Self {
         SlowestCommand { base_path, count }
     }

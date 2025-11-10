@@ -7,6 +7,10 @@ use crate::subunit_stream;
 use crate::ui::UI;
 use std::io::{self, Read};
 
+/// Command to load test results from a subunit stream into the repository.
+///
+/// Reads test results from stdin in subunit format, stores the raw stream,
+/// and updates the repository's failing tests and test times.
 pub struct LoadCommand {
     base_path: Option<String>,
     input: Option<Box<dyn Read>>,
@@ -15,6 +19,10 @@ pub struct LoadCommand {
 }
 
 impl LoadCommand {
+    /// Creates a new load command with default settings.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
     pub fn new(base_path: Option<String>) -> Self {
         LoadCommand {
             base_path,
@@ -24,6 +32,10 @@ impl LoadCommand {
         }
     }
 
+    /// Creates a load command that will initialize the repository if needed.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
     pub fn with_force_init(base_path: Option<String>) -> Self {
         LoadCommand {
             base_path,
@@ -33,6 +45,12 @@ impl LoadCommand {
         }
     }
 
+    /// Creates a load command with control over partial loading and initialization.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
+    /// * `partial` - If true, add/update failing tests without clearing previous failures
+    /// * `force_init` - If true, initialize the repository if it doesn't exist
     pub fn with_partial(base_path: Option<String>, partial: bool, force_init: bool) -> Self {
         LoadCommand {
             base_path,
@@ -42,6 +60,11 @@ impl LoadCommand {
         }
     }
 
+    /// Creates a load command with a custom input source.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
+    /// * `input` - Custom input stream to read test results from
     pub fn with_input(base_path: Option<String>, input: Box<dyn Read>) -> Self {
         LoadCommand {
             base_path,

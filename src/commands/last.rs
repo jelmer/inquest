@@ -5,6 +5,10 @@ use crate::commands::Command;
 use crate::error::Result;
 use crate::ui::UI;
 
+/// Command to display results from the last test run.
+///
+/// Shows test statistics and details about failed tests from the
+/// most recent run stored in the repository.
 pub struct LastCommand {
     base_path: Option<String>,
     subunit: bool,
@@ -12,6 +16,10 @@ pub struct LastCommand {
 }
 
 impl LastCommand {
+    /// Creates a new last command with default settings.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
     pub fn new(base_path: Option<String>) -> Self {
         LastCommand {
             base_path,
@@ -20,6 +28,10 @@ impl LastCommand {
         }
     }
 
+    /// Creates a last command that outputs results in subunit format.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
     pub fn with_subunit(base_path: Option<String>) -> Self {
         LastCommand {
             base_path,
@@ -28,6 +40,11 @@ impl LastCommand {
         }
     }
 
+    /// Creates a last command with control over output display.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
+    /// * `show_output` - Whether to show detailed output for failed tests
     pub fn with_output_control(base_path: Option<String>, show_output: bool) -> Self {
         LastCommand {
             base_path,

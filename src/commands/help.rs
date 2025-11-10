@@ -4,11 +4,18 @@ use crate::commands::Command;
 use crate::error::Result;
 use crate::ui::UI;
 
+/// Command to display help information for commands.
+///
+/// Shows general help or detailed help for a specific command.
 pub struct HelpCommand {
     command_name: Option<String>,
 }
 
 impl HelpCommand {
+    /// Creates a new help command.
+    ///
+    /// # Arguments
+    /// * `command_name` - Optional name of a specific command to show help for
     pub fn new(command_name: Option<String>) -> Self {
         HelpCommand { command_name }
     }

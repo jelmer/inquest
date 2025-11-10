@@ -5,12 +5,16 @@ use crate::ui::UI;
 
 /// A UI implementation for testing that captures output in vectors
 pub struct TestUI {
+    /// Captured output messages from `output()` calls
     pub output: Vec<String>,
+    /// Captured error and warning messages from `error()` and `warning()` calls
     pub errors: Vec<String>,
+    /// Captured raw bytes from `output_bytes()` calls
     pub bytes_output: Vec<Vec<u8>>,
 }
 
 impl TestUI {
+    /// Creates a new TestUI with empty vectors
     pub fn new() -> Self {
         TestUI {
             output: Vec::new(),

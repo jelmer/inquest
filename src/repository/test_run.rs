@@ -10,10 +10,15 @@ use std::time::Duration;
 pub struct TestId(String);
 
 impl TestId {
+    /// Creates a new test identifier from a string.
+    ///
+    /// # Arguments
+    /// * `id` - The test identifier string
     pub fn new(id: impl Into<String>) -> Self {
         TestId(id.into())
     }
 
+    /// Returns the test identifier as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -37,18 +42,27 @@ impl From<&str> for TestId {
     }
 }
 
-/// Status of a test
+/// Status of a test execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestStatus {
+    /// Test passed successfully.
     Success,
+    /// Test failed with an assertion or expectation error.
     Failure,
+    /// Test encountered an unexpected error during execution.
     Error,
+    /// Test was skipped or disabled.
     Skip,
+    /// Test failed as expected (marked as expected to fail).
     ExpectedFailure,
+    /// Test passed but was marked as expected to fail.
     UnexpectedSuccess,
 }
 
 impl TestStatus {
+    /// Returns true if this status represents a failure condition.
+    ///
+    /// Failures include: Failure, Error, and UnexpectedSuccess.
     pub fn is_failure(&self) -> bool {
         matches!(
             self,
@@ -56,6 +70,9 @@ impl TestStatus {
         )
     }
 
+    /// Returns true if this status represents a success condition.
+    ///
+    /// Successes include: Success, Skip, and ExpectedFailure.
     pub fn is_success(&self) -> bool {
         matches!(
             self,
@@ -77,14 +94,23 @@ impl fmt::Display for TestStatus {
     }
 }
 
-/// Result of a single test
+/// Result of a single test execution.
+///
+/// Contains all information about a test's outcome including status,
+/// timing, error messages, and associated metadata.
 #[derive(Debug, Clone)]
 pub struct TestResult {
+    /// Unique identifier for the test.
     pub test_id: TestId,
+    /// Execution status (success, failure, error, etc.).
     pub status: TestStatus,
+    /// Time taken to execute the test, if available.
     pub duration: Option<Duration>,
+    /// Brief message describing the result (e.g., error message).
     pub message: Option<String>,
+    /// Detailed output or traceback from the test.
     pub details: Option<String>,
+    /// Tags or metadata associated with this test result.
     pub tags: Vec<String>,
 }
 
@@ -156,16 +182,27 @@ impl TestResult {
     }
 }
 
-/// A complete test run containing results for multiple tests
+/// A complete test run containing results for multiple tests.
+///
+/// Represents a single execution of a test suite with all test results,
+/// timing information, and metadata.
 #[derive(Debug, Clone)]
 pub struct TestRun {
+    /// Unique identifier for this test run.
     pub id: String,
+    /// When this test run was executed.
     pub timestamp: DateTime<Utc>,
+    /// Map of test IDs to their results.
     pub results: HashMap<TestId, TestResult>,
+    /// Tags associated with this test run.
     pub tags: Vec<String>,
 }
 
 impl TestRun {
+    /// Creates a new test run with the given ID and current timestamp.
+    ///
+    /// # Arguments
+    /// * `id` - Unique identifier for this test run
     pub fn new(id: String) -> Self {
         TestRun {
             id,
@@ -175,10 +212,15 @@ impl TestRun {
         }
     }
 
+    /// Adds a test result to this run, replacing any existing result for the same test.
+    ///
+    /// # Arguments
+    /// * `result` - The test result to add
     pub fn add_result(&mut self, result: TestResult) {
         self.results.insert(result.test_id.clone(), result);
     }
 
+    /// Returns the number of failed tests in this run.
     pub fn count_failures(&self) -> usize {
         self.results
             .values()
@@ -186,6 +228,7 @@ impl TestRun {
             .count()
     }
 
+    /// Returns the number of successful tests in this run.
     pub fn count_successes(&self) -> usize {
         self.results
             .values()
@@ -193,6 +236,7 @@ impl TestRun {
             .count()
     }
 
+    /// Returns the total number of tests in this run.
     pub fn total_tests(&self) -> usize {
         self.results.len()
     }
@@ -241,6 +285,7 @@ impl TestRun {
             .count()
     }
 
+    /// Returns a list of test IDs for all tests that failed in this run.
     pub fn get_failing_tests(&self) -> Vec<&TestId> {
         self.results
             .values()

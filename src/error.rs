@@ -10,39 +10,51 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Main error type for testrepository
 #[derive(Error, Debug)]
 pub enum Error {
+    /// Repository was not found at the specified path.
     #[error("Repository not found at {0}")]
     RepositoryNotFound(PathBuf),
 
+    /// Repository already exists at the specified path.
     #[error("Repository already exists at {0}")]
     RepositoryExists(PathBuf),
 
+    /// Repository has an invalid format or version.
     #[error("Invalid repository format: {0}")]
     InvalidFormat(String),
 
+    /// The requested test run ID was not found.
     #[error("Test run not found: {0}")]
     TestRunNotFound(String),
 
+    /// The repository contains no test runs.
     #[error("No test runs in repository")]
     NoTestRuns,
 
+    /// Configuration file error or invalid configuration.
     #[error("Configuration error: {0}")]
     Config(String),
 
+    /// Test command execution failed.
     #[error("Command execution failed: {0}")]
     CommandExecution(String),
 
+    /// Failed to parse test output or data.
     #[error("Parse error: {0}")]
     Parse(String),
 
+    /// I/O operation failed.
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
 
+    /// Database operation failed.
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
+    /// Subunit protocol error or invalid subunit stream.
     #[error("Subunit protocol error: {0}")]
     Subunit(String),
 
+    /// Other error with custom message.
     #[error("{0}")]
     Other(String),
 }

@@ -254,6 +254,10 @@ mod helper_tests {
     }
 }
 
+/// Command to run tests and load results into the repository.
+///
+/// Executes tests using the configured test command, displays progress,
+/// and stores the results in the repository.
 pub struct RunCommand {
     base_path: Option<String>,
     failing_only: bool,
@@ -270,6 +274,10 @@ pub struct RunCommand {
 }
 
 impl RunCommand {
+    /// Creates a new run command with default settings.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
     pub fn new(base_path: Option<String>) -> Self {
         RunCommand {
             base_path,
@@ -287,6 +295,10 @@ impl RunCommand {
         }
     }
 
+    /// Creates a run command that only runs previously failing tests.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
     pub fn with_failing_only(base_path: Option<String>) -> Self {
         RunCommand {
             base_path,
@@ -304,6 +316,11 @@ impl RunCommand {
         }
     }
 
+    /// Creates a run command that will initialize the repository if needed.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
+    /// * `failing_only` - Whether to only run previously failing tests
     pub fn with_force_init(base_path: Option<String>, failing_only: bool) -> Self {
         RunCommand {
             base_path,
@@ -321,6 +338,13 @@ impl RunCommand {
         }
     }
 
+    /// Creates a run command with control over partial loading mode.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
+    /// * `partial` - If true, add/update failing tests without clearing previous failures
+    /// * `failing_only` - Whether to only run previously failing tests
+    /// * `force_init` - If true, initialize the repository if it doesn't exist
     pub fn with_partial(
         base_path: Option<String>,
         partial: bool,
@@ -343,6 +367,21 @@ impl RunCommand {
         }
     }
 
+    /// Creates a run command with full control over all options.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
+    /// * `partial` - If true, add/update failing tests without clearing previous failures
+    /// * `failing_only` - Whether to only run previously failing tests
+    /// * `force_init` - If true, initialize the repository if it doesn't exist
+    /// * `load_list` - Optional path to a file containing test IDs to run
+    /// * `concurrency` - Optional number of parallel test workers
+    /// * `until_failure` - If true, stop running tests after the first failure
+    /// * `isolated` - If true, run each test in isolation
+    /// * `subunit` - If true, output in subunit format instead of showing progress
+    /// * `all_output` - If true, show all test output instead of just failures
+    /// * `test_filters` - Optional list of test patterns to filter
+    /// * `test_args` - Optional additional arguments to pass to the test command
     #[allow(clippy::too_many_arguments)]
     pub fn with_all_options(
         base_path: Option<String>,

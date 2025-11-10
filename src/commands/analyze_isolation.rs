@@ -12,12 +12,22 @@ use crate::ui::UI;
 use std::path::Path;
 use std::process::{Command as ProcessCommand, Stdio};
 
+/// Command to analyze test isolation issues using bisection.
+///
+/// This command helps identify test interactions by bisecting the test suite
+/// to find which tests cause a target test to fail when run together but
+/// pass when run in isolation.
 pub struct AnalyzeIsolationCommand {
     base_path: Option<String>,
     target_test: String,
 }
 
 impl AnalyzeIsolationCommand {
+    /// Creates a new analyze-isolation command.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
+    /// * `target_test` - The test ID to analyze for isolation issues
     pub fn new(base_path: Option<String>, target_test: String) -> Self {
         AnalyzeIsolationCommand {
             base_path,

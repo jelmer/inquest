@@ -4,6 +4,10 @@ use crate::commands::Command;
 use crate::error::Result;
 use crate::ui::UI;
 
+/// Command to display quickstart documentation for testrepository.
+///
+/// Shows introductory documentation to help users get started with
+/// basic testrepository operations.
 pub struct QuickstartCommand;
 
 impl Default for QuickstartCommand {
@@ -13,6 +17,7 @@ impl Default for QuickstartCommand {
 }
 
 impl QuickstartCommand {
+    /// Creates a new quickstart command.
     pub fn new() -> Self {
         QuickstartCommand
     }

@@ -14,6 +14,11 @@ pub struct TeeWriter<W: Write> {
 }
 
 impl<W: Write> TeeWriter<W> {
+    /// Creates a new TeeWriter that writes to both a file and a channel.
+    ///
+    /// # Arguments
+    /// * `writer` - The underlying writer (typically a file)
+    /// * `tx` - Channel sender for broadcasting bytes to parsers
     pub fn new(writer: W, tx: SyncSender<Vec<u8>>) -> Self {
         TeeWriter { writer, tx }
     }
@@ -41,6 +46,10 @@ pub struct ChannelReader {
 }
 
 impl ChannelReader {
+    /// Creates a new ChannelReader that reads from a channel.
+    ///
+    /// # Arguments
+    /// * `rx` - Channel receiver to read bytes from
     pub fn new(rx: Receiver<Vec<u8>>) -> Self {
         ChannelReader {
             rx,

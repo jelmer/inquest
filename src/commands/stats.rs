@@ -4,11 +4,19 @@ use crate::commands::Command;
 use crate::error::Result;
 use crate::ui::UI;
 
+/// Command to display repository statistics.
+///
+/// Shows information about the repository including total test runs,
+/// latest run details, and aggregate test counts.
 pub struct StatsCommand {
     base_path: Option<String>,
 }
 
 impl StatsCommand {
+    /// Creates a new stats command.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
     pub fn new(base_path: Option<String>) -> Self {
         StatsCommand { base_path }
     }

@@ -19,6 +19,10 @@ use subunit::serialize::Serializable;
 const REPOSITORY_FORMAT: &str = "1";
 const REPO_DIR: &str = ".testrepository";
 
+/// Factory for creating file-based repositories.
+///
+/// Creates and opens repositories that store test data in the `.testrepository`
+/// directory using the same format as the Python testrepository implementation.
 pub struct FileRepositoryFactory;
 
 impl RepositoryFactory for FileRepositoryFactory {
@@ -67,6 +71,10 @@ impl RepositoryFactory for FileRepositoryFactory {
     }
 }
 
+/// File-based repository implementation.
+///
+/// Stores test runs and metadata in files within the `.testrepository` directory,
+/// maintaining compatibility with the Python version's format.
 pub struct FileRepository {
     path: PathBuf,
 }

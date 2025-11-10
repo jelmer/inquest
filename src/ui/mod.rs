@@ -34,6 +34,7 @@ pub struct CliUI {
 }
 
 impl CliUI {
+    /// Creates a new command-line UI instance using stdout and stderr.
     pub fn new() -> Self {
         CliUI {
             stdout: Box::new(io::stdout()),

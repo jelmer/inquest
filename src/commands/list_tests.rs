@@ -6,11 +6,19 @@ use crate::testcommand::TestCommand;
 use crate::ui::UI;
 use std::path::Path;
 
+/// Command to list all available tests.
+///
+/// Queries the test command to discover all available tests
+/// in the test suite.
 pub struct ListTestsCommand {
     base_path: Option<String>,
 }
 
 impl ListTestsCommand {
+    /// Creates a new list-tests command.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
     pub fn new(base_path: Option<String>) -> Self {
         ListTestsCommand { base_path }
     }

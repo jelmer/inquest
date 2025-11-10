@@ -5,6 +5,10 @@ use crate::commands::Command;
 use crate::error::Result;
 use crate::ui::UI;
 
+/// Command to display currently failing tests from the repository.
+///
+/// This command reads the failing tests file from the repository and
+/// displays the test IDs in various formats.
 pub struct FailingCommand {
     base_path: Option<String>,
     list_only: bool,
@@ -12,6 +16,10 @@ pub struct FailingCommand {
 }
 
 impl FailingCommand {
+    /// Creates a new failing command with default settings.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
     pub fn new(base_path: Option<String>) -> Self {
         FailingCommand {
             base_path,
@@ -20,6 +28,10 @@ impl FailingCommand {
         }
     }
 
+    /// Creates a failing command that outputs test IDs only (one per line).
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
     pub fn with_list_only(base_path: Option<String>) -> Self {
         FailingCommand {
             base_path,
@@ -28,6 +40,10 @@ impl FailingCommand {
         }
     }
 
+    /// Creates a failing command that outputs results in subunit format.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
     pub fn with_subunit(base_path: Option<String>) -> Self {
         FailingCommand {
             base_path,

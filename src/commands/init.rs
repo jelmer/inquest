@@ -7,11 +7,19 @@ use crate::repository::RepositoryFactory;
 use crate::ui::UI;
 use std::path::Path;
 
+/// Command to initialize a new test repository.
+///
+/// Creates a `.testrepository` directory with the necessary structure
+/// to store test results and metadata.
 pub struct InitCommand {
     base_path: Option<String>,
 }
 
 impl InitCommand {
+    /// Creates a new init command.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path where the repository will be created
     pub fn new(base_path: Option<String>) -> Self {
         InitCommand { base_path }
     }

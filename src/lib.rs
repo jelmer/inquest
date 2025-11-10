@@ -1,3 +1,5 @@
+#![deny(missing_docs)]
+
 //! testrepository - A repository of test results
 //!
 //! This is a Rust port of the Python testrepository tool, maintaining
