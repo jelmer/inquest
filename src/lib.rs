@@ -75,6 +75,7 @@ pub mod grouping;
 pub mod partition;
 pub mod repository;
 pub mod subunit_stream;
+pub mod test_runner;
 pub mod testcommand;
 pub mod testlist;
 pub mod ui;

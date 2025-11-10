@@ -185,10 +185,6 @@ impl FileRepository {
 
             // Write events from the new run for newly failing tests
             let new_run_reader = File::open(&self.get_run_path(run_id))?;
-            let new_failing_test_ids: std::collections::HashSet<_> = new_run.results.values()
-                .filter(|r| r.status.is_failure())
-                .map(|r| r.test_id.clone())
-                .collect();
 
             // Filter new run for failing tests
             let mut new_run_buffer = Vec::new();

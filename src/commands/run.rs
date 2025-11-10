@@ -549,106 +549,24 @@ impl RunCommand {
             })?;
 
         // Take stdout and stderr for streaming
-        let mut stdout = child.stdout.take().expect("stdout was piped");
-        let mut stderr = child.stderr.take().expect("stderr was piped");
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
 
         // Tee the stream: capture raw bytes for storage AND parse for progress display
-        use std::io::{Read, Write};
-
-        // Create a tee writer that writes to both file and channel
-        struct TeeWriter<W: Write> {
-            writer: W,
-            tx: std::sync::mpsc::SyncSender<Vec<u8>>,
-        }
-
-        impl<W: Write> Write for TeeWriter<W> {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                // Write to file
-                self.writer.write_all(buf)?;
-                // Send to parser (ignore if receiver dropped)
-                let _ = self.tx.send(buf.to_vec());
-                Ok(buf.len())
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                self.writer.flush()
-            }
-        }
-
-        // Thread to read stdout and tee it to both storage and parsing
         let (tx, rx) = std::sync::mpsc::sync_channel(100);
 
         // Thread for stdout
-        let tee_thread = std::thread::spawn(move || -> std::io::Result<()> {
-            let mut tee = TeeWriter {
-                writer: raw_writer,
-                tx,
-            };
-            std::io::copy(&mut stdout, &mut tee)?;
-            tee.flush()?;
-            Ok(())
-        });
+        let tee_thread = crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx);
 
         // Thread for stderr - write directly to stderr (not to parser or storage)
-        let progress_bar_for_stderr = progress_bar.clone();
-        let stderr_thread = std::thread::spawn(move || -> std::io::Result<()> {
-            use std::io::Write;
-            let mut buffer = [0u8; 8192];
-            loop {
-                match stderr.read(&mut buffer) {
-                    Ok(0) => break, // EOF
-                    Ok(n) => {
-                        // Write stderr output directly to stderr via progress bar suspension
-                        progress_bar_for_stderr.suspend(|| {
-                            let _ = std::io::stderr().write_all(&buffer[..n]);
-                            let _ = std::io::stderr().flush();
-                        });
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-            Ok(())
-        });
+        let stderr_thread = crate::test_runner::spawn_stderr_forwarder(stderr, progress_bar.clone());
 
         // Parse stdout stream in a thread for real-time progress
         let progress_bar_clone = progress_bar.clone();
         let run_id_clone = run_id.clone();
 
         // Create a reader from the channel
-        struct ChannelReader {
-            rx: std::sync::mpsc::Receiver<Vec<u8>>,
-            buffer: Vec<u8>,
-            pos: usize,
-        }
-
-        impl Read for ChannelReader {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                // If we have buffered data, use it first
-                if self.pos < self.buffer.len() {
-                    let remaining = self.buffer.len() - self.pos;
-                    let to_copy = remaining.min(buf.len());
-                    buf[..to_copy].copy_from_slice(&self.buffer[self.pos..self.pos + to_copy]);
-                    self.pos += to_copy;
-                    return Ok(to_copy);
-                }
-
-                // Try to get more data from channel
-                match self.rx.recv() {
-                    Ok(data) => {
-                        self.buffer = data;
-                        self.pos = 0;
-                        self.read(buf) // Recursive call to copy from new buffer
-                    }
-                    Err(_) => Ok(0), // Channel closed, EOF
-                }
-            }
-        }
-
-        let channel_reader = ChannelReader {
-            rx,
-            buffer: Vec::new(),
-            pos: 0,
-        };
+        let channel_reader = crate::test_runner::ChannelReader::new(rx);
 
         let output_filter = if self.all_output {
             subunit_stream::OutputFilter::All
@@ -919,106 +837,24 @@ impl RunCommand {
                 })?;
 
             // Take stdout and stderr for streaming
-            let mut stdout = child.stdout.take().expect("stdout was piped");
-            let mut stderr = child.stderr.take().expect("stderr was piped");
+            let stdout = child.stdout.take().expect("stdout was piped");
+            let stderr = child.stderr.take().expect("stderr was piped");
 
             // Get a writer for this worker's raw output
             let worker_run_id = format!("{}-{}", base_run_id, worker_id);
             let (_, raw_writer) = repo.begin_test_run_raw()?;
 
             // Tee the stream: capture raw bytes for storage AND parse for progress display
-            use std::io::{Read, Write};
-
-            // Create a tee writer that writes to both file and channel
-            struct TeeWriter<W: Write> {
-                writer: W,
-                tx: std::sync::mpsc::SyncSender<Vec<u8>>,
-            }
-
-            impl<W: Write> Write for TeeWriter<W> {
-                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                    // Write to file
-                    self.writer.write_all(buf)?;
-                    // Send to parser (ignore if receiver dropped)
-                    let _ = self.tx.send(buf.to_vec());
-                    Ok(buf.len())
-                }
-
-                fn flush(&mut self) -> std::io::Result<()> {
-                    self.writer.flush()
-                }
-            }
-
-            // Thread to read stdout and tee it to both storage and parsing
             let (tx, rx) = std::sync::mpsc::sync_channel(100);
 
             // Thread for stdout
-            let tee_thread = std::thread::spawn(move || -> std::io::Result<()> {
-                let mut tee = TeeWriter {
-                    writer: raw_writer,
-                    tx,
-                };
-                std::io::copy(&mut stdout, &mut tee)?;
-                tee.flush()?;
-                Ok(())
-            });
+            let tee_thread = crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx);
 
             // Thread for stderr - write directly to stderr (not to parser or storage)
-            let worker_bar_for_stderr = worker_bar.clone();
-            let stderr_thread = std::thread::spawn(move || -> std::io::Result<()> {
-                use std::io::Write;
-                let mut buffer = [0u8; 8192];
-                loop {
-                    match stderr.read(&mut buffer) {
-                        Ok(0) => break, // EOF
-                        Ok(n) => {
-                            // Write stderr output directly to stderr via progress bar suspension
-                            worker_bar_for_stderr.suspend(|| {
-                                let _ = std::io::stderr().write_all(&buffer[..n]);
-                                let _ = std::io::stderr().flush();
-                            });
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                Ok(())
-            });
+            let stderr_thread = crate::test_runner::spawn_stderr_forwarder(stderr, worker_bar.clone());
 
             // Create a reader from the channel
-            struct ChannelReader {
-                rx: std::sync::mpsc::Receiver<Vec<u8>>,
-                buffer: Vec<u8>,
-                pos: usize,
-            }
-
-            impl Read for ChannelReader {
-                fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                    // If we have buffered data, use it first
-                    if self.pos < self.buffer.len() {
-                        let remaining = self.buffer.len() - self.pos;
-                        let to_copy = remaining.min(buf.len());
-                        buf[..to_copy].copy_from_slice(&self.buffer[self.pos..self.pos + to_copy]);
-                        self.pos += to_copy;
-                        return Ok(to_copy);
-                    }
-
-                    // Try to get more data from channel
-                    match self.rx.recv() {
-                        Ok(data) => {
-                            self.buffer = data;
-                            self.pos = 0;
-                            self.read(buf) // Recursive call to copy from new buffer
-                        }
-                        Err(_) => Ok(0), // Channel closed, EOF
-                    }
-                }
-            }
-
-            let channel_reader = ChannelReader {
-                rx,
-                buffer: Vec::new(),
-                pos: 0,
-            };
+            let channel_reader = crate::test_runner::ChannelReader::new(rx);
 
             // Spawn thread to parse output in real-time
             let worker_bar_clone = worker_bar.clone();
