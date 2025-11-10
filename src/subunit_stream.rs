@@ -751,4 +751,59 @@ mod tests {
         assert_eq!(result.test_id.as_str(), "test1");
         assert!(result.tags.contains(&"mmap-test".to_string()));
     }
+
+    #[test]
+    fn test_filter_failing_tests() {
+        // Create a test run with mixed results
+        let mut test_run = TestRun::new("0".to_string());
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+
+        // Add passing test
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test_pass"),
+            status: TestStatus::Success,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec!["worker-0".to_string()],
+        });
+
+        // Add failing test
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test_fail"),
+            status: TestStatus::Failure,
+            duration: None,
+            message: Some("Failed".to_string()),
+            details: Some("Error details".to_string()),
+            tags: vec!["worker-1".to_string()],
+        });
+
+        // Add unexpected success
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test_uxsuccess"),
+            status: TestStatus::UnexpectedSuccess,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec!["worker-2".to_string()],
+        });
+
+        // Write the full stream
+        let mut full_stream = Vec::new();
+        write_stream(&test_run, &mut full_stream).unwrap();
+
+        // Filter to only failing tests
+        let mut filtered_stream = Vec::new();
+        filter_failing_tests(&full_stream[..], &mut filtered_stream).unwrap();
+
+        // Parse the filtered stream
+        let parsed = parse_stream(&filtered_stream[..], "filtered".to_string()).unwrap();
+
+        // Should only have the 2 failing tests (Failure + UnexpectedSuccess)
+        assert_eq!(parsed.total_tests(), 2);
+        assert_eq!(parsed.count_failures(), 2); // Both are considered failures
+        assert!(parsed.results.contains_key(&TestId::new("test_fail")));
+        assert!(parsed.results.contains_key(&TestId::new("test_uxsuccess")));
+        assert!(!parsed.results.contains_key(&TestId::new("test_pass")));
+    }
 }

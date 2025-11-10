@@ -7,6 +7,7 @@ use crate::ui::UI;
 pub struct TestUI {
     pub output: Vec<String>,
     pub errors: Vec<String>,
+    pub bytes_output: Vec<Vec<u8>>,
 }
 
 impl TestUI {
@@ -14,6 +15,7 @@ impl TestUI {
         TestUI {
             output: Vec::new(),
             errors: Vec::new(),
+            bytes_output: Vec::new(),
         }
     }
 }
@@ -37,6 +39,11 @@ impl UI for TestUI {
 
     fn warning(&mut self, message: &str) -> Result<()> {
         self.errors.push(format!("Warning: {}", message));
+        Ok(())
+    }
+
+    fn output_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        self.bytes_output.push(bytes.to_vec());
         Ok(())
     }
 }

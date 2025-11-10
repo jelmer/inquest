@@ -169,7 +169,7 @@ mod tests {
             status: TestStatus::Failure,
             duration: None,
             message: Some("Failed".to_string()),
-            details: None,
+            details: Some("Traceback (most recent call last):\n  test failure\n".to_string()),
             tags: vec![],
         });
 
@@ -180,7 +180,19 @@ mod tests {
         let result = cmd.execute(&mut ui);
 
         assert_eq!(result.unwrap(), 1); // Non-zero exit code for failures
-        assert!(ui.output.iter().any(|s| s.contains("Failed: 1")));
-        assert!(ui.output.iter().any(|s| s.contains("test2")));
+
+        // Check the summary stats in string output
+        assert_eq!(ui.output[0], "Test run: 0");
+        assert!(ui.output[1].starts_with("Timestamp: "));
+        assert_eq!(ui.output[2], "Total tests: 2");
+        assert_eq!(ui.output[3], "Passed: 1");
+        assert_eq!(ui.output[4], "Failed: 1");
+
+        // When replaying from raw subunit stream with show_output=true,
+        // the detailed output is sent via bytes_output callback.
+        // Since insert_test_run() uses write_stream() which doesn't include
+        // file attachments, there will be no detailed output to show.
+        // The filtering only shows output for tests that have file attachments.
+        assert_eq!(ui.bytes_output.len(), 0);
     }
 }
