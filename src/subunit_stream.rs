@@ -92,6 +92,11 @@ where
 
     // Track output for the current test (for filtering)
     let mut current_test_output: Vec<u8> = Vec::new();
+    // Track which tests we've shown headers for (to avoid duplicates)
+    let mut shown_headers: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Buffer file attachments per test until we know the status
+    let mut pending_attachments: std::collections::HashMap<String, Vec<(String, String)>> =
+        std::collections::HashMap::new();
 
     // Iterate over the subunit stream
     for item in iter_stream(reader) {
@@ -148,23 +153,26 @@ where
 
                 if let Some(ref test_id_str) = event.test_id {
                     // Handle file attachments from Undefined status events (stdout/stderr/tracebacks)
+                    // Buffer them until we know the test status
                     if event.status == SubunitTestStatus::Undefined && event.file.file.is_some() {
                         if let Some((name, content)) = &event.file.file {
-                            let content_str = String::from_utf8_lossy(content);
+                            let content_str = String::from_utf8_lossy(content).to_string();
 
-                            // Show file attachments based on filter and file type
-                            match output_filter {
-                                OutputFilter::All => {
-                                    // Show all file attachments immediately
-                                    if name == "traceback" || name == "log" {
-                                        bytes_callback(content_str.as_bytes());
-                                    }
-                                }
-                                OutputFilter::FailuresOnly => {
-                                    // Only show tracebacks (errors), not regular log output
-                                    if name == "traceback" {
-                                        bytes_callback(content_str.as_bytes());
-                                    }
+                            // Store tags with the first attachment
+                            let tags = event.tags.clone();
+
+                            pending_attachments
+                                .entry(test_id_str.clone())
+                                .or_insert_with(Vec::new)
+                                .push((name.clone(), content_str));
+
+                            // Store tags if this is the first attachment
+                            if pending_attachments.get(test_id_str).map_or(false, |v| v.len() == 1) {
+                                if let Some(tags) = tags {
+                                    pending_attachments
+                                        .entry(test_id_str.clone())
+                                        .or_insert_with(Vec::new)
+                                        .insert(0, ("_tags".to_string(), tags.join(" ")));
                                 }
                             }
                         }
@@ -210,6 +218,67 @@ where
                     };
 
                     progress_callback(test_id_str, progress_status);
+
+                    // Now that we know the status, flush any pending file attachments
+                    if let Some(attachments) = pending_attachments.remove(test_id_str) {
+                        let is_failure = matches!(
+                            progress_status,
+                            ProgressStatus::Failed | ProgressStatus::UnexpectedSuccess
+                        );
+
+                        let should_show = match output_filter {
+                            OutputFilter::All => true,
+                            OutputFilter::FailuresOnly => is_failure,
+                        };
+
+                        if should_show && !attachments.is_empty() {
+                            // Show header
+                            let status_str = match progress_status {
+                                ProgressStatus::Failed => "FAIL",
+                                ProgressStatus::UnexpectedSuccess => "FAIL",
+                                ProgressStatus::Success => "PASSED",
+                                ProgressStatus::Skipped => "SKIPPED",
+                                ProgressStatus::ExpectedFailure => "XFAIL",
+                                _ => "UNKNOWN",
+                            };
+
+                            let header = format!("{}: {}\n", status_str, test_id_str);
+                            bytes_callback(header.as_bytes());
+
+                            // Show tags if present (stored as first item with name "_tags")
+                            if let Some((name, tags_str)) = attachments.first() {
+                                if name == "_tags" {
+                                    let tags_line = format!("tags: {}\n", tags_str);
+                                    bytes_callback(tags_line.as_bytes());
+                                }
+                            }
+
+                            // Separator line
+                            bytes_callback(b"----------------------------------------------------------------------\n");
+
+                            // Show file attachments
+                            let mut has_traceback = false;
+                            for (name, content) in &attachments {
+                                if name == "_tags" {
+                                    continue; // Skip tags, already shown
+                                }
+
+                                if name == "log" {
+                                    bytes_callback(b"log: {{{\n");
+                                    bytes_callback(content.as_bytes());
+                                    bytes_callback(b"}}}\n\n");
+                                } else if name == "traceback" {
+                                    bytes_callback(content.as_bytes());
+                                    has_traceback = true;
+                                }
+                            }
+
+                            // Footer separator after all attachments if there was a traceback
+                            if has_traceback {
+                                bytes_callback(b"======================================================================\n");
+                            }
+                        }
+                    }
 
                     // Extract file content as message/details (for storage in TestResult)
                     let (message, details) = if let Some((_name, content)) = &event.file.file {
