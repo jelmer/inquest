@@ -111,3 +111,129 @@ pub fn spawn_stdout_tee<R: Read + Send + 'static, W: Write + Send + 'static>(
         Ok(())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn test_tee_writer() {
+        let (tx, rx) = mpsc::sync_channel(10);
+        let mut file_output = Vec::new();
+
+        {
+            let mut tee = TeeWriter::new(&mut file_output, tx);
+            tee.write_all(b"hello ").unwrap();
+            tee.write_all(b"world").unwrap();
+            tee.flush().unwrap();
+        }
+
+        // Check file output
+        assert_eq!(file_output, b"hello world");
+
+        // Check channel output
+        let mut channel_output = Vec::new();
+        while let Ok(data) = rx.try_recv() {
+            channel_output.extend_from_slice(&data);
+        }
+        assert_eq!(channel_output, b"hello world");
+    }
+
+    #[test]
+    fn test_channel_reader() {
+        let (tx, rx) = mpsc::sync_channel(10);
+
+        // Send data to channel
+        tx.send(b"hello ".to_vec()).unwrap();
+        tx.send(b"world".to_vec()).unwrap();
+        drop(tx); // Close channel
+
+        // Read from channel
+        let mut reader = ChannelReader::new(rx);
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).unwrap();
+
+        assert_eq!(output, b"hello world");
+    }
+
+    #[test]
+    fn test_channel_reader_buffering() {
+        let (tx, rx) = mpsc::sync_channel(10);
+
+        // Send data to channel
+        tx.send(b"hello world".to_vec()).unwrap();
+        drop(tx); // Close channel
+
+        // Read in small chunks to test buffering
+        let mut reader = ChannelReader::new(rx);
+        let mut buf = [0u8; 3];
+
+        // First read
+        assert_eq!(reader.read(&mut buf).unwrap(), 3);
+        assert_eq!(&buf[..3], b"hel");
+
+        // Second read (should use buffered data)
+        assert_eq!(reader.read(&mut buf).unwrap(), 3);
+        assert_eq!(&buf[..3], b"lo ");
+
+        // Third read (should use buffered data)
+        assert_eq!(reader.read(&mut buf).unwrap(), 3);
+        assert_eq!(&buf[..3], b"wor");
+
+        // Fourth read (should use buffered data)
+        assert_eq!(reader.read(&mut buf).unwrap(), 2);
+        assert_eq!(&buf[..2], b"ld");
+
+        // EOF
+        assert_eq!(reader.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_spawn_stdout_tee() {
+        use std::sync::{Arc, Mutex};
+
+        let (tx, rx) = mpsc::sync_channel(10);
+        let file_output = Arc::new(Mutex::new(Vec::new()));
+        let file_output_clone = file_output.clone();
+
+        let input = b"test data";
+
+        // Create a writer that wraps the Arc<Mutex<Vec>>
+        struct SharedVecWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedVecWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().write(buf)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.0.lock().unwrap().flush()
+            }
+        }
+
+        let handle = spawn_stdout_tee(&input[..], SharedVecWriter(file_output_clone), tx);
+        handle.join().unwrap().unwrap();
+
+        // Check file output
+        assert_eq!(*file_output.lock().unwrap(), b"test data");
+
+        // Check channel output
+        let mut channel_output = Vec::new();
+        while let Ok(data) = rx.try_recv() {
+            channel_output.extend_from_slice(&data);
+        }
+        assert_eq!(channel_output, b"test data");
+    }
+
+    #[test]
+    fn test_spawn_stderr_forwarder() {
+        // We can't easily test the actual stderr output, but we can verify
+        // the thread completes successfully
+        use indicatif::ProgressBar;
+
+        let input = b"stderr data";
+        let progress_bar = ProgressBar::hidden();
+
+        let handle = spawn_stderr_forwarder(&input[..], progress_bar);
+        assert!(handle.join().unwrap().is_ok());
+    }
+}

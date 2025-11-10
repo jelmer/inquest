@@ -14,6 +14,10 @@ use subunit::serialize::Serializable;
 use subunit::types::event::Event;
 use subunit::types::stream::ScannedItem;
 use subunit::types::teststatus::TestStatus as SubunitTestStatus;
+use subunit::types::timestamp::Timestamp;
+
+/// Maximum number of consecutive parse errors before giving up on the stream
+const MAX_CONSECUTIVE_ERRORS: usize = 100;
 
 /// Progress event status for test execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +59,46 @@ pub enum OutputFilter {
     All,
 }
 
+/// Convert a subunit timestamp to a chrono DateTime with error context
+fn convert_timestamp(timestamp: Timestamp, context: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    timestamp
+        .try_into()
+        .map_err(|e| Error::Subunit(format!("Invalid timestamp in {}: {}", context, e)))
+}
+
+/// Convert a SubunitTestStatus to our TestStatus (None for non-terminal states)
+fn convert_subunit_status(status: SubunitTestStatus) -> Option<TestStatus> {
+    match status {
+        SubunitTestStatus::Success => Some(TestStatus::Success),
+        SubunitTestStatus::Failed => Some(TestStatus::Failure),
+        SubunitTestStatus::Skipped => Some(TestStatus::Skip),
+        SubunitTestStatus::ExpectedFailure => Some(TestStatus::ExpectedFailure),
+        SubunitTestStatus::UnexpectedSuccess => Some(TestStatus::UnexpectedSuccess),
+        SubunitTestStatus::Undefined
+        | SubunitTestStatus::Enumeration
+        | SubunitTestStatus::InProgress => None,
+    }
+}
+
+/// Convert a SubunitTestStatus to both TestStatus and ProgressStatus
+fn convert_status_with_progress(status: SubunitTestStatus) -> Option<(TestStatus, ProgressStatus)> {
+    match status {
+        SubunitTestStatus::Success => Some((TestStatus::Success, ProgressStatus::Success)),
+        SubunitTestStatus::Failed => Some((TestStatus::Failure, ProgressStatus::Failed)),
+        SubunitTestStatus::Skipped => Some((TestStatus::Skip, ProgressStatus::Skipped)),
+        SubunitTestStatus::ExpectedFailure => {
+            Some((TestStatus::ExpectedFailure, ProgressStatus::ExpectedFailure))
+        }
+        SubunitTestStatus::UnexpectedSuccess => Some((
+            TestStatus::UnexpectedSuccess,
+            ProgressStatus::UnexpectedSuccess,
+        )),
+        SubunitTestStatus::Undefined
+        | SubunitTestStatus::Enumeration
+        | SubunitTestStatus::InProgress => None,
+    }
+}
+
 /// Parse a subunit stream from a byte slice into a TestRun
 ///
 /// This is optimized for memory-mapped files and avoids copying data.
@@ -88,7 +132,6 @@ where
     let mut test_run = TestRun::new(run_id.clone());
     let mut start_times: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
     let mut consecutive_errors = 0;
-    const MAX_CONSECUTIVE_ERRORS: usize = 100;
 
     // Track output for the current test (for filtering)
     let mut current_test_output: Vec<u8> = Vec::new();
@@ -161,15 +204,18 @@ where
 
                             pending_attachments
                                 .entry(test_id_str.clone())
-                                .or_insert_with(Vec::new)
+                                .or_default()
                                 .push((name.clone(), content_str));
 
                             // Store tags if this is the first attachment
-                            if pending_attachments.get(test_id_str).map_or(false, |v| v.len() == 1) {
+                            if pending_attachments
+                                .get(test_id_str)
+                                .is_some_and(|v| v.len() == 1)
+                            {
                                 if let Some(tags) = tags {
                                     pending_attachments
                                         .entry(test_id_str.clone())
-                                        .or_insert_with(Vec::new)
+                                        .or_default()
                                         .insert(0, ("_tags".to_string(), tags.join(" ")));
                                 }
                             }
@@ -182,38 +228,19 @@ where
                         progress_callback(test_id_str, ProgressStatus::InProgress);
                         current_test_output.clear();
                         if let Some(timestamp) = event.timestamp {
-                            let dt: chrono::DateTime<chrono::Utc> =
-                                timestamp.try_into().map_err(|e| {
-                                    Error::Subunit(format!(
-                                        "Invalid timestamp in start event: {}",
-                                        e
-                                    ))
-                                })?;
+                            let dt = convert_timestamp(timestamp, "start event")?;
                             start_times.insert(test_id_str.clone(), dt);
                         }
                         continue;
                     }
 
                     // Convert subunit status to our TestStatus
-                    let (status, progress_status) = match event.status {
-                        SubunitTestStatus::Success => {
-                            (TestStatus::Success, ProgressStatus::Success)
-                        }
-                        SubunitTestStatus::Failed => (TestStatus::Failure, ProgressStatus::Failed),
-                        SubunitTestStatus::Skipped => (TestStatus::Skip, ProgressStatus::Skipped),
-                        SubunitTestStatus::ExpectedFailure => {
-                            (TestStatus::ExpectedFailure, ProgressStatus::ExpectedFailure)
-                        }
-                        SubunitTestStatus::UnexpectedSuccess => (
-                            TestStatus::UnexpectedSuccess,
-                            ProgressStatus::UnexpectedSuccess,
-                        ),
-                        SubunitTestStatus::Undefined
-                        | SubunitTestStatus::Enumeration
-                        | SubunitTestStatus::InProgress => {
+                    let (status, progress_status) =
+                        if let Some(converted) = convert_status_with_progress(event.status) {
+                            converted
+                        } else {
                             continue;
-                        }
-                    };
+                        };
 
                     progress_callback(test_id_str, progress_status);
 
@@ -243,12 +270,16 @@ where
                                 _ => "UNKNOWN",
                             };
 
-                            output.extend_from_slice(format!("{}: {}\n", status_str, test_id_str).as_bytes());
+                            output.extend_from_slice(
+                                format!("{}: {}\n", status_str, test_id_str).as_bytes(),
+                            );
 
                             // Show tags if present (stored as first item with name "_tags")
                             if let Some((name, tags_str)) = attachments.first() {
                                 if name == "_tags" {
-                                    output.extend_from_slice(format!("tags: {}\n", tags_str).as_bytes());
+                                    output.extend_from_slice(
+                                        format!("tags: {}\n", tags_str).as_bytes(),
+                                    );
                                 }
                             }
 
@@ -304,10 +335,9 @@ where
                             if matches!(
                                 progress_status,
                                 ProgressStatus::Failed | ProgressStatus::UnexpectedSuccess
-                            ) {
-                                if !current_test_output.is_empty() {
-                                    bytes_callback(&current_test_output);
-                                }
+                            ) && !current_test_output.is_empty()
+                            {
+                                bytes_callback(&current_test_output);
                             }
                             current_test_output.clear();
                         }
@@ -322,10 +352,7 @@ where
                     let duration = if let (Some(start_time), Some(end_time)) =
                         (start_times.get(test_id_str), event.timestamp)
                     {
-                        let end_time_chrono: chrono::DateTime<chrono::Utc> =
-                            end_time.try_into().map_err(|e| {
-                                Error::Subunit(format!("Invalid timestamp in end event: {}", e))
-                            })?;
+                        let end_time_chrono = convert_timestamp(end_time, "end event")?;
                         let duration_secs = (end_time_chrono - *start_time).num_milliseconds();
                         if duration_secs >= 0 {
                             Some(std::time::Duration::from_millis(duration_secs as u64))
@@ -362,7 +389,6 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
     let mut test_run = TestRun::new(run_id.clone());
     let mut start_times: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
     let mut consecutive_errors = 0;
-    const MAX_CONSECUTIVE_ERRORS: usize = 100;
 
     // Iterate over the subunit stream
     for item in iter_stream(reader) {
@@ -402,30 +428,17 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
                     // Track start events for duration calculation
                     if event.status == SubunitTestStatus::InProgress {
                         if let Some(timestamp) = event.timestamp {
-                            let dt: chrono::DateTime<chrono::Utc> =
-                                timestamp.try_into().map_err(|e| {
-                                    Error::Subunit(format!(
-                                        "Invalid timestamp in start event: {}",
-                                        e
-                                    ))
-                                })?;
+                            let dt = convert_timestamp(timestamp, "start event")?;
                             start_times.insert(test_id_str.clone(), dt);
                         }
                         continue; // Don't add inprogress events to results
                     }
 
                     // Convert subunit status to our TestStatus
-                    let status = match event.status {
-                        SubunitTestStatus::Success => TestStatus::Success,
-                        SubunitTestStatus::Failed => TestStatus::Failure,
-                        SubunitTestStatus::Skipped => TestStatus::Skip,
-                        SubunitTestStatus::ExpectedFailure => TestStatus::ExpectedFailure,
-                        SubunitTestStatus::UnexpectedSuccess => TestStatus::UnexpectedSuccess,
-                        SubunitTestStatus::Undefined
-                        | SubunitTestStatus::Enumeration
-                        | SubunitTestStatus::InProgress => {
-                            continue; // Skip events with these statuses
-                        }
+                    let status = if let Some(s) = convert_subunit_status(event.status) {
+                        s
+                    } else {
+                        continue; // Skip events with non-terminal statuses
                     };
 
                     let test_id = TestId::new(test_id_str.clone());
@@ -445,10 +458,7 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
                     let duration = if let (Some(start_time), Some(end_time)) =
                         (start_times.get(test_id_str), event.timestamp)
                     {
-                        let end_time_chrono: chrono::DateTime<chrono::Utc> =
-                            end_time.try_into().map_err(|e| {
-                                Error::Subunit(format!("Invalid timestamp in end event: {}", e))
-                            })?;
+                        let end_time_chrono = convert_timestamp(end_time, "end event")?;
                         let duration_secs = (end_time_chrono - *start_time).num_milliseconds();
                         if duration_secs >= 0 {
                             Some(std::time::Duration::from_millis(duration_secs as u64))
@@ -491,11 +501,10 @@ pub fn filter_failing_tests<R: Read, W: Write>(mut reader: R, mut writer: W) -> 
     for item in iter_stream(&buffer[..]) {
         if let Ok(ScannedItem::Event(event)) = item {
             if let Some(ref test_id) = event.test_id {
-                let is_failure = match event.status {
-                    SubunitTestStatus::Failed => true,
-                    SubunitTestStatus::UnexpectedSuccess => true,
-                    _ => false,
-                };
+                let is_failure = matches!(
+                    event.status,
+                    SubunitTestStatus::Failed | SubunitTestStatus::UnexpectedSuccess
+                );
 
                 if is_failure {
                     failing_tests.insert(test_id.clone());
@@ -510,8 +519,9 @@ pub fn filter_failing_tests<R: Read, W: Write>(mut reader: R, mut writer: W) -> 
             Ok(ScannedItem::Event(event)) => {
                 if let Some(ref test_id) = event.test_id {
                     if failing_tests.contains(test_id) {
-                        event.serialize(&mut writer)
-                            .map_err(|e| Error::Subunit(format!("Failed to serialize event: {}", e)))?;
+                        event.serialize(&mut writer).map_err(|e| {
+                            Error::Subunit(format!("Failed to serialize event: {}", e))
+                        })?;
                     }
                 }
             }

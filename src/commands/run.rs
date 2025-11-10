@@ -462,23 +462,8 @@ impl RunCommand {
         // Parse the stored stream to update failing tests
         let test_run = repo.get_test_run(&run_id)?;
 
-        if self.partial {
-            repo.update_failing_tests(&test_run)?;
-        } else {
-            repo.replace_failing_tests(&test_run)?;
-        }
-
-        // Update test times
-        use std::collections::HashMap;
-        let mut times = HashMap::new();
-        for result in test_run.results.values() {
-            if let Some(duration) = result.duration {
-                times.insert(result.test_id.clone(), duration);
-            }
-        }
-        if !times.is_empty() {
-            repo.update_test_times(&times)?;
-        }
+        crate::commands::utils::update_repository_failing_tests(repo, &test_run, self.partial)?;
+        crate::commands::utils::update_test_times_from_run(repo, &test_run)?;
 
         // Return exit code based on test command exit code
         if status.success() {
@@ -517,8 +502,8 @@ impl RunCommand {
         // Template: "[HH:MM:SS] [bar] pos/len msg"
         // Fixed elements: "[HH:MM:SS] " (11) + " " (1) + " " (1) + "9999/9999" (9) + " " (1) = ~23 chars
         let fixed_width = 25; // Add a bit of margin
-        let bar_width = (term_width.saturating_sub(fixed_width + 30).max(20)).min(60); // Bar between 20-60 chars
-        // Calculate max message length
+        let bar_width = term_width.saturating_sub(fixed_width + 30).clamp(20, 60); // Bar between 20-60 chars
+                                                                                   // Calculate max message length
         let max_msg_len = term_width.saturating_sub(bar_width + fixed_width).max(30);
 
         let progress_bar = ProgressBar::new(test_count as u64);
@@ -559,7 +544,8 @@ impl RunCommand {
         let tee_thread = crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx);
 
         // Thread for stderr - write directly to stderr (not to parser or storage)
-        let stderr_thread = crate::test_runner::spawn_stderr_forwarder(stderr, progress_bar.clone());
+        let stderr_thread =
+            crate::test_runner::spawn_stderr_forwarder(stderr, progress_bar.clone());
 
         // Parse stdout stream in a thread for real-time progress
         let progress_bar_clone = progress_bar.clone();
@@ -664,37 +650,15 @@ impl RunCommand {
 
         progress_bar.finish_and_clear();
 
-        // Update failing tests (raw stream is already stored)
-        if self.partial {
-            repo.update_failing_tests(&test_run)?;
-        } else {
-            repo.replace_failing_tests(&test_run)?;
-        }
-
-        // Update test times
-        use std::collections::HashMap;
-        let mut times = HashMap::new();
-        for result in test_run.results.values() {
-            if let Some(duration) = result.duration {
-                times.insert(result.test_id.clone(), duration);
-            }
-        }
-        if !times.is_empty() {
-            repo.update_test_times(&times)?;
-        }
+        // Update failing tests and test times
+        crate::commands::utils::update_repository_failing_tests(repo, &test_run, self.partial)?;
+        crate::commands::utils::update_test_times_from_run(repo, &test_run)?;
 
         // Display summary
-        let total = test_run.total_tests();
-        let failures = test_run.count_failures();
-        let successes = test_run.count_successes();
-
-        ui.output(&format!("\nTest run {}:", run_id))?;
-        ui.output(&format!("  Total:   {}", total))?;
-        ui.output(&format!("  Passed:  {}", successes))?;
-        ui.output(&format!("  Failed:  {}", failures))?;
+        crate::commands::utils::display_test_summary(ui, &run_id, &test_run)?;
 
         // Return exit code based on results
-        if failures > 0 || command_failed {
+        if test_run.count_failures() > 0 || command_failed {
             Ok(1)
         } else {
             Ok(0)
@@ -755,7 +719,7 @@ impl RunCommand {
         // Create multi-progress for tracking all workers
         let term_width = console::Term::stdout().size().1 as usize;
         let fixed_width = 25; // For "[HH:MM:SS] " + " pos/len "
-        let overall_bar_width = (term_width.saturating_sub(fixed_width + 30).max(20)).min(60);
+        let overall_bar_width = term_width.saturating_sub(fixed_width + 30).clamp(20, 60);
 
         let multi_progress = indicatif::MultiProgress::new();
         let overall_bar = multi_progress.add(ProgressBar::new(all_tests.len() as u64));
@@ -797,9 +761,12 @@ impl RunCommand {
             // Template: "Worker N: [bar] pos/len msg"
             // Fixed: "Worker N: " (10-12) + " " + "999/999" (7) + " " = ~20 chars
             let worker_fixed = 22;
-            let worker_bar_width = ((term_width.saturating_sub(worker_fixed + 30)) / concurrency.min(4)).max(15).min(40);
+            let worker_bar_width =
+                ((term_width.saturating_sub(worker_fixed + 30)) / concurrency.min(4)).clamp(15, 40);
             // Calculate max message for worker
-            let worker_max_msg = term_width.saturating_sub(worker_bar_width + worker_fixed).max(20);
+            let worker_max_msg = term_width
+                .saturating_sub(worker_bar_width + worker_fixed)
+                .max(20);
 
             let worker_bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
             worker_bar.set_style(
@@ -851,7 +818,8 @@ impl RunCommand {
             let tee_thread = crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx);
 
             // Thread for stderr - write directly to stderr (not to parser or storage)
-            let stderr_thread = crate::test_runner::spawn_stderr_forwarder(stderr, worker_bar.clone());
+            let stderr_thread =
+                crate::test_runner::spawn_stderr_forwarder(stderr, worker_bar.clone());
 
             // Create a reader from the channel
             let channel_reader = crate::test_runner::ChannelReader::new(rx);
@@ -920,7 +888,13 @@ impl RunCommand {
                 )
             });
 
-            parse_threads.push((worker_id, worker_bar, parse_thread, tee_thread, stderr_thread));
+            parse_threads.push((
+                worker_id,
+                worker_bar,
+                parse_thread,
+                tee_thread,
+                stderr_thread,
+            ));
             workers.push((worker_id, child, _temp_file));
         }
 
@@ -1004,23 +978,9 @@ impl RunCommand {
             combined_run.add_result(result);
         }
 
-        // Update failing tests (raw streams are already stored in worker files)
-        if self.partial {
-            repo.update_failing_tests(&combined_run)?;
-        } else {
-            repo.replace_failing_tests(&combined_run)?;
-        }
-
-        // Update test times
-        let mut times = HashMap::new();
-        for result in combined_run.results.values() {
-            if let Some(duration) = result.duration {
-                times.insert(result.test_id.clone(), duration);
-            }
-        }
-        if !times.is_empty() {
-            repo.update_test_times(&times)?;
-        }
+        // Update failing tests and test times
+        crate::commands::utils::update_repository_failing_tests(repo, &combined_run, self.partial)?;
+        crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
 
         // Dispose instances (done explicitly before drop to handle errors)
         drop(dispose_guard);
@@ -1030,17 +990,10 @@ impl RunCommand {
         }
 
         // Display summary
-        let total = combined_run.total_tests();
-        let failures = combined_run.count_failures();
-        let successes = combined_run.count_successes();
-
-        ui.output(&format!("\nTest run {}:", run_id_for_display))?;
-        ui.output(&format!("  Total:   {}", total))?;
-        ui.output(&format!("  Passed:  {}", successes))?;
-        ui.output(&format!("  Failed:  {}", failures))?;
+        crate::commands::utils::display_test_summary(ui, &run_id_for_display, &combined_run)?;
 
         // Return exit code based on results
-        if failures > 0 || any_failed {
+        if combined_run.count_failures() > 0 || any_failed {
             Ok(1)
         } else {
             Ok(0)
@@ -1118,36 +1071,15 @@ impl RunCommand {
             combined_run.add_result(result);
         }
 
-        // Update failing tests (raw streams are already stored in worker files)
-        if self.partial {
-            repo.update_failing_tests(&combined_run)?;
-        } else {
-            repo.replace_failing_tests(&combined_run)?;
-        }
-
-        // Update test times
-        let mut times = HashMap::new();
-        for result in combined_run.results.values() {
-            if let Some(duration) = result.duration {
-                times.insert(result.test_id.clone(), duration);
-            }
-        }
-        if !times.is_empty() {
-            repo.update_test_times(&times)?;
-        }
+        // Update failing tests and test times
+        crate::commands::utils::update_repository_failing_tests(repo, &combined_run, self.partial)?;
+        crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
 
         // Display summary
-        let total = combined_run.total_tests();
-        let failures = combined_run.count_failures();
-        let successes = combined_run.count_successes();
-
-        ui.output(&format!("\nTest run {}:", run_id_for_display))?;
-        ui.output(&format!("  Total:   {}", total))?;
-        ui.output(&format!("  Passed:  {}", successes))?;
-        ui.output(&format!("  Failed:  {}", failures))?;
+        crate::commands::utils::display_test_summary(ui, &run_id_for_display, &combined_run)?;
 
         // Return exit code based on results
-        if failures > 0 || any_failed {
+        if combined_run.count_failures() > 0 || any_failed {
             Ok(1)
         } else {
             Ok(0)

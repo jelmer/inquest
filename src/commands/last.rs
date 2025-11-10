@@ -62,7 +62,7 @@ impl Command for LastCommand {
         }
 
         // Show test output based on show_output setting
-        if self.show_output {
+        if self.show_output && test_run.count_failures() > 0 {
             // Replay the raw subunit stream with output filter to show failures
             let mut raw_stream = repo.get_test_run_raw(&test_run.id)?;
 
@@ -81,6 +81,13 @@ impl Command for LastCommand {
                 },
                 output_filter,
             )?;
+
+            // If there was no output (no file attachments in stream), show test IDs
+            ui.output("")?;
+            ui.output("Failed tests:")?;
+            for test_id in test_run.get_failing_tests() {
+                ui.output(&format!("  {}", test_id))?;
+            }
         } else if test_run.count_failures() > 0 {
             // Just list the test IDs without details
             ui.output("")?;

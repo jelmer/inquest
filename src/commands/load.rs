@@ -93,23 +93,14 @@ impl Command for LoadCommand {
         let test_run = subunit_stream::parse_stream(&all_data[..], run_id.clone())?;
 
         // Update failing tests (raw stream is already stored)
-        if self.partial {
-            repo.update_failing_tests(&test_run)?;
-        } else {
-            repo.replace_failing_tests(&test_run)?;
-        }
+        crate::commands::utils::update_repository_failing_tests(
+            &mut repo,
+            &test_run,
+            self.partial,
+        )?;
 
         // Update test times
-        use std::collections::HashMap;
-        let mut times = HashMap::new();
-        for result in test_run.results.values() {
-            if let Some(duration) = result.duration {
-                times.insert(result.test_id.clone(), duration);
-            }
-        }
-        if !times.is_empty() {
-            repo.update_test_times(&times)?;
-        }
+        crate::commands::utils::update_test_times_from_run(&mut repo, &test_run)?;
 
         ui.output(&format!(
             "Loaded {} test(s) as run {}",

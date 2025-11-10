@@ -13,8 +13,8 @@ use crate::subunit_stream;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use subunit::serialize::Serializable;
 use std::time::Duration;
+use subunit::serialize::Serializable;
 
 const REPOSITORY_FORMAT: &str = "1";
 const REPO_DIR: &str = ".testrepository";
@@ -184,7 +184,7 @@ impl FileRepository {
             let mut writer = File::create(&temp_path)?;
 
             // Write events from the new run for newly failing tests
-            let new_run_reader = File::open(&self.get_run_path(run_id))?;
+            let new_run_reader = File::open(self.get_run_path(run_id))?;
 
             // Filter new run for failing tests
             let mut new_run_buffer = Vec::new();
@@ -193,7 +193,8 @@ impl FileRepository {
             // If there's an existing failing file, copy events for tests that are still failing
             if failing_path.exists() {
                 let existing_reader = File::open(&failing_path)?;
-                let existing_test_ids: std::collections::HashSet<_> = existing_failing.keys().cloned().collect();
+                let existing_test_ids: std::collections::HashSet<_> =
+                    existing_failing.keys().cloned().collect();
 
                 // Copy events from existing failing file for tests not in the new run
                 for item in subunit::io::sync::iter_stream(existing_reader) {
@@ -201,9 +202,14 @@ impl FileRepository {
                         if let Some(ref test_id) = event.test_id {
                             // Keep if still failing and not updated in new run
                             if existing_test_ids.contains(&TestId::new(test_id))
-                                && !new_run.results.contains_key(&TestId::new(test_id)) {
-                                event.serialize(&mut writer)
-                                    .map_err(|e| crate::error::Error::Subunit(format!("Failed to serialize: {}", e)))?;
+                                && !new_run.results.contains_key(&TestId::new(test_id))
+                            {
+                                event.serialize(&mut writer).map_err(|e| {
+                                    crate::error::Error::Subunit(format!(
+                                        "Failed to serialize: {}",
+                                        e
+                                    ))
+                                })?;
                             }
                         }
                     }

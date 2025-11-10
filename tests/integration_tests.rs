@@ -16,6 +16,7 @@ use testrepository::ui::UI;
 struct TestUI {
     output: Vec<String>,
     errors: Vec<String>,
+    bytes_output: Vec<Vec<u8>>,
 }
 
 impl TestUI {
@@ -23,6 +24,7 @@ impl TestUI {
         TestUI {
             output: Vec::new(),
             errors: Vec::new(),
+            bytes_output: Vec::new(),
         }
     }
 }
@@ -40,6 +42,11 @@ impl UI for TestUI {
 
     fn warning(&mut self, message: &str) -> testrepository::error::Result<()> {
         self.errors.push(format!("Warning: {}", message));
+        Ok(())
+    }
+
+    fn output_bytes(&mut self, bytes: &[u8]) -> testrepository::error::Result<()> {
+        self.bytes_output.push(bytes.to_vec());
         Ok(())
     }
 }
@@ -92,10 +99,9 @@ fn test_full_workflow_init_load_last() {
     let result = last_cmd.execute(&mut ui);
     assert_eq!(result.unwrap(), 1); // Exit code 1 because there's a failure
 
-    // Verify exact output structure (with detailed failure output)
-    // Note: After round-trip through subunit serialization, the error message/details
-    // might not be preserved, so we only get the test ID
-    assert_eq!(ui.output.len(), 9);
+    // Verify exact output structure
+    // Note: insert_test_run() doesn't include file attachments, so we only get test IDs
+    assert_eq!(ui.output.len(), 8);
     assert_eq!(ui.output[0], "Test run: 0");
     assert!(ui.output[1].starts_with("Timestamp: "));
     assert_eq!(ui.output[2], "Total tests: 3");
@@ -103,8 +109,10 @@ fn test_full_workflow_init_load_last() {
     assert_eq!(ui.output[4], "Failed: 1");
     assert_eq!(ui.output[5], "");
     assert_eq!(ui.output[6], "Failed tests:");
-    assert_eq!(ui.output[7], ""); // Empty line before detailed output
-    assert_eq!(ui.output[8], "test2:"); // Test ID with colon (no message after subunit round-trip)
+    assert_eq!(ui.output[7], "  test2");
+
+    // No detailed output since insert_test_run() doesn't write file attachments
+    assert_eq!(ui.bytes_output.len(), 0);
 }
 
 #[test]
