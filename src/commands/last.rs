@@ -61,35 +61,21 @@ impl Command for LastCommand {
             ui.output(&format!("Total time: {:.3}s", duration.as_secs_f64()))?;
         }
 
-        if test_run.count_failures() > 0 {
+        // Show detailed test results based on show_output setting
+        // Note: show_output determines whether to show details/tracebacks or just list test IDs
+        if self.show_output {
+            // Use the shared utility to display detailed results (failures only for last command)
+            super::utils::display_test_results(ui, &test_run, false)?;
+        } else if test_run.count_failures() > 0 {
+            // Just list the test IDs without details
             ui.output("")?;
             ui.output("Failed tests:")?;
-
-            if self.show_output {
-                // Show detailed output for each failed test
-                for test_id in test_run.get_failing_tests() {
-                    ui.output("")?;
-                    ui.output(&format!("{}:", test_id))?;
-
-                    // Get the test result to show details
-                    if let Some(result) = test_run.results.get(test_id) {
-                        if let Some(ref details) = result.details {
-                            // Show the traceback/details
-                            for line in details.lines() {
-                                ui.output(&format!("  {}", line))?;
-                            }
-                        } else if let Some(ref message) = result.message {
-                            // Show just the message if no details
-                            ui.output(&format!("  {}", message))?;
-                        }
-                    }
-                }
-            } else {
-                // Just list the test IDs
-                for test_id in test_run.get_failing_tests() {
-                    ui.output(&format!("  {}", test_id))?;
-                }
+            for test_id in test_run.get_failing_tests() {
+                ui.output(&format!("  {}", test_id))?;
             }
+        }
+
+        if test_run.count_failures() > 0 {
             Ok(1)
         } else {
             Ok(0)

@@ -145,7 +145,32 @@ where
             }
             ScannedItem::Event(event) => {
                 consecutive_errors = 0; // Reset on any valid event
+
                 if let Some(ref test_id_str) = event.test_id {
+                    // Handle file attachments from Undefined status events (stdout/stderr/tracebacks)
+                    if event.status == SubunitTestStatus::Undefined && event.file.file.is_some() {
+                        if let Some((name, content)) = &event.file.file {
+                            let content_str = String::from_utf8_lossy(content);
+
+                            // Show file attachments based on filter and file type
+                            match output_filter {
+                                OutputFilter::All => {
+                                    // Show all file attachments immediately
+                                    if name == "traceback" || name == "log" {
+                                        bytes_callback(content_str.as_bytes());
+                                    }
+                                }
+                                OutputFilter::FailuresOnly => {
+                                    // Only show tracebacks (errors), not regular log output
+                                    if name == "traceback" {
+                                        bytes_callback(content_str.as_bytes());
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     // Track start events for duration calculation
                     if event.status == SubunitTestStatus::InProgress {
                         progress_callback(test_id_str, ProgressStatus::InProgress);
@@ -186,31 +211,41 @@ where
 
                     progress_callback(test_id_str, progress_status);
 
-                    // If filtering output, only show it for failed/unexpected success tests
-                    if output_filter == OutputFilter::FailuresOnly
-                        && !current_test_output.is_empty()
-                    {
-                        if matches!(
-                            progress_status,
-                            ProgressStatus::Failed | ProgressStatus::UnexpectedSuccess
-                        ) {
-                            bytes_callback(&current_test_output);
+                    // Extract file content as message/details (for storage in TestResult)
+                    let (message, details) = if let Some((_name, content)) = &event.file.file {
+                        let content_str = String::from_utf8_lossy(content).to_string();
+                        (Some(content_str.clone()), Some(content_str))
+                    } else {
+                        (None, None)
+                    };
+
+                    // Show any buffered output for this test
+                    match output_filter {
+                        OutputFilter::All => {
+                            // Show all buffered output immediately
+                            if !current_test_output.is_empty() {
+                                bytes_callback(&current_test_output);
+                                current_test_output.clear();
+                            }
                         }
-                        current_test_output.clear();
+                        OutputFilter::FailuresOnly => {
+                            // Only show buffered output for failed tests
+                            if matches!(
+                                progress_status,
+                                ProgressStatus::Failed | ProgressStatus::UnexpectedSuccess
+                            ) {
+                                if !current_test_output.is_empty() {
+                                    bytes_callback(&current_test_output);
+                                }
+                            }
+                            current_test_output.clear();
+                        }
                     }
 
                     let test_id = TestId::new(test_id_str.clone());
 
                     // Extract tags
                     let tags = event.tags.unwrap_or_default();
-
-                    // Extract file content as message/details
-                    let (message, details) = if let Some((_name, content)) = event.file.file {
-                        let content_str = String::from_utf8_lossy(&content).to_string();
-                        (Some(content_str.clone()), Some(content_str))
-                    } else {
-                        (None, None)
-                    };
 
                     // Calculate duration from start/stop timestamps
                     let duration = if let (Some(start_time), Some(end_time)) =
