@@ -46,6 +46,15 @@ impl ProgressStatus {
     }
 }
 
+/// Controls which test output (stdout/stderr) to show
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFilter {
+    /// Show output only from failed/unexpected success tests
+    FailuresOnly,
+    /// Show output from all tests (both passing and failing)
+    All,
+}
+
 /// Parse a subunit stream from a byte slice into a TestRun
 ///
 /// This is optimized for memory-mapped files and avoids copying data.
@@ -56,8 +65,11 @@ pub fn parse_stream_bytes(data: &[u8], run_id: String) -> Result<TestRun> {
 /// Parse a subunit stream into a TestRun with progress callback
 ///
 /// The callback is called with (test_id, status) for each test event.
-/// The bytes_callback is called with all non-subunit output (print statements, warnings, etc.)
-/// immediately as it arrives, matching Python testrepository behavior.
+/// The bytes_callback is called with non-subunit output (print statements, warnings, etc.)
+/// based on the output_filter setting:
+/// - OutputFilter::All: Show all output immediately
+/// - OutputFilter::FailuresOnly: Only show output from failed/unexpected success tests
+///
 /// If the stream is incomplete or interrupted, returns partial results collected before the error.
 /// Returns an error only for invalid timestamps in otherwise valid events.
 pub fn parse_stream_with_progress<R: Read, F, B>(
@@ -65,6 +77,7 @@ pub fn parse_stream_with_progress<R: Read, F, B>(
     run_id: String,
     mut progress_callback: F,
     mut bytes_callback: B,
+    output_filter: OutputFilter,
 ) -> Result<TestRun>
 where
     F: FnMut(&str, ProgressStatus),
@@ -76,6 +89,9 @@ where
     let mut start_times: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
     let mut consecutive_errors = 0;
     const MAX_CONSECUTIVE_ERRORS: usize = 100;
+
+    // Track output for the current test (for filtering)
+    let mut current_test_output: Vec<u8> = Vec::new();
 
     // Iterate over the subunit stream
     for item in iter_stream(reader) {
@@ -113,9 +129,18 @@ where
             }
             ScannedItem::Bytes(bytes) => {
                 // Non-event data (e.g., print statements from tests)
-                // Always show non-subunit output immediately, just like Python version
                 consecutive_errors = 0; // Reset on any valid item
-                bytes_callback(&bytes);
+
+                match output_filter {
+                    OutputFilter::All => {
+                        // Show all output immediately
+                        bytes_callback(&bytes);
+                    }
+                    OutputFilter::FailuresOnly => {
+                        // Buffer output for the current test
+                        current_test_output.extend_from_slice(&bytes);
+                    }
+                }
                 continue;
             }
             ScannedItem::Event(event) => {
@@ -124,6 +149,7 @@ where
                     // Track start events for duration calculation
                     if event.status == SubunitTestStatus::InProgress {
                         progress_callback(test_id_str, ProgressStatus::InProgress);
+                        current_test_output.clear();
                         if let Some(timestamp) = event.timestamp {
                             let dt: chrono::DateTime<chrono::Utc> =
                                 timestamp.try_into().map_err(|e| {
@@ -159,6 +185,19 @@ where
                     };
 
                     progress_callback(test_id_str, progress_status);
+
+                    // If filtering output, only show it for failed/unexpected success tests
+                    if output_filter == OutputFilter::FailuresOnly
+                        && !current_test_output.is_empty()
+                    {
+                        if matches!(
+                            progress_status,
+                            ProgressStatus::Failed | ProgressStatus::UnexpectedSuccess
+                        ) {
+                            bytes_callback(&current_test_output);
+                        }
+                        current_test_output.clear();
+                    }
 
                     let test_id = TestId::new(test_id_str.clone());
 

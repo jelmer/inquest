@@ -130,6 +130,10 @@ enum Commands {
         #[arg(long)]
         subunit: bool,
 
+        /// Show output from all tests (by default only failed tests show output)
+        #[arg(long)]
+        all_output: bool,
+
         /// Test ID filters (regex patterns to filter which tests to run)
         #[arg(value_name = "TESTFILTER")]
         testfilters: Vec<String>,
@@ -231,6 +235,7 @@ fn main() {
             until_failure,
             isolated,
             subunit,
+            all_output,
             testfilters,
             testargs,
         } => {
@@ -244,6 +249,7 @@ fn main() {
                 until_failure,
                 isolated,
                 subunit,
+                all_output,
                 if testfilters.is_empty() {
                     None
                 } else {

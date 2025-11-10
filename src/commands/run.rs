@@ -263,6 +263,7 @@ pub struct RunCommand {
     until_failure: bool,
     isolated: bool,
     subunit: bool,
+    all_output: bool,
     test_filters: Option<Vec<String>>,
     test_args: Option<Vec<String>>,
 }
@@ -279,6 +280,7 @@ impl RunCommand {
             until_failure: false,
             isolated: false,
             subunit: false,
+            all_output: false,
             test_filters: None,
             test_args: None,
         }
@@ -295,6 +297,7 @@ impl RunCommand {
             until_failure: false,
             isolated: false,
             subunit: false,
+            all_output: false,
             test_filters: None,
             test_args: None,
         }
@@ -311,6 +314,7 @@ impl RunCommand {
             until_failure: false,
             isolated: false,
             subunit: false,
+            all_output: false,
             test_filters: None,
             test_args: None,
         }
@@ -332,6 +336,7 @@ impl RunCommand {
             until_failure: false,
             isolated: false,
             subunit: false,
+            all_output: false,
             test_filters: None,
             test_args: None,
         }
@@ -348,6 +353,7 @@ impl RunCommand {
         until_failure: bool,
         isolated: bool,
         subunit: bool,
+        all_output: bool,
         test_filters: Option<Vec<String>>,
         test_args: Option<Vec<String>>,
     ) -> Self {
@@ -361,6 +367,7 @@ impl RunCommand {
             until_failure,
             isolated,
             subunit,
+            all_output,
             test_filters,
             test_args,
         }
@@ -428,9 +435,7 @@ impl RunCommand {
 
         impl<'a> Write for UIWriter<'a> {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.ui
-                    .output_bytes(buf)
-                    .map_err(std::io::Error::other)?;
+                self.ui.output_bytes(buf).map_err(std::io::Error::other)?;
                 Ok(buf.len())
             }
 
@@ -616,12 +621,17 @@ impl RunCommand {
             pos: 0,
         };
 
+        let output_filter = if self.all_output {
+            subunit_stream::OutputFilter::All
+        } else {
+            subunit_stream::OutputFilter::FailuresOnly
+        };
+
         let parse_thread = std::thread::spawn(move || {
             let mut failures = 0;
             let progress_bar_for_bytes = progress_bar_clone.clone();
             let progress_bar_for_style = progress_bar_clone.clone();
 
-            // Always show all non-subunit output immediately, matching Python behavior
             let result = subunit_stream::parse_stream_with_progress(
                 channel_reader,
                 run_id_clone,
@@ -663,6 +673,7 @@ impl RunCommand {
                 |bytes| {
                     write_non_subunit_output(&progress_bar_for_bytes, bytes);
                 },
+                output_filter,
             );
             result
         });
@@ -745,6 +756,12 @@ impl RunCommand {
         use std::process::{Command, Stdio};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+
+        let output_filter = if self.all_output {
+            subunit_stream::OutputFilter::All
+        } else {
+            subunit_stream::OutputFilter::FailuresOnly
+        };
 
         // Get the base run ID - each worker will write to run_id-{worker_id}
         let base_run_id = repo.get_next_run_id()?;
@@ -940,6 +957,7 @@ impl RunCommand {
             let worker_run_id_clone = worker_run_id.clone();
             let total_failures_clone = Arc::clone(&total_failures);
 
+            let output_filter_clone = output_filter;
             let parse_thread = std::thread::spawn(move || {
                 let mut failures = 0;
                 let worker_bar_for_bytes = worker_bar_clone.clone();
@@ -993,6 +1011,7 @@ impl RunCommand {
                     |bytes| {
                         write_non_subunit_output(&worker_bar_for_bytes, bytes);
                     },
+                    output_filter_clone,
                 )
             });
 

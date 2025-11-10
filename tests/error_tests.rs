@@ -352,6 +352,7 @@ test_command=echo "test1"
         false, // until_failure
         false, // isolated
         false, // subunit
+        false, // all_output
         None,  // test_filters
         None,  // test_args
     );
