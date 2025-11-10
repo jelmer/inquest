@@ -303,6 +303,12 @@ impl Repository for FileRepository {
         self.get_test_run(&run_id)
     }
 
+    fn get_test_run_raw(&self, run_id: &str) -> Result<Box<dyn std::io::Read>> {
+        let path = self.get_run_path(run_id);
+        let file = File::open(&path)?;
+        Ok(Box::new(file))
+    }
+
     fn update_failing_tests(&mut self, run: &TestRun) -> Result<()> {
         // Read existing failing tests
         let mut failing = self.read_failing_run()?;

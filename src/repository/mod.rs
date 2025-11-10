@@ -133,6 +133,9 @@ pub trait Repository {
     /// Get the latest test run
     fn get_latest_run(&self) -> Result<TestRun>;
 
+    /// Get the raw subunit stream for a test run as a reader
+    fn get_test_run_raw(&self, run_id: &str) -> Result<Box<dyn std::io::Read>>;
+
     /// Get the list of currently failing tests
     fn get_failing_tests(&self) -> Result<Vec<TestId>>;
 

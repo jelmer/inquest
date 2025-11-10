@@ -92,8 +92,6 @@ where
 
     // Track output for the current test (for filtering)
     let mut current_test_output: Vec<u8> = Vec::new();
-    // Track which tests we've shown headers for (to avoid duplicates)
-    let mut shown_headers: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Buffer file attachments per test until we know the status
     let mut pending_attachments: std::collections::HashMap<String, Vec<(String, String)>> =
         std::collections::HashMap::new();
@@ -232,7 +230,10 @@ where
                         };
 
                         if should_show && !attachments.is_empty() {
-                            // Show header
+                            // Build all output in a single buffer to avoid progress bar interruption
+                            let mut output = Vec::new();
+
+                            // Header
                             let status_str = match progress_status {
                                 ProgressStatus::Failed => "FAIL",
                                 ProgressStatus::UnexpectedSuccess => "FAIL",
@@ -242,19 +243,17 @@ where
                                 _ => "UNKNOWN",
                             };
 
-                            let header = format!("{}: {}\n", status_str, test_id_str);
-                            bytes_callback(header.as_bytes());
+                            output.extend_from_slice(format!("{}: {}\n", status_str, test_id_str).as_bytes());
 
                             // Show tags if present (stored as first item with name "_tags")
                             if let Some((name, tags_str)) = attachments.first() {
                                 if name == "_tags" {
-                                    let tags_line = format!("tags: {}\n", tags_str);
-                                    bytes_callback(tags_line.as_bytes());
+                                    output.extend_from_slice(format!("tags: {}\n", tags_str).as_bytes());
                                 }
                             }
 
                             // Separator line
-                            bytes_callback(b"----------------------------------------------------------------------\n");
+                            output.extend_from_slice(b"----------------------------------------------------------------------\n");
 
                             // Show file attachments
                             let mut has_traceback = false;
@@ -264,19 +263,22 @@ where
                                 }
 
                                 if name == "log" {
-                                    bytes_callback(b"log: {{{\n");
-                                    bytes_callback(content.as_bytes());
-                                    bytes_callback(b"}}}\n\n");
+                                    output.extend_from_slice(b"log: {{{\n");
+                                    output.extend_from_slice(content.as_bytes());
+                                    output.extend_from_slice(b"}}}\n\n");
                                 } else if name == "traceback" {
-                                    bytes_callback(content.as_bytes());
+                                    output.extend_from_slice(content.as_bytes());
                                     has_traceback = true;
                                 }
                             }
 
                             // Footer separator after all attachments if there was a traceback
                             if has_traceback {
-                                bytes_callback(b"======================================================================\n");
+                                output.extend_from_slice(b"======================================================================\n");
                             }
+
+                            // Write all output at once
+                            bytes_callback(&output);
                         }
                     }
 

@@ -61,11 +61,26 @@ impl Command for LastCommand {
             ui.output(&format!("Total time: {:.3}s", duration.as_secs_f64()))?;
         }
 
-        // Show detailed test results based on show_output setting
-        // Note: show_output determines whether to show details/tracebacks or just list test IDs
+        // Show test output based on show_output setting
         if self.show_output {
-            // Use the shared utility to display detailed results (failures only for last command)
-            super::utils::display_test_results(ui, &test_run, false)?;
+            // Replay the raw subunit stream with output filter to show failures
+            let mut raw_stream = repo.get_test_run_raw(&test_run.id)?;
+
+            let output_filter = crate::subunit_stream::OutputFilter::FailuresOnly;
+
+            // Parse and display output
+            crate::subunit_stream::parse_stream_with_progress(
+                &mut raw_stream,
+                test_run.id.clone(),
+                |_test_id, _status| {
+                    // No progress callback needed for last command
+                },
+                |bytes| {
+                    // Output callback - write to UI
+                    let _ = ui.output_bytes(bytes);
+                },
+                output_filter,
+            )?;
         } else if test_run.count_failures() > 0 {
             // Just list the test IDs without details
             ui.output("")?;

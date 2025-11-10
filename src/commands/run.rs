@@ -34,6 +34,7 @@ fn format_failure_msg(failures: usize, short_label: bool) -> String {
 /// Helper to write non-subunit bytes to stdout
 fn write_non_subunit_output(progress_bar: &ProgressBar, bytes: &[u8]) {
     use std::io::Write;
+    // Suspend the progress bar while writing output
     progress_bar.suspend(|| {
         let _ = std::io::stdout().write_all(bytes);
         let _ = std::io::stdout().flush();
@@ -513,9 +514,12 @@ impl RunCommand {
 
         // Create progress bar with dynamic width
         let term_width = console::Term::stdout().size().1 as usize;
-        let bar_width = term_width.saturating_sub(40).max(20); // Reserve space for time/counters
-                                                               // Calculate max message length: term_width - bar - time/counters - padding
-        let max_msg_len = term_width.saturating_sub(bar_width + 40).max(30);
+        // Template: "[HH:MM:SS] [bar] pos/len msg"
+        // Fixed elements: "[HH:MM:SS] " (11) + " " (1) + " " (1) + "9999/9999" (9) + " " (1) = ~23 chars
+        let fixed_width = 25; // Add a bit of margin
+        let bar_width = (term_width.saturating_sub(fixed_width + 30).max(20)).min(60); // Bar between 20-60 chars
+        // Calculate max message length
+        let max_msg_len = term_width.saturating_sub(bar_width + fixed_width).max(30);
 
         let progress_bar = ProgressBar::new(test_count as u64);
         progress_bar.set_style(
@@ -528,12 +532,13 @@ impl RunCommand {
                 .progress_chars("█▓▒░  "),
         );
 
-        // Spawn test command
+        // Spawn test command with both stdout and stderr piped
         let mut child = Command::new("sh")
             .arg("-c")
             .arg(&cmd_str)
             .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
                 progress_bar.finish_and_clear();
@@ -543,8 +548,9 @@ impl RunCommand {
                 ))
             })?;
 
-        // Take stdout for streaming (stderr goes to terminal like Python version)
+        // Take stdout and stderr for streaming
         let mut stdout = child.stdout.take().expect("stdout was piped");
+        let mut stderr = child.stderr.take().expect("stderr was piped");
 
         // Tee the stream: capture raw bytes for storage AND parse for progress display
         use std::io::{Read, Write};
@@ -571,6 +577,8 @@ impl RunCommand {
 
         // Thread to read stdout and tee it to both storage and parsing
         let (tx, rx) = std::sync::mpsc::sync_channel(100);
+
+        // Thread for stdout
         let tee_thread = std::thread::spawn(move || -> std::io::Result<()> {
             let mut tee = TeeWriter {
                 writer: raw_writer,
@@ -578,6 +586,27 @@ impl RunCommand {
             };
             std::io::copy(&mut stdout, &mut tee)?;
             tee.flush()?;
+            Ok(())
+        });
+
+        // Thread for stderr - write directly to stderr (not to parser or storage)
+        let progress_bar_for_stderr = progress_bar.clone();
+        let stderr_thread = std::thread::spawn(move || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut buffer = [0u8; 8192];
+            loop {
+                match stderr.read(&mut buffer) {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        // Write stderr output directly to stderr via progress bar suspension
+                        progress_bar_for_stderr.suspend(|| {
+                            let _ = std::io::stderr().write_all(&buffer[..n]);
+                            let _ = std::io::stderr().flush();
+                        });
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
             Ok(())
         });
 
@@ -692,12 +721,23 @@ impl RunCommand {
             crate::error::Error::CommandExecution("Parse thread panicked".to_string())
         })??;
 
-        // Wait for tee thread to finish writing raw bytes
+        // Wait for tee threads to finish writing raw bytes
         tee_thread
             .join()
             .map_err(|_| {
                 progress_bar.finish_and_clear();
                 crate::error::Error::CommandExecution("Tee thread panicked".to_string())
+            })?
+            .map_err(|e| {
+                progress_bar.finish_and_clear();
+                crate::error::Error::Io(e)
+            })?;
+
+        stderr_thread
+            .join()
+            .map_err(|_| {
+                progress_bar.finish_and_clear();
+                crate::error::Error::CommandExecution("Stderr thread panicked".to_string())
             })?
             .map_err(|e| {
                 progress_bar.finish_and_clear();
@@ -796,7 +836,8 @@ impl RunCommand {
 
         // Create multi-progress for tracking all workers
         let term_width = console::Term::stdout().size().1 as usize;
-        let overall_bar_width = term_width.saturating_sub(40).max(20);
+        let fixed_width = 25; // For "[HH:MM:SS] " + " pos/len "
+        let overall_bar_width = (term_width.saturating_sub(fixed_width + 30).max(20)).min(60);
 
         let multi_progress = indicatif::MultiProgress::new();
         let overall_bar = multi_progress.add(ProgressBar::new(all_tests.len() as u64));
@@ -835,9 +876,12 @@ impl RunCommand {
             }
 
             // Create a progress bar for this worker
-            let worker_bar_width = (term_width.saturating_sub(60) / concurrency.min(4)).max(15);
-            // Calculate max message for worker: account for "Worker N: " prefix and counters
-            let worker_max_msg = term_width.saturating_sub(worker_bar_width + 35).max(25);
+            // Template: "Worker N: [bar] pos/len msg"
+            // Fixed: "Worker N: " (10-12) + " " + "999/999" (7) + " " = ~20 chars
+            let worker_fixed = 22;
+            let worker_bar_width = ((term_width.saturating_sub(worker_fixed + 30)) / concurrency.min(4)).max(15).min(40);
+            // Calculate max message for worker
+            let worker_max_msg = term_width.saturating_sub(worker_bar_width + worker_fixed).max(20);
 
             let worker_bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
             worker_bar.set_style(
@@ -859,12 +903,13 @@ impl RunCommand {
                 self.test_args.as_deref(),
             )?;
 
-            // Spawn the worker process
+            // Spawn the worker process with both stdout and stderr piped
             let mut child = Command::new("sh")
                 .arg("-c")
                 .arg(&cmd_str)
                 .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
                 .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| {
                     crate::error::Error::CommandExecution(format!(
@@ -873,8 +918,9 @@ impl RunCommand {
                     ))
                 })?;
 
-            // Take stdout for streaming (stderr goes to terminal like Python version)
+            // Take stdout and stderr for streaming
             let mut stdout = child.stdout.take().expect("stdout was piped");
+            let mut stderr = child.stderr.take().expect("stderr was piped");
 
             // Get a writer for this worker's raw output
             let worker_run_id = format!("{}-{}", base_run_id, worker_id);
@@ -905,6 +951,8 @@ impl RunCommand {
 
             // Thread to read stdout and tee it to both storage and parsing
             let (tx, rx) = std::sync::mpsc::sync_channel(100);
+
+            // Thread for stdout
             let tee_thread = std::thread::spawn(move || -> std::io::Result<()> {
                 let mut tee = TeeWriter {
                     writer: raw_writer,
@@ -912,6 +960,27 @@ impl RunCommand {
                 };
                 std::io::copy(&mut stdout, &mut tee)?;
                 tee.flush()?;
+                Ok(())
+            });
+
+            // Thread for stderr - write directly to stderr (not to parser or storage)
+            let worker_bar_for_stderr = worker_bar.clone();
+            let stderr_thread = std::thread::spawn(move || -> std::io::Result<()> {
+                use std::io::Write;
+                let mut buffer = [0u8; 8192];
+                loop {
+                    match stderr.read(&mut buffer) {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            // Write stderr output directly to stderr via progress bar suspension
+                            worker_bar_for_stderr.suspend(|| {
+                                let _ = std::io::stderr().write_all(&buffer[..n]);
+                                let _ = std::io::stderr().flush();
+                            });
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
                 Ok(())
             });
 
@@ -1015,7 +1084,7 @@ impl RunCommand {
                 )
             });
 
-            parse_threads.push((worker_id, worker_bar, parse_thread, tee_thread));
+            parse_threads.push((worker_id, worker_bar, parse_thread, tee_thread, stderr_thread));
             workers.push((worker_id, child, _temp_file));
         }
 
@@ -1027,7 +1096,7 @@ impl RunCommand {
         let mut any_failed = false;
 
         // First, collect results from ALL parse threads (this will also consume stdout, preventing deadlock)
-        for (worker_id, worker_bar, parse_thread, tee_thread) in parse_threads {
+        for (worker_id, worker_bar, parse_thread, tee_thread, stderr_thread) in parse_threads {
             let worker_run = parse_thread.join().map_err(|_| {
                 crate::error::Error::CommandExecution(format!(
                     "Parse thread {} panicked",
@@ -1035,12 +1104,22 @@ impl RunCommand {
                 ))
             })??;
 
-            // Wait for tee thread to finish writing raw bytes
+            // Wait for tee threads to finish writing raw bytes
             tee_thread
                 .join()
                 .map_err(|_| {
                     crate::error::Error::CommandExecution(format!(
                         "Tee thread {} panicked",
+                        worker_id
+                    ))
+                })?
+                .map_err(crate::error::Error::Io)?;
+
+            stderr_thread
+                .join()
+                .map_err(|_| {
+                    crate::error::Error::CommandExecution(format!(
+                        "Stderr thread {} panicked",
                         worker_id
                     ))
                 })?
