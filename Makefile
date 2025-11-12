@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2009 Testrepository Contributors
+# Copyright (c) 2009-2025 Testrepository Contributors
 # 
 # Licensed under either the Apache License, Version 2.0 or the BSD 3-clause
 # license at the users choice. A copy of both licenses are available in the
@@ -12,24 +12,15 @@
 # license you chose for the specific language governing permissions and
 # limitations under that license.
 
-all: README.md check
-
-editable:
-	pip install -e .[test]
+all: check
 
 .testrepository:
 	./testr init
 
-check: editable .testrepository
-	./testr run --parallel
-
-check-xml:
-	python -m subunit.run testrepository.tests.test_suite | subunit2junitxml -o test.xml -f | subunit2pyunit
+check:
+	cargo check
 
 release:
-	hatchling build
+	cargo publish
 
-README.md: editable testrepository/commands/quickstart.py
-	./testr quickstart > $@
-
-.PHONY: check check-xml editable release all
+.PHONY: check release all
