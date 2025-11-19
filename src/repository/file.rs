@@ -779,4 +779,113 @@ mod tests {
         assert_eq!(times.len(), 1);
         assert_eq!(times.get(&TestId::new("test1")).unwrap().as_secs_f64(), 2.0);
     }
+
+    #[test]
+    fn test_failing_file_created_on_run() {
+        // Test that the failing file is created when tests fail
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut file_repo = factory.initialise(temp.path()).unwrap();
+
+        // Create a test run with failures
+        let mut run = TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::success("test1"));
+        run.add_result(TestResult::failure("test2", "Failed"));
+        run.add_result(TestResult::failure("test3", "Also failed"));
+
+        // Write as raw stream
+        let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
+        drop(writer);
+
+        // Replace failing tests (full run mode)
+        file_repo.replace_failing_tests(&run).unwrap();
+
+        // Check that failing file exists
+        let failing_path = temp.path().join(".testrepository/failing");
+        assert!(failing_path.exists(), "Failing file should be created");
+
+        // Check that get_failing_tests returns the correct tests
+        let failing_tests = file_repo.get_failing_tests().unwrap();
+        assert_eq!(failing_tests.len(), 2, "Should have 2 failing tests");
+        assert!(failing_tests.contains(&TestId::new("test2")));
+        assert!(failing_tests.contains(&TestId::new("test3")));
+    }
+
+    #[test]
+    fn test_failing_command_shows_all_failures() {
+        // Test that testr failing shows all failing tests
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut file_repo = factory.initialise(temp.path()).unwrap();
+
+        // Create a test run with multiple failures
+        let mut run = TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::success("test.pass1"));
+        run.add_result(TestResult::failure("test.fail1", "Failure 1"));
+        run.add_result(TestResult::failure("test.fail2", "Failure 2"));
+        run.add_result(TestResult::failure("test.fail3", "Failure 3"));
+        run.add_result(TestResult::success("test.pass2"));
+
+        // Write as raw stream and update failing tests
+        let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
+        drop(writer);
+        file_repo.replace_failing_tests(&run).unwrap();
+
+        // Get failing tests
+        let failing_tests = file_repo.get_failing_tests().unwrap();
+
+        assert_eq!(
+            failing_tests.len(),
+            3,
+            "Should have exactly 3 failing tests"
+        );
+        assert!(failing_tests.contains(&TestId::new("test.fail1")));
+        assert!(failing_tests.contains(&TestId::new("test.fail2")));
+        assert!(failing_tests.contains(&TestId::new("test.fail3")));
+    }
+
+    #[test]
+    fn test_run_failing_runs_all_failed_tests() {
+        // Test that --failing flag runs all failed tests
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut file_repo = factory.initialise(temp.path()).unwrap();
+
+        // First run with some failures
+        let mut run1 = TestRun::new("0".to_string());
+        run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run1.add_result(TestResult::success("test1"));
+        run1.add_result(TestResult::failure("test2", "Failed"));
+        run1.add_result(TestResult::failure("test3", "Failed"));
+        run1.add_result(TestResult::success("test4"));
+
+        let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run1, &mut writer).unwrap();
+        drop(writer);
+        file_repo.replace_failing_tests(&run1).unwrap();
+
+        // Get the list of failing tests (this is what --failing would use)
+        let latest_run = file_repo.get_latest_run().unwrap();
+        let failing_tests = latest_run.get_failing_tests();
+
+        assert_eq!(
+            failing_tests.len(),
+            2,
+            "Should have 2 failing tests from latest run"
+        );
+
+        // Also check from the repository failing file
+        let repo_failing = file_repo.get_failing_tests().unwrap();
+        assert_eq!(
+            repo_failing.len(),
+            2,
+            "Repository should track 2 failing tests"
+        );
+        assert!(repo_failing.contains(&TestId::new("test2")));
+        assert!(repo_failing.contains(&TestId::new("test3")));
+    }
 }

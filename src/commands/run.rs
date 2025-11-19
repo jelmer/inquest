@@ -1144,13 +1144,12 @@ impl Command for RunCommand {
 
         // Determine which tests to run
         let mut test_ids = if self.failing_only {
-            let latest = repo.get_latest_run()?;
-            let failing = latest.get_failing_tests();
+            let failing = repo.get_failing_tests()?;
             if failing.is_empty() {
                 ui.output("No failing tests to run")?;
                 return Ok(0);
             }
-            Some(failing.iter().map(|id| (*id).clone()).collect::<Vec<_>>())
+            Some(failing)
         } else {
             None
         };
