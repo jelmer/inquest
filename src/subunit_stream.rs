@@ -700,6 +700,17 @@ mod tests {
     }
 
     #[test]
+    fn test_progress_status_indicator() {
+        // Test all indicator outputs to catch mutations
+        assert_eq!(ProgressStatus::InProgress.indicator(), "");
+        assert_eq!(ProgressStatus::Success.indicator(), "✓");
+        assert_eq!(ProgressStatus::Failed.indicator(), "✗");
+        assert_eq!(ProgressStatus::Skipped.indicator(), "⊘");
+        assert_eq!(ProgressStatus::ExpectedFailure.indicator(), "✓");
+        assert_eq!(ProgressStatus::UnexpectedSuccess.indicator(), "✗");
+    }
+
+    #[test]
     fn test_invalid_subunit_stream_no_panic() {
         // Test that invalid UTF-8 or corrupted subunit data returns an error, not a panic
         // The new subunit-rust is more robust and treats plain text as valid (it's interleaved text),

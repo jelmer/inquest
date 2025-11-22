@@ -209,8 +209,9 @@ impl FileRepository {
                     if let Ok(subunit::types::stream::ScannedItem::Event(event)) = item {
                         if let Some(ref test_id) = event.test_id {
                             // Keep if still failing and not updated in new run
-                            if existing_test_ids.contains(&TestId::new(test_id))
-                                && !new_run.results.contains_key(&TestId::new(test_id))
+                            let test_id_obj = TestId::new(test_id);
+                            if existing_test_ids.contains(&test_id_obj)
+                                && !new_run.results.contains_key(&test_id_obj)
                             {
                                 event.serialize(&mut writer).map_err(|e| {
                                     crate::error::Error::Subunit(format!(
@@ -887,5 +888,162 @@ mod tests {
         );
         assert!(repo_failing.contains(&TestId::new("test2")));
         assert!(repo_failing.contains(&TestId::new("test3")));
+    }
+
+    #[test]
+    fn test_mmap_threshold_small_file() {
+        // Test that small files (< 4KB) use regular I/O
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut file_repo = factory.initialise(temp.path()).unwrap();
+
+        // Create a small test run
+        let mut run = TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::success("test1"));
+
+        // Write and read back
+        let (run_id, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
+        drop(writer);
+
+        // Should successfully read small file
+        let retrieved = file_repo.get_test_run(&run_id).unwrap();
+        assert_eq!(retrieved.results.len(), 1);
+    }
+
+    #[test]
+    fn test_mmap_threshold_large_file() {
+        // Test that large files (> 4KB) use mmap
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut file_repo = factory.initialise(temp.path()).unwrap();
+
+        // Create a large test run with many tests to exceed 4KB
+        let mut run = TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+
+        // Add enough tests with details to exceed 4KB
+        for i in 0..200 {
+            let test_name = format!("test_module_{}::TestClass::test_method_with_long_name", i);
+            run.add_result(
+                TestResult::failure(test_name.as_str(), "A reasonably long error message that contains details about why the test failed, including stack traces and other diagnostic information")
+            );
+        }
+
+        // Write and read back
+        let (run_id, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
+        drop(writer);
+
+        // Verify file is actually > 4KB
+        let file_path = temp.path().join(".testrepository").join(&run_id);
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        assert!(metadata.len() > 4096, "Test file should be > 4KB to test mmap path");
+
+        // Should successfully read large file using mmap
+        let retrieved = file_repo.get_test_run(&run_id).unwrap();
+        assert_eq!(retrieved.results.len(), 200);
+    }
+
+    #[test]
+    fn test_read_failing_run_small_file() {
+        // Test reading small failing file (< 4KB)
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut file_repo = factory.initialise(temp.path()).unwrap();
+
+        // Create a run with a few failing tests
+        let mut run = TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::failure("test1", "Failed"));
+        run.add_result(TestResult::failure("test2", "Failed"));
+        run.add_result(TestResult::success("test3"));
+
+        let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
+        drop(writer);
+        file_repo.replace_failing_tests(&run).unwrap();
+
+        // Should successfully read small failing file
+        let failing = file_repo.get_failing_tests().unwrap();
+        assert_eq!(failing.len(), 2);
+    }
+
+    #[test]
+    fn test_read_failing_run_large_file() {
+        // Test reading large failing file (> 4KB) - should use mmap
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut file_repo = factory.initialise(temp.path()).unwrap();
+
+        // Create a run with many failing tests to exceed 4KB
+        let mut run = TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+
+        for i in 0..100 {
+            let test_name = format!("test_module_{}::TestClass::test_method_with_long_name", i);
+            run.add_result(
+                TestResult::failure(test_name.as_str(), "A reasonably long error message that contains details")
+            );
+        }
+
+        let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
+        drop(writer);
+        file_repo.replace_failing_tests(&run).unwrap();
+
+        // Verify failing file is > 4KB
+        let failing_path = temp.path().join(".testrepository").join("failing");
+        let metadata = std::fs::metadata(&failing_path).unwrap();
+        assert!(metadata.len() > 4096, "Failing file should be > 4KB to test mmap path");
+
+        // Should successfully read large failing file using mmap
+        let failing = file_repo.get_failing_tests().unwrap();
+        assert_eq!(failing.len(), 100);
+    }
+
+    #[test]
+    fn test_partial_mode_keeps_untested_failures() {
+        // This test catches the && vs || mutation at line 214
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut file_repo = factory.initialise(temp.path()).unwrap();
+
+        // First run: test1, test2, test3 all fail
+        let mut run1 = TestRun::new("0".to_string());
+        run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run1.add_result(TestResult::failure("test1", "Failed"));
+        run1.add_result(TestResult::failure("test2", "Failed"));
+        run1.add_result(TestResult::failure("test3", "Failed"));
+
+        let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run1, &mut writer).unwrap();
+        drop(writer);
+        file_repo.replace_failing_tests(&run1).unwrap();
+
+        // Verify all 3 failing
+        let failing = file_repo.get_failing_tests().unwrap();
+        assert_eq!(failing.len(), 3);
+
+        // Second partial run: only re-run test1 (it passes now)
+        // test2 and test3 are NOT re-run
+        let mut run2 = TestRun::new("1".to_string());
+        run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
+        run2.add_result(TestResult::success("test1")); // Now passes
+
+        let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run2, &mut writer).unwrap();
+        drop(writer);
+        file_repo.update_failing_tests(&run2).unwrap(); // Partial mode
+
+        // After partial update:
+        // - test1 should be removed (it passed)
+        // - test2 and test3 should still be failing (not re-tested)
+        let failing = file_repo.get_failing_tests().unwrap();
+        assert_eq!(failing.len(), 2, "test2 and test3 should still be marked as failing");
+        assert!(!failing.contains(&TestId::new("test1")), "test1 should be removed");
+        assert!(failing.contains(&TestId::new("test2")), "test2 should remain");
+        assert!(failing.contains(&TestId::new("test3")), "test3 should remain");
     }
 }
