@@ -202,7 +202,7 @@ class TestListingFixture(Fixture):
 
     def setUp(self):
         super(TestListingFixture, self).setUp()
-        variable_regex = "\$(IDOPTION|IDFILE|IDLIST|LISTOPT)"
+        variable_regex = r"\$(IDOPTION|IDFILE|IDLIST|LISTOPT)"
         variables = {}
         list_variables = {"LISTOPT": self.listopt}
         cmd = self.template
@@ -350,7 +350,7 @@ class TestListingFixture(Fixture):
                     # --list-tests cannot use FILES, so handle it being unset.
                     "FILES": getattr(self, "list_file_name", None) or "",
                 }
-                variable_regex = "\$(INSTANCE_ID|COMMAND|FILES)"
+                variable_regex = r"\$(INSTANCE_ID|COMMAND|FILES)"
 
                 def subst(match):
                     return variables.get(match.groups(1)[0], "")
@@ -553,7 +553,7 @@ class TestCommand(Fixture):
             dispose_cmd = self.get_parser().get("DEFAULT", "instance_dispose")
         except (ValueError, configparser.NoOptionError):
             return
-        variable_regex = "\$INSTANCE_IDS"
+        variable_regex = r"\$INSTANCE_IDS"
         dispose_cmd = re.sub(
             variable_regex,
             " ".join(sorted(instance.decode("utf") for instance in instances)),
@@ -675,7 +675,7 @@ class TestCommand(Fixture):
             except configparser.NoOptionError:
                 # Instance allocation not configured
                 return None
-            variable_regex = "\$INSTANCE_COUNT"
+            variable_regex = r"\$INSTANCE_COUNT"
             cmd = re.sub(variable_regex, str(concurrency - len(self._instances)), cmd)
             self.ui.output_values([("running", cmd)])
             proc = self.ui.subprocess_Popen(cmd, shell=True, stdout=subprocess.PIPE)
