@@ -365,7 +365,7 @@ class TestRepositoryContract(ResourcedTestCase):
         self.assertEqual(inserted, run.get_id())
 
     def test_get_test_run_preserves_time(self):
-        self.skip("Fix me before releasing.")
+        self.skipTest("Fix me before releasing.")
         # The test run outputs the time events that it received.
         now = datetime(2001, 1, 1, 0, 0, 0, tzinfo=iso8601.UTC)
         second = timedelta(seconds=1)
