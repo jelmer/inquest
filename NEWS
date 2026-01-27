@@ -8,6 +8,12 @@ testrepository release notes
 CHANGES
 -------
 
+* Fix compatibility with testtools. (Jelmer Vernooĳ)
+
+* Fix warnings on newer python versions. (Jelmer Vernooĳ)
+
+* Add Python 3.13 and 3.14 support, drop Python 3.8. (Jelmer Vernooĳ)
+
 * Drop Python 2 support. (Colin Watson)
 
 * Remove use of pytz in favour of ``datetime.timezone.utc``.
