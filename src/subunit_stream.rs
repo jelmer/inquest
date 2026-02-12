@@ -548,9 +548,10 @@ pub fn write_stream<W: Write>(test_run: &TestRun, mut writer: W) -> Result<()> {
         // If we have duration information, write an "inprogress" event first
         if let Some(duration) = result.duration {
             // Calculate start time by subtracting duration from run timestamp
-            // Use seconds to avoid precision issues and chrono panics
-            let duration_secs = duration.as_secs() as i64;
-            let start_timestamp = test_run.timestamp - chrono::Duration::seconds(duration_secs);
+            // Use milliseconds to preserve precision in test durations
+            let duration_millis = duration.as_millis() as i64;
+            let start_timestamp =
+                test_run.timestamp - chrono::Duration::milliseconds(duration_millis);
 
             let mut start_event =
                 Event::new(SubunitTestStatus::InProgress).test_id(result.test_id.as_str());

@@ -18,6 +18,8 @@ use subunit::serialize::Serializable;
 
 const REPOSITORY_FORMAT: &str = "1";
 const REPO_DIR: &str = ".testrepository";
+/// File size threshold (in bytes) above which we use memory-mapped I/O for better performance
+const MMAP_THRESHOLD_BYTES: u64 = 4096;
 
 /// Factory for creating file-based repositories.
 ///
@@ -126,7 +128,7 @@ impl FileRepository {
         let file = File::open(&path)?;
         let metadata = file.metadata()?;
 
-        let test_run = if metadata.len() > 4096 {
+        let test_run = if metadata.len() > MMAP_THRESHOLD_BYTES {
             // Safety: We're only reading from the file, not modifying it
             let mmap = unsafe { memmap2::Mmap::map(&file)? };
             subunit_stream::parse_stream_bytes(&mmap, "failing".to_string())?
@@ -160,7 +162,11 @@ impl FileRepository {
         use std::io::Write;
 
         // Get existing failing tests
-        let mut existing_failing = self.read_failing_run().unwrap_or_default();
+        let mut existing_failing = match self.read_failing_run() {
+            Ok(failing) => failing,
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => return Err(e), // Propagate real errors (corruption, parse failures)
+        };
 
         // Get results from the new run
         let new_run = self.get_test_run(run_id)?;
@@ -352,9 +358,9 @@ impl Repository for FileRepository {
         // Use memory-mapped file for better performance with large files
         let file = File::open(&path)?;
 
-        // Check file size - only use mmap for files larger than 4KB
+        // Check file size - only use mmap for files larger than threshold
         let metadata = file.metadata()?;
-        let test_run = if metadata.len() > 4096 {
+        let test_run = if metadata.len() > MMAP_THRESHOLD_BYTES {
             // Safety: We're only reading from the file, not modifying it
             let mmap = unsafe { memmap2::Mmap::map(&file)? };
             subunit_stream::parse_stream_bytes(&mmap, run_id.to_string())
@@ -939,7 +945,10 @@ mod tests {
         // Verify file is actually > 4KB
         let file_path = temp.path().join(".testrepository").join(&run_id);
         let metadata = std::fs::metadata(&file_path).unwrap();
-        assert!(metadata.len() > 4096, "Test file should be > 4KB to test mmap path");
+        assert!(
+            metadata.len() > 4096,
+            "Test file should be > 4KB to test mmap path"
+        );
 
         // Should successfully read large file using mmap
         let retrieved = file_repo.get_test_run(&run_id).unwrap();
@@ -983,9 +992,10 @@ mod tests {
 
         for i in 0..100 {
             let test_name = format!("test_module_{}::TestClass::test_method_with_long_name", i);
-            run.add_result(
-                TestResult::failure(test_name.as_str(), "A reasonably long error message that contains details")
-            );
+            run.add_result(TestResult::failure(
+                test_name.as_str(),
+                "A reasonably long error message that contains details",
+            ));
         }
 
         let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
@@ -996,7 +1006,10 @@ mod tests {
         // Verify failing file is > 4KB
         let failing_path = temp.path().join(".testrepository").join("failing");
         let metadata = std::fs::metadata(&failing_path).unwrap();
-        assert!(metadata.len() > 4096, "Failing file should be > 4KB to test mmap path");
+        assert!(
+            metadata.len() > 4096,
+            "Failing file should be > 4KB to test mmap path"
+        );
 
         // Should successfully read large failing file using mmap
         let failing = file_repo.get_failing_tests().unwrap();
@@ -1041,9 +1054,22 @@ mod tests {
         // - test1 should be removed (it passed)
         // - test2 and test3 should still be failing (not re-tested)
         let failing = file_repo.get_failing_tests().unwrap();
-        assert_eq!(failing.len(), 2, "test2 and test3 should still be marked as failing");
-        assert!(!failing.contains(&TestId::new("test1")), "test1 should be removed");
-        assert!(failing.contains(&TestId::new("test2")), "test2 should remain");
-        assert!(failing.contains(&TestId::new("test3")), "test3 should remain");
+        assert_eq!(
+            failing.len(),
+            2,
+            "test2 and test3 should still be marked as failing"
+        );
+        assert!(
+            !failing.contains(&TestId::new("test1")),
+            "test1 should be removed"
+        );
+        assert!(
+            failing.contains(&TestId::new("test2")),
+            "test2 should remain"
+        );
+        assert!(
+            failing.contains(&TestId::new("test3")),
+            "test3 should remain"
+        );
     }
 }

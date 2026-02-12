@@ -426,6 +426,7 @@ impl RunCommand {
         use std::process::{Command, Stdio};
 
         // Build command with test IDs if provided
+        // IMPORTANT: Keep _temp_file alive until after child process completes
         let (cmd_str, _temp_file) =
             test_cmd.build_command_full(test_ids, false, None, self.test_args.as_deref())?;
 
@@ -498,6 +499,9 @@ impl RunCommand {
             crate::error::Error::CommandExecution(format!("Failed to wait for test command: {}", e))
         })?;
 
+        // Explicitly drop temp file now that child process has completed
+        drop(_temp_file);
+
         // Parse the stored stream to update failing tests
         let test_run = repo.get_test_run(&run_id)?;
 
@@ -530,6 +534,7 @@ impl RunCommand {
         };
 
         // Build command with test IDs if provided
+        // IMPORTANT: Keep _temp_file alive until after child process completes
         let (cmd_str, _temp_file) =
             test_cmd.build_command_full(test_ids, false, None, self.test_args.as_deref())?;
 
@@ -655,6 +660,9 @@ impl RunCommand {
             progress_bar.finish_and_clear();
             crate::error::Error::CommandExecution(format!("Failed to wait for test command: {}", e))
         })?;
+
+        // Explicitly drop temp file now that child process has completed
+        drop(_temp_file);
 
         let command_failed = !status.success();
 
@@ -1065,6 +1073,7 @@ impl RunCommand {
             ui.output(&format!("  [{}/{}] {}", idx + 1, test_ids.len(), test_id))?;
 
             // Build command for this single test
+            // IMPORTANT: Keep _temp_file alive until after process completes
             let (cmd_str, _temp_file) = test_cmd.build_command_full(
                 Some(std::slice::from_ref(test_id)),
                 false,
@@ -1086,6 +1095,9 @@ impl RunCommand {
                         test_id, e
                     ))
                 })?;
+
+            // Explicitly drop temp file now that process has completed
+            drop(_temp_file);
 
             if !output.status.success() {
                 any_failed = true;

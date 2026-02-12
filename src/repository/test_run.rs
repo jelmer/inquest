@@ -42,6 +42,18 @@ impl From<&str> for TestId {
     }
 }
 
+impl AsRef<str> for TestId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for TestId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Status of a test execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestStatus {
@@ -243,13 +255,11 @@ impl TestRun {
 
     /// Calculate total duration of all tests with timing information
     pub fn total_duration(&self) -> Option<Duration> {
-        let durations: Vec<Duration> = self.results.values().filter_map(|r| r.duration).collect();
-
-        if durations.is_empty() {
-            None
-        } else {
-            Some(durations.into_iter().sum())
-        }
+        let mut durations = self.results.values().filter_map(|r| r.duration);
+        // Get the first duration, then fold the rest
+        durations
+            .next()
+            .map(|first| durations.fold(first, |acc, d| acc + d))
     }
 
     /// Check if a result matches the given tag filter

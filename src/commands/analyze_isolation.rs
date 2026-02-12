@@ -42,6 +42,7 @@ impl AnalyzeIsolationCommand {
         tests: &[TestId],
         base: &Path,
     ) -> Result<bool> {
+        // IMPORTANT: Keep _temp_file alive until after process completes
         let (cmd_str, _temp_file) = test_cmd.build_command(Some(tests), false)?;
 
         let output = ProcessCommand::new("sh")
@@ -54,6 +55,9 @@ impl AnalyzeIsolationCommand {
             .map_err(|e| {
                 crate::error::Error::CommandExecution(format!("Failed to run tests: {}", e))
             })?;
+
+        // Explicitly drop temp file now that process has completed
+        drop(_temp_file);
 
         // Parse results to check if target test failed
         let test_run =
