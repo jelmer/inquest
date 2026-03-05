@@ -567,6 +567,7 @@ test_run_concurrency=exit 1
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_provision_instances_with_config() {
         let config_str = r#"
 [DEFAULT]
