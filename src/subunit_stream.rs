@@ -525,7 +525,7 @@ pub fn filter_failing_tests<R: Read, W: Write>(mut reader: R, mut writer: W) -> 
                     }
                 }
             }
-            Ok(ScannedItem::Bytes(_bytes)) => {
+            Ok(ScannedItem::Bytes(_)) => {
                 // Skip non-subunit content
             }
             Ok(ScannedItem::Unknown(_, _)) => {
