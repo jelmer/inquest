@@ -19,7 +19,10 @@ jobs:
 
       - name: Install system dependencies (macOS)
         if: matrix.os == 'macos-latest'
-        run: brew install gdbm
+        run: |
+          brew install gdbm
+          echo "LIBRARY_PATH=$(brew --prefix gdbm)/lib" >> $GITHUB_ENV
+          echo "CPATH=$(brew --prefix gdbm)/include" >> $GITHUB_ENV
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
