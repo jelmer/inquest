@@ -9,47 +9,37 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: [3.9, "3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v2
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libgdbm-dev
+
+      - name: Install system dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install gdbm
+          echo "LIBRARY_PATH=$(brew --prefix gdbm)/lib" >> $GITHUB_ENV
+          echo "CPATH=$(brew --prefix gdbm)/include" >> $GITHUB_ENV
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: ${{ matrix.python-version }}
+          components: clippy, rustfmt
 
       - name: Cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key:
-            ${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('**/setup.py')
-            }}
-          restore-keys: |
-            ${{ matrix.os }}-${{ matrix.python-version }}-
-
-      - name: Install dependencies
-        run: |
-          python3 -m pip install -U pip
-          python3 -m pip install -U wheel setuptools
-          python3 -m pip install sphinx
-          python3 -m pip install ".[test]"
-          python3 -m pip install ruff
-
-      - name: Tests
-        run: |
-          python -W once -m testtools.run testrepository.tests.test_suite
-
-      - name: Lint
-        run: |
-          ruff check .
+        uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        run: |
-          ruff format --check .
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Tests
+        run: cargo test
 
   success:
     needs: build
