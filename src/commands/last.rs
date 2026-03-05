@@ -1,16 +1,17 @@
 //! Show the last test run
 
-use crate::commands::utils::open_repository;
+use crate::commands::utils::{open_repository, resolve_run_id};
 use crate::commands::Command;
 use crate::error::Result;
 use crate::ui::UI;
 
-/// Command to display results from the last test run.
+/// Command to display results from a test run.
 ///
-/// Shows test statistics and details about failed tests from the
-/// most recent run stored in the repository.
+/// Shows test statistics and details about failed tests from a
+/// specific run or the most recent run stored in the repository.
 pub struct LastCommand {
     base_path: Option<String>,
+    run_id: Option<String>,
     subunit: bool,
     show_output: bool,
 }
@@ -23,8 +24,23 @@ impl LastCommand {
     pub fn new(base_path: Option<String>) -> Self {
         LastCommand {
             base_path,
+            run_id: None,
             subunit: false,
-            show_output: true, // By default, show output for failed tests (matches Python behavior)
+            show_output: true,
+        }
+    }
+
+    /// Creates a new last command for a specific run.
+    ///
+    /// # Arguments
+    /// * `base_path` - Optional base directory path for the repository
+    /// * `run_id` - Run ID to show (supports negative indices)
+    pub fn with_run(base_path: Option<String>, run_id: Option<String>) -> Self {
+        LastCommand {
+            base_path,
+            run_id,
+            subunit: false,
+            show_output: true,
         }
     }
 
@@ -32,11 +48,13 @@ impl LastCommand {
     ///
     /// # Arguments
     /// * `base_path` - Optional base directory path for the repository
-    pub fn with_subunit(base_path: Option<String>) -> Self {
+    /// * `run_id` - Optional run ID (supports negative indices)
+    pub fn with_subunit(base_path: Option<String>, run_id: Option<String>) -> Self {
         LastCommand {
             base_path,
+            run_id,
             subunit: true,
-            show_output: false, // Subunit mode doesn't show formatted output
+            show_output: false,
         }
     }
 
@@ -44,10 +62,16 @@ impl LastCommand {
     ///
     /// # Arguments
     /// * `base_path` - Optional base directory path for the repository
+    /// * `run_id` - Optional run ID (supports negative indices)
     /// * `show_output` - Whether to show detailed output for failed tests
-    pub fn with_output_control(base_path: Option<String>, show_output: bool) -> Self {
+    pub fn with_output_control(
+        base_path: Option<String>,
+        run_id: Option<String>,
+        show_output: bool,
+    ) -> Self {
         LastCommand {
             base_path,
+            run_id,
             subunit: false,
             show_output,
         }
@@ -57,7 +81,8 @@ impl LastCommand {
 impl Command for LastCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
         let repo = open_repository(self.base_path.as_deref())?;
-        let test_run = repo.get_latest_run()?;
+        let run_id = resolve_run_id(&*repo, self.run_id.as_deref())?;
+        let test_run = repo.get_test_run(&run_id)?;
 
         if self.subunit {
             // Output the test run as a subunit stream

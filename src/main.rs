@@ -48,8 +48,12 @@ enum Commands {
         partial: bool,
     },
 
-    /// Show results from the last test run
+    /// Show results from a test run
     Last {
+        /// Run ID to show (defaults to latest; supports negative indices like -1, -2)
+        #[arg(long, short = 'r')]
+        run: Option<String>,
+
         /// Show output as a subunit stream
         #[arg(long)]
         subunit: bool,
@@ -83,6 +87,17 @@ enum Commands {
         /// Show all tests (not just top N)
         #[arg(long)]
         all: bool,
+    },
+
+    /// Show logs for individual tests
+    Log {
+        /// Run ID to show logs from (defaults to latest)
+        #[arg(long, short = 'r')]
+        run: Option<String>,
+
+        /// Test ID patterns to match (glob-style wildcards)
+        #[arg(value_name = "TESTPATTERN")]
+        tests: Vec<String>,
     },
 
     /// List all available tests
@@ -189,13 +204,17 @@ fn main() {
             let cmd = LoadCommand::with_partial(cli.directory, partial, force_init);
             cmd.execute(&mut ui)
         }
-        Commands::Last { subunit, no_output } => {
+        Commands::Last {
+            run,
+            subunit,
+            no_output,
+        } => {
             let cmd = if subunit {
-                LastCommand::with_subunit(cli.directory)
+                LastCommand::with_subunit(cli.directory, run)
             } else if no_output {
-                LastCommand::with_output_control(cli.directory, false)
+                LastCommand::with_output_control(cli.directory, run, false)
             } else {
-                LastCommand::new(cli.directory)
+                LastCommand::with_run(cli.directory, run)
             };
             cmd.execute(&mut ui)
         }
@@ -216,6 +235,21 @@ fn main() {
         Commands::Slowest { count, all } => {
             let display_count = if all { usize::MAX } else { count };
             let cmd = SlowestCommand::with_count(cli.directory, display_count);
+            cmd.execute(&mut ui)
+        }
+        Commands::Log { run, tests } => {
+            let patterns: Vec<glob::Pattern> = match tests
+                .iter()
+                .map(|t| glob::Pattern::new(t))
+                .collect::<std::result::Result<Vec<_>, _>>()
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = writeln!(std::io::stderr(), "Error: invalid pattern: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let cmd = LogCommand::new(cli.directory, run, patterns);
             cmd.execute(&mut ui)
         }
         Commands::ListTests => {
