@@ -3,14 +3,14 @@
 //! These tests exercise complete user workflows by running actual commands
 //! against real repositories in temporary directories.
 
+use inquest::commands::{
+    AnalyzeIsolationCommand, Command, FailingCommand, InitCommand, LastCommand, StatsCommand,
+};
+use inquest::repository::{RepositoryFactory, TestResult, TestRun};
+use inquest::ui::UI;
 use std::fs;
 use std::io::Write;
 use tempfile::TempDir;
-use testrepository::commands::{
-    AnalyzeIsolationCommand, Command, FailingCommand, InitCommand, LastCommand, StatsCommand,
-};
-use testrepository::repository::{RepositoryFactory, TestResult, TestRun};
-use testrepository::ui::UI;
 
 /// Simple test UI that captures output for assertions
 struct TestUI {
@@ -30,22 +30,22 @@ impl TestUI {
 }
 
 impl UI for TestUI {
-    fn output(&mut self, message: &str) -> testrepository::error::Result<()> {
+    fn output(&mut self, message: &str) -> inquest::error::Result<()> {
         self.output.push(message.to_string());
         Ok(())
     }
 
-    fn error(&mut self, message: &str) -> testrepository::error::Result<()> {
+    fn error(&mut self, message: &str) -> inquest::error::Result<()> {
         self.errors.push(message.to_string());
         Ok(())
     }
 
-    fn warning(&mut self, message: &str) -> testrepository::error::Result<()> {
+    fn warning(&mut self, message: &str) -> inquest::error::Result<()> {
         self.errors.push(format!("Warning: {}", message));
         Ok(())
     }
 
-    fn output_bytes(&mut self, bytes: &[u8]) -> testrepository::error::Result<()> {
+    fn output_bytes(&mut self, bytes: &[u8]) -> inquest::error::Result<()> {
         self.bytes_output.push(bytes.to_vec());
         Ok(())
     }
@@ -76,7 +76,7 @@ fn test_full_workflow_init_load_last() {
 
     // Load the test run directly using the repository API
     // (In real usage, this would be done via LoadCommand reading from stdin)
-    let factory = testrepository::repository::file::FileRepositoryFactory;
+    let factory = inquest::repository::file::FileRepositoryFactory;
     let mut repo = factory.open(temp.path()).unwrap();
     repo.insert_test_run(test_run).unwrap();
 
@@ -132,7 +132,7 @@ fn test_workflow_with_failing_tests() {
     run1.add_result(TestResult::failure("test2", "Error"));
     run1.add_result(TestResult::failure("test3", "Error"));
 
-    let factory = testrepository::repository::file::FileRepositoryFactory;
+    let factory = inquest::repository::file::FileRepositoryFactory;
     let mut repo = factory.open(temp.path()).unwrap();
     repo.insert_test_run_partial(run1, false).unwrap();
 
@@ -176,7 +176,7 @@ fn test_workflow_partial_mode() {
     let init_cmd = InitCommand::new(Some(base_path.clone()));
     init_cmd.execute(&mut ui).unwrap();
 
-    let factory = testrepository::repository::file::FileRepositoryFactory;
+    let factory = inquest::repository::file::FileRepositoryFactory;
     let mut repo = factory.open(temp.path()).unwrap();
 
     // First full run
@@ -218,7 +218,7 @@ fn test_workflow_with_load_list() {
     writeln!(file, "test5").unwrap();
 
     // Parse and verify
-    let test_ids = testrepository::testlist::parse_list_file(&test_list_path).unwrap();
+    let test_ids = inquest::testlist::parse_list_file(&test_list_path).unwrap();
     assert_eq!(test_ids.len(), 3);
     assert_eq!(test_ids[0].as_str(), "test1");
     assert_eq!(test_ids[1].as_str(), "test3");
@@ -235,7 +235,7 @@ fn test_workflow_times_database() {
     let init_cmd = InitCommand::new(Some(base_path));
     init_cmd.execute(&mut ui).unwrap();
 
-    let factory = testrepository::repository::file::FileRepositoryFactory;
+    let factory = inquest::repository::file::FileRepositoryFactory;
     let mut repo = factory.open(temp.path()).unwrap();
 
     // Insert run with durations
@@ -268,7 +268,7 @@ fn test_workflow_list_flag() {
     let init_cmd = InitCommand::new(Some(base_path.clone()));
     init_cmd.execute(&mut ui).unwrap();
 
-    let factory = testrepository::repository::file::FileRepositoryFactory;
+    let factory = inquest::repository::file::FileRepositoryFactory;
     let mut repo = factory.open(temp.path()).unwrap();
 
     // Add a run with failures
@@ -310,8 +310,8 @@ fn test_error_handling_no_repository() {
 
 #[test]
 fn test_parallel_execution() {
-    use testrepository::commands::RunCommand;
-    use testrepository::repository::file::FileRepositoryFactory;
+    use inquest::commands::RunCommand;
+    use inquest::repository::file::FileRepositoryFactory;
 
     let temp = TempDir::new().unwrap();
     let base_path = temp.path().to_string_lossy().to_string();
@@ -354,9 +354,9 @@ test_command=python3 -c "import sys; import time; sys.stdout.buffer.write(b'\xb3
 
 #[test]
 fn test_parallel_execution_with_worker_tags() {
+    use inquest::partition::partition_tests;
+    use inquest::repository::TestId;
     use std::collections::HashMap;
-    use testrepository::partition::partition_tests;
-    use testrepository::repository::TestId;
 
     // Create a set of test IDs
     let test_ids = vec![
@@ -383,8 +383,8 @@ fn test_parallel_execution_with_worker_tags() {
 
 #[test]
 fn test_until_failure_flag_behavior() {
-    use testrepository::commands::RunCommand;
-    use testrepository::repository::file::FileRepositoryFactory;
+    use inquest::commands::RunCommand;
+    use inquest::repository::file::FileRepositoryFactory;
 
     let temp = TempDir::new().unwrap();
     let base_path = temp.path().to_string_lossy().to_string();
@@ -426,8 +426,8 @@ test_command=echo ""
 
 #[test]
 fn test_isolated_flag_behavior() {
-    use testrepository::commands::RunCommand;
-    use testrepository::repository::file::FileRepositoryFactory;
+    use inquest::commands::RunCommand;
+    use inquest::repository::file::FileRepositoryFactory;
 
     let temp = TempDir::new().unwrap();
     let base_path = temp.path().to_string_lossy().to_string();
@@ -510,7 +510,7 @@ test_list_option=--list
 
 #[test]
 fn test_group_regex_with_parallel_execution() {
-    use testrepository::testcommand::TestCommand;
+    use inquest::testcommand::TestCommand;
 
     let temp = TempDir::new().unwrap();
     let base_path = temp.path().to_string_lossy().to_string();
@@ -539,7 +539,7 @@ group_regex=^([^.]+)\.
 
 #[test]
 fn test_run_concurrency_callout() {
-    use testrepository::testcommand::TestCommand;
+    use inquest::testcommand::TestCommand;
 
     let temp = TempDir::new().unwrap();
     let base_path = temp.path().to_string_lossy().to_string();

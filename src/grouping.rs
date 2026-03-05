@@ -15,8 +15,8 @@ use std::collections::HashMap;
 /// # Examples
 ///
 /// ```
-/// use testrepository::grouping::group_tests;
-/// use testrepository::repository::TestId;
+/// use inquest::grouping::group_tests;
+/// use inquest::repository::TestId;
 ///
 /// let tests = vec![
 ///     TestId::new("package.module1.TestCase.test_a"),

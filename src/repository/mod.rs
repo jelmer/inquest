@@ -18,11 +18,11 @@ pub use test_run::{TestId, TestResult, TestRun, TestStatus};
 /// # Examples
 ///
 /// ```
-/// use testrepository::repository::{Repository, RepositoryFactory, TestResult, TestRun};
-/// use testrepository::repository::file::FileRepositoryFactory;
+/// use inquest::repository::{Repository, RepositoryFactory, TestResult, TestRun};
+/// use inquest::repository::file::FileRepositoryFactory;
 /// use tempfile::TempDir;
 ///
-/// # fn main() -> testrepository::error::Result<()> {
+/// # fn main() -> inquest::error::Result<()> {
 /// // Create a temporary directory for the repository
 /// let temp = TempDir::new().unwrap();
 ///

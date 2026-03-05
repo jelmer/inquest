@@ -1,4 +1,4 @@
-//! Command system for testrepository
+//! Command system for inquest
 //!
 //! Commands are discovered and executed through the Command trait.
 

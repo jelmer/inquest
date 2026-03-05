@@ -8,7 +8,7 @@ separate partitions at once. Set 'test_list_option' in .testr.conf like so:
   test_list_option=--list-tests
 ```
 
-You also need to use the $LISTOPT option to tell testr where to expand things:
+You also need to use the $LISTOPT option to tell inq where to expand things:
 
 ```ini
   test_command=foo $LISTOPT $IDOPTION
@@ -23,10 +23,10 @@ test enumeration. For subunit v1 that is a series of test ids, in any order,
 ``\n`` separated on stdout. For v2 use the subunit protocol and emit one event
 per test with each test having status 'exists'.
 
-To test whether this is working the `testr list-tests` command can be useful.
+To test whether this is working the `inq list-tests` command can be useful.
 
-You can also use this to see what tests will be run by a given testr run
-command. For instance, the tests that `testr run myfilter` will run are shown
-by `testr list-tests myfilter`. As with `run`, arguments to `list-tests` are
+You can also use this to see what tests will be run by a given inq run
+command. For instance, the tests that `inq run myfilter` will run are shown
+by `inq list-tests myfilter`. As with `run`, arguments to `list-tests` are
 used to regex filter the tests of the test runner, and arguments after a `--`
 are passed to the test runner.

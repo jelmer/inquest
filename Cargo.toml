@@ -1,20 +1,20 @@
 [package]
-name = "testrepository"
+name = "inquest"
 version = "0.1.0"
 edition = "2021"
-authors = ["Robert Collins <robertc@robertcollins.net>", "Jelmer Vernooĳ <jelmer@jelmer.uk>"]
+authors = ["Jelmer Vernooĳ <jelmer@jelmer.uk>"]
 license = "Apache-2.0 OR BSD-3-Clause"
-description = "A repository of test results (Rust port)"
+description = "A repository of test results"
 repository = "https://github.com/testing-cabal/testrepository"
 keywords = ["subunit", "testrunner", "unittest", "testing"]
 categories = ["development-tools::testing"]
 
 [[bin]]
-name = "testr"
+name = "inq"
 path = "src/main.rs"
 
 [lib]
-name = "testrepository"
+name = "inquest"
 path = "src/lib.rs"
 
 [dependencies]

@@ -1,6 +1,6 @@
-# testrepository Examples
+# Inquest Examples
 
-This document provides practical examples of using testrepository with various test frameworks and configurations.
+This document provides practical examples of using inquest with various test frameworks and configurations.
 
 ## Basic .testr.conf Examples
 
@@ -121,71 +121,71 @@ dropdb $1
 
 ```bash
 # Initialize repository
-testr init
+inq init
 
 # Run all tests
-testr run
+inq run
 
 # View results
-testr last
+inq last
 ```
 
 ### Debugging Failures
 
 ```bash
 # Run only failing tests
-testr run --failing
+inq run --failing
 
 # Run tests in isolation to find interactions
-testr run --failing --isolated
+inq run --failing --isolated
 
 # Analyze which tests cause isolation failures
-testr analyze-isolation my_module.test_flaky
+inq analyze-isolation my_module.test_flaky
 
 # Run until failure to catch flaky tests
-testr run --until-failure
+inq run --until-failure
 ```
 
 ### Performance Testing
 
 ```bash
 # Run tests in parallel
-testr run -j 4
+inq run -j 4
 
 # View slowest tests
-testr slowest
+inq slowest
 
 # View all test timings
-testr slowest --all
+inq slowest --all
 ```
 
 ### Continuous Integration
 
 ```bash
 # Run tests and create repository if needed
-testr run --force-init
+inq run --force-init
 
 # Run subset of tests from a file
-testr run --load-list changed-tests.txt
+inq run --load-list changed-tests.txt
 
 # Get statistics
-testr stats
+inq stats
 ```
 
 ### Advanced Workflows
 
 ```bash
 # Parallel execution until failure (stress testing)
-testr run -j 8 --until-failure
+inq run -j 8 --until-failure
 
 # Isolated execution of failing tests
-testr run --failing --isolated
+inq run --failing --isolated
 
 # Partial runs (additive failing test tracking)
-testr run --partial
+inq run --partial
 
 # Get list of failing test IDs for scripting
-testr failing --list > failing.txt
+inq failing --list > failing.txt
 ```
 
 ## Integration Examples
@@ -204,12 +204,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install subunit python-subunit
-          cargo install testr
+          cargo install inquest
       - name: Run tests
-        run: testr run --force-init -j 4
+        run: inq run --force-init -j 4
       - name: Show results
         if: always()
-        run: testr last
+        run: inq last
 ```
 
 ### GitLab CI
@@ -217,8 +217,8 @@ jobs:
 ```yaml
 test:
   script:
-    - testr run --force-init
-    - testr stats
+    - inq run --force-init
+    - inq stats
   artifacts:
     when: always
     paths:
@@ -238,7 +238,7 @@ git diff --cached --name-only --diff-filter=AM | \
   tr '/' '.' > /tmp/tests.txt
 
 if [ -s /tmp/tests.txt ]; then
-    testr run --load-list /tmp/tests.txt
+    inq run --load-list /tmp/tests.txt
 fi
 ```
 
@@ -250,25 +250,25 @@ The optimal number of workers depends on your test suite:
 
 ```bash
 # CPU-bound tests: use core count
-testr run -j $(nproc)
+inq run -j $(nproc)
 
 # I/O-bound tests: use more workers
-testr run -j $(($(nproc) * 2))
+inq run -j $(($(nproc) * 2))
 
 # Mixed workload: start conservative
-testr run -j 4
+inq run -j 4
 ```
 
 ### Test Duration Tracking
 
-testrepository automatically tracks test durations in `.testrepository/times.dbm`:
+Inquest automatically tracks test durations in `.testrepository/times.dbm`:
 
 ```bash
 # First run (no timing data)
-testr run -j 4
+inq run -j 4
 
 # Second run (uses timing for better load balancing)
-testr run -j 4
+inq run -j 4
 ```
 
 The second run will distribute tests more evenly based on historical durations.
@@ -285,7 +285,7 @@ cat .testr.conf
 python -m subunit.run discover --list
 
 # Check repository
-testr stats
+inq stats
 ```
 
 ### Subunit Format Issues
@@ -302,13 +302,13 @@ file .testrepository/0
 
 ```bash
 # Run in serial to isolate the issue
-testr run
+inq run
 
 # Run in isolated mode to check for test interactions
-testr run --isolated
+inq run --isolated
 
 # Check worker-specific failures
-testr last | grep worker-
+inq last | grep worker-
 ```
 
 ### Test Isolation Failures
@@ -317,13 +317,13 @@ When a test passes in isolation but fails when run with other tests:
 
 ```bash
 # Step 1: Verify the test fails with others
-testr run
+inq run
 
 # Step 2: Verify it passes in isolation
-testr run --isolated test_module.test_flaky
+inq run --isolated test_module.test_flaky
 
 # Step 3: Find the minimal set of tests causing the issue
-testr analyze-isolation test_module.test_flaky
+inq analyze-isolation test_module.test_flaky
 
 # The command will output which tests cause the failure
 # Example output:

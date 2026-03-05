@@ -3,16 +3,16 @@
 //! This module tests error handling in various failure scenarios to ensure
 //! the application properly handles and reports errors.
 
+use inquest::commands::{
+    Command, FailingCommand, InitCommand, LastCommand, LoadCommand, RunCommand, StatsCommand,
+};
+use inquest::error::Result;
+use inquest::repository::file::FileRepositoryFactory;
+use inquest::repository::{RepositoryFactory, TestResult, TestRun};
+use inquest::ui::UI;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
-use testrepository::commands::{
-    Command, FailingCommand, InitCommand, LastCommand, LoadCommand, RunCommand, StatsCommand,
-};
-use testrepository::error::Result;
-use testrepository::repository::file::FileRepositoryFactory;
-use testrepository::repository::{RepositoryFactory, TestResult, TestRun};
-use testrepository::ui::UI;
 
 // Test UI implementation
 struct TestUI {
@@ -218,7 +218,7 @@ fn test_load_invalid_subunit_data() {
         0x9A, 0x00, // Incomplete/corrupted packet
         0xFF, 0xFF, 0xFF, // Invalid data
     ];
-    let result = testrepository::subunit_stream::parse_stream(invalid_data, "0".to_string());
+    let result = inquest::subunit_stream::parse_stream(invalid_data, "0".to_string());
 
     // The key requirement is: no panic. Whether it returns an error or empty result
     // depends on how lenient the parser is. Both are acceptable as long as it doesn't crash.
@@ -307,7 +307,7 @@ fn test_repository_file_permissions() {
 #[test]
 fn test_testlist_parse_nonexistent_file() {
     let nonexistent = Path::new("/nonexistent/file.txt");
-    let result = testrepository::testlist::parse_list_file(nonexistent);
+    let result = inquest::testlist::parse_list_file(nonexistent);
 
     // Should fail because file doesn't exist
     assert!(result.is_err());
@@ -319,7 +319,7 @@ fn test_testlist_parse_empty_file() {
     let empty_file = temp.path().join("empty.txt");
     fs::write(&empty_file, "").unwrap();
 
-    let result = testrepository::testlist::parse_list_file(&empty_file);
+    let result = inquest::testlist::parse_list_file(&empty_file);
 
     // Should succeed but return empty list
     assert!(result.is_ok());
@@ -365,7 +365,7 @@ test_command=echo "test1"
 #[test]
 fn test_subunit_parse_empty_stream() {
     let empty_stream: &[u8] = &[];
-    let result = testrepository::subunit_stream::parse_stream(empty_stream, "0".to_string());
+    let result = inquest::subunit_stream::parse_stream(empty_stream, "0".to_string());
 
     // Empty stream should be valid and return empty test run
     assert!(result.is_ok());

@@ -7,8 +7,8 @@ consistent aids readability.
 
 ## Copyrights and licensing
 
-Code committed to Test Repository must be licensed under the BSD + Apache-2.0
-licences that Test Repository offers its users. Copyright assignment is not
+Code committed to Inquest must be licensed under the BSD + Apache-2.0
+licences that Inquest offers its users. Copyright assignment is not
 required. Please see COPYING for details about how to make a license grant in
 a given source file. Lastly, all copyright holders need to add their name
 to the master list in COPYING the first time they make a change in a given
@@ -16,7 +16,7 @@ calendar year.
 
 ## Testing and QA
 
-For Test repository please add tests where possible. There is no requirement
+For Inquest please add tests where possible. There is no requirement
 for one test per change (because somethings are much harder to automatically
 test than the benfit from such tests). Fast tests are preferred to slow tests,
 and understandable tests to fast tests.

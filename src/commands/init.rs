@@ -52,7 +52,7 @@ impl Command for InitCommand {
     }
 
     fn help(&self) -> &str {
-        "Initialize a new test repository in .testrepository/"
+        "Initialize a new test repository"
     }
 }
 

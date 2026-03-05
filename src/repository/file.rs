@@ -822,7 +822,7 @@ mod tests {
 
     #[test]
     fn test_failing_command_shows_all_failures() {
-        // Test that testr failing shows all failing tests
+        // Test that inq failing shows all failing tests
         let temp = TempDir::new().unwrap();
         let factory = FileRepositoryFactory;
         let mut file_repo = factory.initialise(temp.path()).unwrap();

@@ -5,10 +5,10 @@ issues by interrogating the repository for which tests ran on which worker, and
 then creating a list file with those tests, re-running only half of them,
 checking the error still happens, rinse and repeat.
 
-However that is tedious. testr can perform this analysis for you
+However that is tedious. inq can perform this analysis for you
 
 ```sh
-  $ testr run --analyze-isolation 
+  $ inq run --analyze-isolation
 ```
 
 will perform that analysis for you. (This requires that your test runner is
@@ -18,7 +18,7 @@ will perform that analysis for you. (This requires that your test runner is
    tests are only cross checked against tests run in the same worker in that
    run. This means that failures accrued from several different runs would not
    be processed with the right basis tests - you should do a full test run to
-   seed your repository. This can be local, or just testr load a full run from
+   seed your repository. This can be local, or just inq load a full run from
    your Jenkins or other remote run environment.
 
 2. Each test that is currently listed as a failure is run in a test process

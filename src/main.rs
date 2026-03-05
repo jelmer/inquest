@@ -1,16 +1,16 @@
-//! testr - Command-line tool for test repository management
+//! inq - Command-line tool for test repository management
 
 use clap::{Parser, Subcommand};
+use inquest::commands::*;
+use inquest::error::Result;
+use inquest::ui::UI;
 use std::io::Write;
-use testrepository::commands::*;
-use testrepository::error::Result;
-use testrepository::ui::UI;
 
 // Explicit imports for commands not covered by wildcard
-use testrepository::commands::AnalyzeIsolationCommand;
+use inquest::commands::AnalyzeIsolationCommand;
 
 #[derive(Parser)]
-#[command(name = "testr")]
+#[command(name = "inq")]
 #[command(about = "Test repository management tool", long_about = None)]
 #[command(version)]
 #[command(disable_help_subcommand = true)]

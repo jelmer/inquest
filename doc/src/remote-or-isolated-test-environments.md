@@ -6,36 +6,36 @@ directories on disk.
 
 One way to solve this is to setup isolated environments such as chroots,
 containers or even separate machines. Such environments typically require
-some coordination when being used to run tests, so testr provides an explicit
+some coordination when being used to run tests, so inq provides an explicit
 model for working with them.
 
-The model testr has is intended to support both developers working
+The model inq has is intended to support both developers working
 incrementally on a change and CI systems running tests in a one-off setup,
 for both statically and dynamically provisioned environments.
 
-The process testr follows is:
+The process inq follows is:
 
 1. The user should perform any one-time or once-per-session setup. For instance,
    checking out source code, creating a template container, sourcing your cloud
    credentials.
-2. Execute testr run.
-3. testr queries for concurrency.
-4. testr will make a callout request to provision that many instances.
+2. Execute inq run.
+3. inq queries for concurrency.
+4. inq will make a callout request to provision that many instances.
    The provisioning callout needs to synchronise source code and do any other
    per-instance setup at this stage.
-5. testr will make callouts to execute tests, supplying files that should be
+5. inq will make callouts to execute tests, supplying files that should be
    copied into the execution environment. Note that instances may be used for
    more than one command execution.
-6. testr will callout to dispose of the instances after the test run completes.
+6. inq will callout to dispose of the instances after the test run completes.
 
-Instances may be expensive to create and dispose of. testr does not perform
+Instances may be expensive to create and dispose of. inq does not perform
 any caching, but the callout pattern is intended to facilitate external
 caching - the provisioning callout can be used to pull environments out of
 a cache, and the dispose to just return it to the cache.
 
 ## Configuring environment support
 
-There are three callouts that testrepository depends on - configured in
+There are three callouts that inquest depends on - configured in
 .testr.conf as usual. For instance
 
 ```ini
@@ -48,14 +48,14 @@ These should operate as follows:
 
 * instance_provision should start up the number of instances provided in the
   `$INSTANCE_COUNT` parameter. It should print out on stdout the instance ids
-  that testr should supply to the dispose and execute commands. There should
+  that inq should supply to the dispose and execute commands. There should
   be no other output on stdout (stderr is entirely up for grabs). An exit code
-  of non-zero will cause testr to consider the command to have failed. A
+  of non-zero will cause inq to consider the command to have failed. A
   provisioned instance should be able to execute the list tests command and
-  execute tests commands that testr will run via the instance_execute callout.
-  Its possible to lazy-provision things if you desire - testr doesn't care -
+  execute tests commands that inq will run via the instance_execute callout.
+  Its possible to lazy-provision things if you desire - inq doesn't care -
   but to reduce latency we suggest performing any rsync or other code
-  synchronisation steps during the provision step, as testr may make multiple
+  synchronisation steps during the provision step, as inq may make multiple
   calls to one environment, and re-doing costly operations on each command
   execution would impair performance.
 

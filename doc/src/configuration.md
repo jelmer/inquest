@@ -1,11 +1,11 @@
 # Configuration
 
-testr is configured via the `.testr.conf` file which needs to be in the same
-directory that testr is run from. testr includes online help for all the
+inq is configured via the `.testr.conf` file which needs to be in the same
+directory that inq is run from. inq includes online help for all the
 options that can be set within it:
 
 ```sh
-  $ testr help run
+  $ inq help run
 ```
 
 ## Python

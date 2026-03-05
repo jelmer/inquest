@@ -1,13 +1,13 @@
-//! Error types for testrepository
+//! Error types for inquest
 
 use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// Result type alias for testrepository operations
+/// Result type alias for inquest operations
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Main error type for testrepository
+/// Main error type for inquest
 #[derive(Error, Debug)]
 pub enum Error {
     /// Repository was not found at the specified path.

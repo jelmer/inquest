@@ -212,7 +212,7 @@ impl Command for AnalyzeIsolationCommand {
 
             ui.output("\nTo reproduce the failure, run:")?;
             ui.output(&format!(
-                "  testr run --load-list <(echo '{}'; echo '{}')",
+                "  inq run --load-list <(echo '{}'; echo '{}')",
                 culprits
                     .iter()
                     .map(|t| t.as_str())

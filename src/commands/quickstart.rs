@@ -1,13 +1,13 @@
-//! Quickstart documentation for testrepository
+//! Quickstart documentation for inquest
 
 use crate::commands::Command;
 use crate::error::Result;
 use crate::ui::UI;
 
-/// Command to display quickstart documentation for testrepository.
+/// Command to display quickstart documentation for inquest.
 ///
 /// Shows introductory documentation to help users get started with
-/// basic testrepository operations.
+/// basic inquest operations.
 pub struct QuickstartCommand;
 
 impl Default for QuickstartCommand {
@@ -25,7 +25,7 @@ impl QuickstartCommand {
 
 impl Command for QuickstartCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
-        let help = r#"# Test Repository
+        let help = r#"# Inquest
 
 ## Overview
 
@@ -42,7 +42,7 @@ subunit or be converted into a subunit stream can be accepted).
 
 ## Licensing
 
-Test Repository is under BSD / Apache 2.0 licences.
+Inquest is under BSD / Apache 2.0 licences.
 
 ## Quick Start
 
@@ -55,21 +55,21 @@ $ touch .testr.conf
 Create a repository:
 
 ```sh
-$ testr init
+$ inq init
 ```
 
 Load a test run into the repository:
 
 ```sh
-$ testr load < testrun
+$ inq load < testrun
 ```
 
 Query the repository:
 
 ```sh
-$ testr stats
-$ testr last
-$ testr failing
+$ inq stats
+$ inq last
+$ inq failing
 ```
 
 Delete a repository:
@@ -92,7 +92,7 @@ https://testing-cabal.github.io/testrepository/
     }
 
     fn help(&self) -> &str {
-        "Show quickstart documentation for testrepository"
+        "Show quickstart documentation for inquest"
     }
 }
 
@@ -111,7 +111,7 @@ mod tests {
         assert!(!ui.output.is_empty());
         let output = ui.output.join("\n");
         assert!(output.contains("Quick Start"));
-        assert!(output.contains("testr init"));
-        assert!(output.contains("testr load"));
+        assert!(output.contains("inq init"));
+        assert!(output.contains("inq load"));
     }
 }

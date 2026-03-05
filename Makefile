@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2009-2025 Testrepository Contributors
+# Copyright (c) 2009-2025 Testrepository/Inquest Contributors
 # 
 # Licensed under either the Apache License, Version 2.0 or the BSD 3-clause
 # license at the users choice. A copy of both licenses are available in the
@@ -15,7 +15,7 @@
 all: check
 
 .testrepository:
-	./testr init
+	./inq init
 
 check:
 	cargo check

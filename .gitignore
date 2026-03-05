@@ -1,7 +1,7 @@
 /build
 /dist
 /.testrepository
-/testrepository.egg-info
+/inquest.egg-info
 __pycache__
 *.pyc
 *~
@@ -12,7 +12,7 @@ AUTHORS
 ChangeLog
 .tox
 doc/build/
-testrepository/_version.py
+inquest/_version.py
 /.vscode
 
 

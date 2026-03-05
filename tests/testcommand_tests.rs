@@ -1,8 +1,8 @@
 //! Tests for TestCommand functionality
 
+use inquest::testcommand::TestCommand;
 use std::io::Write;
 use tempfile::TempDir;
-use testrepository::testcommand::TestCommand;
 
 #[test]
 fn test_list_tests_parses_subunit_enumeration() {

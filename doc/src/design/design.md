@@ -13,9 +13,9 @@ a small clean code base which is easily approachable.
 
 ## Data model/storage
 
-testrepository stores subunit streams as subunit streams in .testrespository
+inquest stores subunit streams as subunit streams in .testrespository
 with simple additional metadata. See the [manual](../repositories.md) for documentation on the repository layout.
-The key design elements are that streams are stored verbatim, and a testr managed stream called 'failing' is used  to track the current failures.
+The key design elements are that streams are stored verbatim, and an inq managed stream called 'failing' is used  to track the current failures.
 
 ## Code layout
 
@@ -34,7 +34,7 @@ in testrepository.tests.test_foo.
 ## External integration
 
 
-Test Repository command, ui, parsing etc objects should all be suitable for
+Inquest command, ui, parsing etc objects should all be suitable for
 reuse from other programs.
 
 ## Threads/concurrency

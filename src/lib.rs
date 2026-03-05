@@ -1,13 +1,13 @@
 #![deny(missing_docs)]
 
-//! testrepository - A repository of test results
+//! inquest - A repository of test results
 //!
-//! This is a Rust port of the Python testrepository tool, maintaining
+//! Inquest started as a Rust port of the Python testrepository tool, maintaining
 //! complete on-disk format compatibility with the original.
 //!
 //! # Overview
 //!
-//! testrepository provides a database of test results which can be used as part of
+//! inquest provides a database of test results which can be used as part of
 //! developer workflow to track test history, identify failing tests, and analyze
 //! test performance over time.
 //!
@@ -36,12 +36,12 @@
 //! # Example
 //!
 //! ```no_run
-//! use testrepository::repository::{RepositoryFactory, file::FileRepositoryFactory};
-//! use testrepository::commands::{Command, InitCommand, StatsCommand};
-//! use testrepository::ui::UI;
+//! use inquest::repository::{RepositoryFactory, file::FileRepositoryFactory};
+//! use inquest::commands::{Command, InitCommand, StatsCommand};
+//! use inquest::ui::UI;
 //! use std::path::Path;
 //!
-//! # fn main() -> testrepository::error::Result<()> {
+//! # fn main() -> inquest::error::Result<()> {
 //! // Initialize a new repository
 //! let factory = FileRepositoryFactory;
 //! let repo = factory.initialise(Path::new("."))?;
@@ -49,15 +49,15 @@
 //! // Commands can be executed via the Command trait
 //! struct SimpleUI;
 //! impl UI for SimpleUI {
-//!     fn output(&mut self, msg: &str) -> testrepository::error::Result<()> {
+//!     fn output(&mut self, msg: &str) -> inquest::error::Result<()> {
 //!         println!("{}", msg);
 //!         Ok(())
 //!     }
-//!     fn error(&mut self, msg: &str) -> testrepository::error::Result<()> {
+//!     fn error(&mut self, msg: &str) -> inquest::error::Result<()> {
 //!         eprintln!("Error: {}", msg);
 //!         Ok(())
 //!     }
-//!     fn warning(&mut self, msg: &str) -> testrepository::error::Result<()> {
+//!     fn warning(&mut self, msg: &str) -> inquest::error::Result<()> {
 //!         eprintln!("Warning: {}", msg);
 //!         Ok(())
 //!     }
