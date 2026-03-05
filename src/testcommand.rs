@@ -218,9 +218,10 @@ impl TestCommand {
             })?;
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(Error::CommandExecution(format!(
-                "Test listing command failed with exit code: {}",
-                output.status
+                "Test listing command failed with exit code: {}\nCommand: {}\nStderr:\n{}",
+                output.status, cmd, stderr
             )));
         }
 
