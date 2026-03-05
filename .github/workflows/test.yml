@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -35,11 +35,21 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Clippy
+      - name: Clippy (with gdbm)
+        if: matrix.os != 'windows-latest'
         run: cargo clippy -- -D warnings
 
-      - name: Tests
+      - name: Clippy (without gdbm)
+        if: matrix.os == 'windows-latest'
+        run: cargo clippy --no-default-features -- -D warnings
+
+      - name: Tests (with gdbm)
+        if: matrix.os != 'windows-latest'
         run: cargo test
+
+      - name: Tests (without gdbm)
+        if: matrix.os == 'windows-latest'
+        run: cargo test --no-default-features
 
   success:
     needs: build
