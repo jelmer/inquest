@@ -22,6 +22,36 @@ pub fn init_repository(base_path: Option<&str>) -> Result<Box<dyn Repository>> {
     factory.initialise(base)
 }
 
+/// Resolve a run ID: if given, use it; otherwise get the latest run's ID.
+///
+/// Supports negative indices like Python: -1 is the latest run, -2 is the
+/// second-to-latest, etc.
+pub fn resolve_run_id(repo: &dyn Repository, run_id: Option<&str>) -> Result<String> {
+    match run_id {
+        Some(id) => {
+            if let Some(neg) = id.strip_prefix('-') {
+                if let Ok(offset) = neg.parse::<usize>() {
+                    if offset == 0 {
+                        return Err(crate::error::Error::Other(
+                            "Run index -0 is not valid; use -1 for the latest run".to_string(),
+                        ));
+                    }
+                    let ids = repo.list_run_ids()?;
+                    if offset > ids.len() {
+                        return Err(crate::error::Error::TestRunNotFound(id.to_string()));
+                    }
+                    return Ok(ids[ids.len() - offset].clone());
+                }
+            }
+            Ok(id.to_string())
+        }
+        None => {
+            let latest = repo.get_latest_run()?;
+            Ok(latest.id)
+        }
+    }
+}
+
 /// Extract test durations from a test run and update the repository's times database
 pub fn update_test_times_from_run(
     repo: &mut Box<dyn Repository>,
@@ -102,5 +132,68 @@ mod tests {
         init_repository(Some(&path)).unwrap();
         let result = open_repository(Some(&path));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_run_id_none() {
+        let temp = TempDir::new().unwrap();
+        let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+        let mut run = crate::repository::TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(crate::repository::TestResult::success("test1"));
+        repo.insert_test_run(run).unwrap();
+
+        assert_eq!(resolve_run_id(&*repo, None).unwrap(), "0");
+    }
+
+    #[test]
+    fn test_resolve_run_id_positive() {
+        let temp = TempDir::new().unwrap();
+        let repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+
+        assert_eq!(resolve_run_id(&*repo, Some("42")).unwrap(), "42");
+    }
+
+    #[test]
+    fn test_resolve_run_id_negative() {
+        let temp = TempDir::new().unwrap();
+        let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+
+        for i in 0..3 {
+            let mut run = crate::repository::TestRun::new(i.to_string());
+            run.timestamp = chrono::DateTime::from_timestamp(1000000000 + i, 0).unwrap();
+            run.add_result(crate::repository::TestResult::success("test1"));
+            repo.insert_test_run(run).unwrap();
+        }
+
+        assert_eq!(resolve_run_id(&*repo, Some("-1")).unwrap(), "2");
+        assert_eq!(resolve_run_id(&*repo, Some("-2")).unwrap(), "1");
+        assert_eq!(resolve_run_id(&*repo, Some("-3")).unwrap(), "0");
+    }
+
+    #[test]
+    fn test_resolve_run_id_negative_out_of_range() {
+        let temp = TempDir::new().unwrap();
+        let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+
+        let mut run = crate::repository::TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(crate::repository::TestResult::success("test1"));
+        repo.insert_test_run(run).unwrap();
+
+        assert!(resolve_run_id(&*repo, Some("-2")).is_err());
+    }
+
+    #[test]
+    fn test_resolve_run_id_negative_zero() {
+        let temp = TempDir::new().unwrap();
+        let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+
+        let mut run = crate::repository::TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(crate::repository::TestResult::success("test1"));
+        repo.insert_test_run(run).unwrap();
+
+        assert!(resolve_run_id(&*repo, Some("-0")).is_err());
     }
 }
