@@ -496,15 +496,14 @@ test_run_concurrency=echo 4
         let config_str = r#"
 [DEFAULT]
 test_command=echo ""
-test_run_concurrency=nproc
+test_run_concurrency=echo 3
 "#;
         let config = TestrConfig::parse(config_str).unwrap();
         let temp_dir = TempDir::new().unwrap();
         let tc = TestCommand::new(config, temp_dir.path().to_path_buf());
 
         let result = tc.get_concurrency().unwrap();
-        assert!(result.is_some());
-        assert!(result.unwrap() > 0);
+        assert_eq!(result, Some(3));
     }
 
     #[test]
