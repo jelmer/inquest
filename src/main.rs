@@ -303,6 +303,12 @@ fn main() {
         Ok(exit_code) => std::process::exit(exit_code),
         Err(e) => {
             let _ = writeln!(std::io::stderr(), "Error: {}", e);
+            if matches!(e, inquest::error::Error::RepositoryNotFound(_)) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "Hint: Run 'inq init' or use '--force-init' to create a repository."
+                );
+            }
             std::process::exit(1);
         }
     }
