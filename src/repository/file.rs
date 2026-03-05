@@ -258,6 +258,7 @@ impl FileRepository {
         }
 
         // Fall back to GDBM (older Python versions or explicit GDBM usage)
+        #[cfg(feature = "gdbm")]
         if let Ok(result) = self.read_times_gdbm(&times_path, test_ids) {
             return Ok(result);
         }
@@ -295,6 +296,7 @@ impl FileRepository {
     }
 
     /// Read test times from GDBM database (older Python versions)
+    #[cfg(feature = "gdbm")]
     fn read_times_gdbm(
         &self,
         path: &std::path::Path,
