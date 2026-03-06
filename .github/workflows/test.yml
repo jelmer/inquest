@@ -15,7 +15,7 @@ jobs:
 
       - name: Install system dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y libgdbm-dev
+        run: sudo apt-get update && sudo apt-get install -y libgdbm-dev libsqlite3-dev
 
       - name: Install system dependencies (macOS)
         if: matrix.os == 'macos-latest'
@@ -23,6 +23,18 @@ jobs:
           brew install gdbm
           echo "LIBRARY_PATH=$(brew --prefix gdbm)/lib" >> $GITHUB_ENV
           echo "CPATH=$(brew --prefix gdbm)/include" >> $GITHUB_ENV
+
+      - name: Install system dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        run: vcpkg install sqlite3:x64-windows
+        shell: bash
+
+      - name: Set vcpkg environment (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> $GITHUB_ENV
+          echo "VCPKGRS_DYNAMIC=1" >> $GITHUB_ENV
+        shell: bash
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
