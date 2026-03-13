@@ -563,3 +563,29 @@ test_run_concurrency=echo 2
     let concurrency = test_cmd.get_concurrency().unwrap();
     assert_eq!(concurrency, Some(2));
 }
+
+#[test]
+fn test_run_concurrency_callout_inquest_toml() {
+    use inquest::testcommand::TestCommand;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    // Initialize repository
+    let mut ui = TestUI::new();
+    let init_cmd = InitCommand::new(Some(base_path.clone()));
+    init_cmd.execute(&mut ui).unwrap();
+
+    // Create inquest.toml instead of .testr.conf
+    let config = r#"
+test_command = "echo \"\""
+test_list_option = "--list"
+test_run_concurrency = "echo 2"
+"#;
+    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+    // Load TestCommand and verify it works with TOML config
+    let test_cmd = TestCommand::from_directory(temp.path()).unwrap();
+    let concurrency = test_cmd.get_concurrency().unwrap();
+    assert_eq!(concurrency, Some(2));
+}

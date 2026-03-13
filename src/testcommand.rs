@@ -1,7 +1,7 @@
 //! Test command execution framework
 //!
 //! This module provides the TestCommand struct which handles executing
-//! test commands based on .testr.conf configuration.
+//! test commands based on configuration from inquest.toml or .testr.conf.
 
 use crate::config::TestrConfig;
 use crate::error::{Error, Result};
@@ -25,14 +25,11 @@ impl TestCommand {
         TestCommand { config, base_dir }
     }
 
-    /// Load TestCommand from .testr.conf in the given directory
+    /// Load TestCommand from a configuration file in the given directory.
+    ///
+    /// Searches for `inquest.toml`, `.inquest.toml`, or `.testr.conf` (in that order).
     pub fn from_directory(dir: &Path) -> Result<Self> {
-        let config_path = dir.join(".testr.conf");
-        if !config_path.exists() {
-            return Err(Error::Config("No .testr.conf file found".to_string()));
-        }
-
-        let config = TestrConfig::load_from_file(&config_path)?;
+        let (config, _path) = TestrConfig::find_in_directory(dir)?;
         Ok(TestCommand::new(config, dir.to_path_buf()))
     }
 
@@ -446,11 +443,12 @@ test_command=python -m test $LISTOPT
         let temp_dir = TempDir::new().unwrap();
         let result = TestCommand::from_directory(temp_dir.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains(".testr.conf"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("No configuration file found"));
     }
 
     #[test]
-    fn test_from_directory_with_config() {
+    fn test_from_directory_with_testr_conf() {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join(".testr.conf");
 
@@ -460,6 +458,21 @@ test_command=python -m test $LISTOPT
 [DEFAULT]
 test_command=python -m test
 "#,
+        )
+        .unwrap();
+
+        let tc = TestCommand::from_directory(temp_dir.path()).unwrap();
+        assert_eq!(tc.config().test_command, "python -m test");
+    }
+
+    #[test]
+    fn test_from_directory_with_inquest_toml() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("inquest.toml");
+
+        fs::write(
+            &config_path,
+            r#"test_command = "python -m test""#,
         )
         .unwrap();
 

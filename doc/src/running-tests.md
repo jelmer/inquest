@@ -1,12 +1,11 @@
 # Running Tests
 
-inq is taught how to run your tests by interepreting your .testr.conf file.
-For instance:
+inq is taught how to run your tests by interpreting your configuration file
+(`inquest.toml`, `.inquest.toml`, or `.testr.conf`). For instance:
 
-```ini
-  [DEFAULT]
-  test_command=foo $IDOPTION
-  test_id_option=--bar $IDFILE
+```toml
+test_command = "foo $IDOPTION"
+test_id_option = "--bar $IDFILE"
 ```
 
 will cause `inq run` to run `foo` and process it as `inq load` would.
@@ -25,7 +24,7 @@ line. For instance, using the above config example `inq run quux -- bar
 then run `foo bar --load-list tempfile.list --no-plugins`. Shell variables
 are expanded in these commands on platforms that have a shell.
 
-Having setup a .testr.conf, a common workflow then becomes:
+Having set up a configuration file, a common workflow then becomes:
 
 ```sh
   # Fix currently broken tests - repeat until there are no failures.

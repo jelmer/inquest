@@ -76,11 +76,11 @@ mod tests {
         let cmd = ListTestsCommand::new(Some(temp.path().to_string_lossy().to_string()));
         let result = cmd.execute(&mut ui);
 
-        // Should return an error because there's no .testr.conf
+        // Should return an error because there's no config file
         assert!(result.is_err());
         match result.unwrap_err() {
             crate::error::Error::Config(msg) => {
-                assert_eq!(msg, "No .testr.conf file found");
+                assert!(msg.contains("No configuration file found"), "unexpected error: {}", msg);
             }
             e => panic!("Expected Config error, got: {}", e),
         }

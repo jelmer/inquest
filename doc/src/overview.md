@@ -9,8 +9,8 @@ inq can fully automate this, but lets start with the low level facilities,
 using the sample subunit stream included with inq
 
 ```sh
-  # Note that there is a .testr.conf already:
-  ls .testr.conf
+  # Note that there is an inquest.toml already (or .testr.conf):
+  ls inquest.toml
   # Create a store to manage test results in.
   $ inq init
   # add a test result (shows failures)

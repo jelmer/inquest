@@ -2,98 +2,92 @@
 
 This document provides practical examples of using inquest with various test frameworks and configurations.
 
-## Basic .testr.conf Examples
+## Basic Configuration Examples
+
+Configuration can be provided in `inquest.toml` (preferred), `.inquest.toml`, or
+`.testr.conf` (legacy INI format). The examples below use TOML format.
 
 ### Python unittest
 
-```ini
-[DEFAULT]
-test_command=python -m subunit.run discover -t . -s tests $LISTOPT
-test_id_list_default=tests
-test_list_option=--list
+```toml
+test_command = "python -m subunit.run discover -t . -s tests $LISTOPT"
+test_id_list_default = "tests"
+test_list_option = "--list"
 ```
 
 ### Python pytest with subunit
 
-```ini
-[DEFAULT]
-test_command=pytest --subunit-trace $IDOPTION
-test_id_option=--test-list=$IDFILE
-test_list_option=--collect-only -q
+```toml
+test_command = "pytest --subunit-trace $IDOPTION"
+test_id_option = "--test-list=$IDFILE"
+test_list_option = "--collect-only -q"
 ```
 
 ### Rust with cargo-subunit
 
-```ini
-[DEFAULT]
-test_command=cargo test --quiet -- --format=subunit $LISTOPT
-test_list_option=--list
+```toml
+test_command = "cargo test --quiet -- --format=subunit $LISTOPT"
+test_list_option = "--list"
 ```
 
 ### Node.js with tape and tap-subunit
 
-```ini
-[DEFAULT]
-test_command=node test/*.js | tap-subunit
-test_id_list_default=test/
+```toml
+test_command = "node test/*.js | tap-subunit"
+test_id_list_default = "test/"
 ```
 
 ## Advanced Configurations
 
 ### Test Grouping by Module
 
-```ini
-[DEFAULT]
-test_command=python -m subunit.run $IDOPTION
-test_id_option=$IDLIST
-group_regex=^(.*\.)?(?P<module>[^.]+)\.
+```toml
+test_command = "python -m subunit.run $IDOPTION"
+test_id_option = "$IDLIST"
+group_regex = '^(.*\.)?(?P<module>[^.]+)\.'
 ```
 
 This groups tests by their module name, useful for running related tests together.
 
 ### Custom Test Discovery
 
-```ini
-[DEFAULT]
-test_command=./scripts/run-tests.sh $IDOPTION
-test_id_option=--tests=$IDFILE
-test_id_list_default=all
+```toml
+test_command = "./scripts/run-tests.sh $IDOPTION"
+test_id_option = "--tests=$IDFILE"
+test_id_list_default = "all"
 ```
 
 ### Dynamic Concurrency
 
-```ini
-[DEFAULT]
-test_command=python -m subunit.run $IDOPTION
-test_id_option=$IDLIST
+```toml
+test_command = "python -m subunit.run $IDOPTION"
+test_id_option = "$IDLIST"
 # Automatically detect CPU count
-test_run_concurrency=nproc
+test_run_concurrency = "nproc"
 ```
 
 For more complex scenarios:
 
-```ini
-[DEFAULT]
-test_command=python -m subunit.run $IDOPTION
-test_id_option=$IDLIST
+```toml
+test_command = "python -m subunit.run $IDOPTION"
+test_id_option = "$IDLIST"
 # Custom script to determine concurrency
-test_run_concurrency=./scripts/get-worker-count.sh
+test_run_concurrency = "./scripts/get-worker-count.sh"
 ```
 
 ### Instance Provisioning
 
 For tests that need isolated environments (e.g., separate databases, ports):
 
-```ini
-[DEFAULT]
-test_command=python -m subunit.run $IDOPTION
-test_id_option=$IDLIST
+```toml
+test_command = "python -m subunit.run $IDOPTION"
+test_id_option = "$IDLIST"
 # Provision N test databases and return their IDs
-instance_provision=./scripts/provision-db.sh $INSTANCE_COUNT
+instance_provision = "./scripts/provision-db.sh $INSTANCE_COUNT"
 # Execute tests against a specific instance
-instance_execute=DB_ID=$INSTANCE_ID python -m subunit.run $IDOPTION
+instance_execute = "DB_ID=$INSTANCE_ID python -m subunit.run $IDOPTION"
 # Clean up the test database
-instance_dispose=./scripts/dispose-db.sh $INSTANCE_ID
+instance_dispose = "./scripts/dispose-db.sh $INSTANCE_ID"
 ```
 
 The provision script should output one instance ID per line:
@@ -279,7 +273,7 @@ The second run will distribute tests more evenly based on historical durations.
 
 ```bash
 # Check configuration
-cat .testr.conf
+cat inquest.toml
 
 # Test command manually
 python -m subunit.run discover --list

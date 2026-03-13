@@ -36,12 +36,12 @@ a cache, and the dispose to just return it to the cache.
 ## Configuring environment support
 
 There are three callouts that inquest depends on - configured in
-.testr.conf as usual. For instance
+your configuration file as usual. For instance:
 
-```ini
-  instance_provision=foo -c $INSTANCE_COUNT
-  instance_dispose=bar $INSTANCE_IDS
-  instance_execute=quux $INSTANCE_ID $FILES -- $COMMAND
+```toml
+instance_provision = "foo -c $INSTANCE_COUNT"
+instance_dispose = "bar $INSTANCE_IDS"
+instance_execute = "quux $INSTANCE_ID $FILES -- $COMMAND"
 ```
 
 These should operate as follows:
