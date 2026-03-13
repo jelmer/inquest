@@ -18,7 +18,7 @@
 //! - [`repository`]: Core repository trait and file-based implementation for storing test results
 //! - [`commands`]: All user-facing commands (init, run, load, last, failing, stats, slowest, list-tests)
 //! - [`subunit_stream`]: Subunit v2 protocol parsing and generation
-//! - [`config`]: .testr.conf configuration file parsing
+//! - [`config`]: Configuration file parsing (inquest.toml / .testr.conf)
 //! - [`testcommand`]: Test execution framework
 //! - [`ui`]: User interface abstraction for output
 //! - [`error`]: Error types and Result alias

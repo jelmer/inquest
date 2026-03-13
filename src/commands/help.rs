@@ -60,7 +60,7 @@ Examples:
 
 Usage: inq run [OPTIONS]
 
-Executes the test command from .testr.conf and loads the results.
+Executes the test command from inquest.toml (or .testr.conf) and loads the results.
 
 Options:
   --failing         Only run tests that failed in the last run

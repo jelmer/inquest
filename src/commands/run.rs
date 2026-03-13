@@ -1,6 +1,6 @@
 //! Run tests and load results into the repository
 
-use crate::commands::utils::{init_repository, open_repository};
+use crate::commands::utils::open_or_init_repository;
 use crate::commands::Command;
 use crate::error::Result;
 use crate::subunit_stream;
@@ -1142,14 +1142,8 @@ impl Command for RunCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
         let base = Path::new(self.base_path.as_deref().unwrap_or("."));
 
-        // Open repository
-        let mut repo = if self.force_init {
-            // Try to open, if it fails, initialize
-            open_repository(self.base_path.as_deref())
-                .or_else(|_| init_repository(self.base_path.as_deref()))?
-        } else {
-            open_repository(self.base_path.as_deref())?
-        };
+        // Open repository (auto-init if config file exists or --force-init)
+        let mut repo = open_or_init_repository(self.base_path.as_deref(), self.force_init, ui)?;
 
         // Load test command configuration
         let test_cmd = TestCommand::from_directory(base)?;

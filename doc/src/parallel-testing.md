@@ -24,19 +24,19 @@ that are used, the --concurrency option will let you do so
   $ inq run --parallel --concurrency=2
 ```
 
-A more granular interface is available too - if you insert into .testr.conf
+A more granular interface is available too - if you add to your configuration:
 
-```ini
-  test_run_concurrency=foo bar
+```toml
+test_run_concurrency = "foo bar"
 ```
 
 Then when inq needs to determine concurrency, it will run that command and
 read the first line from stdout, cast that to an int, and use that as the
 number of partitions to create. A count of 0 is interpreted to mean one
-partition per test. For instance in .test.conf
+partition per test. For instance:
 
-```ini
-  test_run_concurrency=echo 2
+```toml
+test_run_concurrency = "echo 2"
 ```
 
 Would tell inq to use concurrency of 2.
