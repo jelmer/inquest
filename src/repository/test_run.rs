@@ -208,6 +208,8 @@ pub struct TestRun {
     pub results: HashMap<TestId, TestResult>,
     /// Tags associated with this test run.
     pub tags: Vec<String>,
+    /// The git commit SHA at the time this test run was recorded.
+    pub git_commit: Option<String>,
 }
 
 impl TestRun {
@@ -221,6 +223,7 @@ impl TestRun {
             timestamp: Utc::now(),
             results: HashMap::new(),
             tags: Vec::new(),
+            git_commit: None,
         }
     }
 

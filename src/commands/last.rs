@@ -93,6 +93,28 @@ impl Command for LastCommand {
         }
 
         ui.output(&format!("Test run: {}", test_run.id))?;
+        if let Ok(Some(metadata)) = repo.get_run_metadata(&run_id) {
+            if let Some(ref commit) = metadata.git_commit {
+                let dirty_suffix = if metadata.git_dirty == Some(true) {
+                    " (dirty)"
+                } else {
+                    ""
+                };
+                ui.output(&format!("Git commit: {}{}", commit, dirty_suffix))?;
+            }
+            if let Some(ref command) = metadata.command {
+                ui.output(&format!("Command: {}", command))?;
+            }
+            if let Some(concurrency) = metadata.concurrency {
+                ui.output(&format!("Concurrency: {}", concurrency))?;
+            }
+            if let Some(duration_secs) = metadata.duration_secs {
+                ui.output(&format!("Duration: {:.3}s", duration_secs))?;
+            }
+            if let Some(exit_code) = metadata.exit_code {
+                ui.output(&format!("Exit code: {}", exit_code))?;
+            }
+        }
         ui.output(&format!("Timestamp: {}", test_run.timestamp))?;
         ui.output(&format!("Total tests: {}", test_run.total_tests()))?;
         ui.output(&format!("Passed: {}", test_run.count_successes()))?;
@@ -194,6 +216,116 @@ mod tests {
         assert!(ui.output.iter().any(|s| s.contains("Total tests: 1")));
         assert!(ui.output.iter().any(|s| s.contains("Passed: 1")));
         assert!(ui.output.iter().any(|s| s.contains("Failed: 0")));
+    }
+
+    #[test]
+    fn test_last_command_with_git_commit_pristine() {
+        let temp = TempDir::new().unwrap();
+
+        let factory = FileRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut test_run = TestRun::new("0".to_string());
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test1"),
+            status: TestStatus::Success,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec![],
+        });
+
+        repo.insert_test_run(test_run).unwrap();
+        repo.set_run_metadata(
+            "0",
+            &crate::repository::RunMetadata {
+                git_commit: Some("abc123def456789012345678901234567890abcd".to_string()),
+                git_dirty: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = LastCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui);
+
+        assert_eq!(result.unwrap(), 0);
+        assert!(ui.output.iter().any(|s| s.contains("Test run: 0")));
+        assert!(ui
+            .output
+            .iter()
+            .any(|s| s == "Git commit: abc123def456789012345678901234567890abcd"));
+    }
+
+    #[test]
+    fn test_last_command_with_git_commit_dirty() {
+        let temp = TempDir::new().unwrap();
+
+        let factory = FileRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut test_run = TestRun::new("0".to_string());
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test1"),
+            status: TestStatus::Success,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec![],
+        });
+
+        repo.insert_test_run(test_run).unwrap();
+        repo.set_run_metadata(
+            "0",
+            &crate::repository::RunMetadata {
+                git_commit: Some("abc123def456".to_string()),
+                git_dirty: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = LastCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui);
+
+        assert_eq!(result.unwrap(), 0);
+        assert!(ui
+            .output
+            .iter()
+            .any(|s| s == "Git commit: abc123def456 (dirty)"));
+    }
+
+    #[test]
+    fn test_last_command_without_git_commit() {
+        // Backwards compat: no git commit file should just skip the line
+        let temp = TempDir::new().unwrap();
+
+        let factory = FileRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut test_run = TestRun::new("0".to_string());
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test1"),
+            status: TestStatus::Success,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec![],
+        });
+
+        repo.insert_test_run(test_run).unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = LastCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui);
+
+        assert_eq!(result.unwrap(), 0);
+        assert!(!ui.output.iter().any(|s| s.contains("Git commit")));
     }
 
     #[test]

@@ -87,6 +87,35 @@ pub fn update_repository_failing_tests(
     Ok(())
 }
 
+/// Store metadata for a test run.
+///
+/// Detects git information automatically and combines it with the
+/// provided run-specific metadata (command, concurrency, duration, exit code).
+pub fn store_run_metadata(
+    repo: &mut Box<dyn Repository>,
+    run_id: &str,
+    working_dir: Option<&str>,
+    command: Option<&str>,
+    concurrency: Option<usize>,
+    duration: Option<std::time::Duration>,
+    exit_code: Option<i32>,
+) -> Result<()> {
+    let mut metadata = crate::repository::RunMetadata {
+        command: command.map(|s| s.to_string()),
+        concurrency,
+        duration_secs: duration.map(|d| d.as_secs_f64()),
+        exit_code,
+        ..Default::default()
+    };
+
+    if let Some(commit) = detect_git_commit(working_dir) {
+        metadata.git_dirty = Some(detect_git_dirty(working_dir));
+        metadata.git_commit = Some(commit);
+    }
+
+    repo.set_run_metadata(run_id, &metadata)
+}
+
 /// Display a test run summary
 pub fn display_test_summary(ui: &mut dyn UI, run_id: &str, test_run: &TestRun) -> Result<()> {
     let total = test_run.total_tests();
@@ -99,6 +128,51 @@ pub fn display_test_summary(ui: &mut dyn UI, run_id: &str, test_run: &TestRun) -
     ui.output(&format!("  Failed:  {}", failures))?;
 
     Ok(())
+}
+
+/// Detect the current git HEAD commit SHA.
+///
+/// Returns `None` if not in a git repository or if `git` is not available.
+pub fn detect_git_commit(working_dir: Option<&str>) -> Option<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["rev-parse", "HEAD"]);
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let commit = String::from_utf8(output.stdout).ok()?;
+    let commit = commit.trim();
+    if commit.is_empty() {
+        None
+    } else {
+        Some(commit.to_string())
+    }
+}
+
+/// Detect whether the git working tree has uncommitted changes.
+///
+/// Returns `true` if the tree is dirty, `false` if pristine.
+/// If git is not available or not in a repo, returns `false`.
+pub fn detect_git_dirty(working_dir: Option<&str>) -> bool {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["status", "--porcelain"]);
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+
+    let output = match cmd.output() {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+    !output.stdout.is_empty()
 }
 
 #[cfg(test)]
@@ -182,6 +256,56 @@ mod tests {
         repo.insert_test_run(run).unwrap();
 
         assert!(resolve_run_id(&*repo, Some("-2")).is_err());
+    }
+
+    #[test]
+    fn test_detect_git_commit_in_git_repo() {
+        // This test runs inside the inquest git repo, so it should find a commit
+        let commit = detect_git_commit(None);
+        assert!(commit.is_some(), "Expected to find a git commit");
+        let commit = commit.unwrap();
+        assert_eq!(commit.len(), 40, "Git commit SHA should be 40 hex chars");
+        assert!(
+            commit.chars().all(|c| c.is_ascii_hexdigit()),
+            "Git commit should be hex"
+        );
+    }
+
+    #[test]
+    fn test_detect_git_commit_not_git_repo() {
+        let temp = TempDir::new().unwrap();
+        let commit = detect_git_commit(Some(&temp.path().to_string_lossy()));
+        assert_eq!(commit, None);
+    }
+
+    #[test]
+    fn test_store_run_metadata() {
+        let temp = TempDir::new().unwrap();
+        let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+
+        let mut run = crate::repository::TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(crate::repository::TestResult::success("test1"));
+        repo.insert_test_run(run).unwrap();
+
+        // Store metadata using a non-git directory (git fields should be None)
+        store_run_metadata(
+            &mut repo,
+            "0",
+            Some(&temp.path().to_string_lossy()),
+            Some("pytest"),
+            Some(2),
+            Some(std::time::Duration::from_secs_f64(1.5)),
+            Some(0),
+        )
+        .unwrap();
+        let metadata = repo.get_run_metadata("0").unwrap().unwrap();
+        assert_eq!(metadata.git_commit, None);
+        assert_eq!(metadata.git_dirty, None);
+        assert_eq!(metadata.command, Some("pytest".to_string()));
+        assert_eq!(metadata.concurrency, Some(2));
+        assert_eq!(metadata.duration_secs, Some(1.5));
+        assert_eq!(metadata.exit_code, Some(0));
     }
 
     #[test]
