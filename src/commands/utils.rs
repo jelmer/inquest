@@ -1,5 +1,6 @@
 //! Utility functions for command implementation
 
+use crate::config::CONFIG_FILE_NAMES;
 use crate::error::Result;
 use crate::repository::file::FileRepositoryFactory;
 use crate::repository::{Repository, RepositoryFactory, TestRun};
@@ -20,6 +21,39 @@ pub fn init_repository(base_path: Option<&str>) -> Result<Box<dyn Repository>> {
 
     let factory = FileRepositoryFactory;
     factory.initialise(base)
+}
+
+/// Check whether a configuration file exists in the given directory.
+pub fn has_config_file(base_path: Option<&str>) -> bool {
+    let base = base_path.map(Path::new).unwrap_or_else(|| Path::new("."));
+    CONFIG_FILE_NAMES
+        .iter()
+        .any(|name| base.join(name).exists())
+}
+
+/// Open a repository, auto-initializing if a configuration file is present.
+///
+/// If `force_init` is true, always initializes on failure.
+/// Otherwise, if a configuration file exists in the base directory,
+/// initializes and prints a notification via `ui`.
+pub fn open_or_init_repository(
+    base_path: Option<&str>,
+    force_init: bool,
+    ui: &mut dyn UI,
+) -> Result<Box<dyn Repository>> {
+    match open_repository(base_path) {
+        Ok(repo) => Ok(repo),
+        Err(e) => {
+            if force_init || has_config_file(base_path) {
+                let base = base_path.unwrap_or(".");
+                let repo_path = Path::new(base).join(".testrepository");
+                ui.output(&format!("Creating repository in {}", repo_path.display()))?;
+                init_repository(base_path)
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Resolve a run ID: if given, use it; otherwise get the latest run's ID.
@@ -105,6 +139,69 @@ pub fn display_test_summary(ui: &mut dyn UI, run_id: &str, test_run: &TestRun) -
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_has_config_file_none() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().to_string_lossy().to_string();
+        assert!(!has_config_file(Some(&path)));
+    }
+
+    #[test]
+    fn test_has_config_file_inquest_toml() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("inquest.toml"), r#"test_command = "echo""#).unwrap();
+        let path = temp.path().to_string_lossy().to_string();
+        assert!(has_config_file(Some(&path)));
+    }
+
+    #[test]
+    fn test_has_config_file_testr_conf() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join(".testr.conf"),
+            "[DEFAULT]\ntest_command=echo\n",
+        )
+        .unwrap();
+        let path = temp.path().to_string_lossy().to_string();
+        assert!(has_config_file(Some(&path)));
+    }
+
+    #[test]
+    fn test_open_or_init_auto_creates_when_config_exists() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("inquest.toml"), r#"test_command = "echo""#).unwrap();
+        let path = temp.path().to_string_lossy().to_string();
+
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let repo = open_or_init_repository(Some(&path), false, &mut ui);
+        assert!(repo.is_ok());
+        assert!(temp.path().join(".testrepository").exists());
+        let output = ui.output.join("\n");
+        assert!(output.contains("Creating repository"), "got: {}", output);
+    }
+
+    #[test]
+    fn test_open_or_init_no_config_no_force() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().to_string_lossy().to_string();
+
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let repo = open_or_init_repository(Some(&path), false, &mut ui);
+        assert!(repo.is_err());
+        assert!(!temp.path().join(".testrepository").exists());
+    }
+
+    #[test]
+    fn test_open_or_init_force_init_without_config() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().to_string_lossy().to_string();
+
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let repo = open_or_init_repository(Some(&path), true, &mut ui);
+        assert!(repo.is_ok());
+        assert!(temp.path().join(".testrepository").exists());
+    }
 
     #[test]
     fn test_init_repository() {

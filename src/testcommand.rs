@@ -470,11 +470,7 @@ test_command=python -m test
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("inquest.toml");
 
-        fs::write(
-            &config_path,
-            r#"test_command = "python -m test""#,
-        )
-        .unwrap();
+        fs::write(&config_path, r#"test_command = "python -m test""#).unwrap();
 
         let tc = TestCommand::from_directory(temp_dir.path()).unwrap();
         assert_eq!(tc.config().test_command, "python -m test");

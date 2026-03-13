@@ -306,7 +306,7 @@ fn main() {
             if matches!(e, inquest::error::Error::RepositoryNotFound(_)) {
                 let _ = writeln!(
                     std::io::stderr(),
-                    "Hint: Run 'inq init' or use '--force-init' to create a repository."
+                    "Hint: Run 'inq init', use '--force-init', or add an inquest.toml to create a repository automatically."
                 );
             }
             std::process::exit(1);

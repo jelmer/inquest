@@ -80,7 +80,11 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             crate::error::Error::Config(msg) => {
-                assert!(msg.contains("No configuration file found"), "unexpected error: {}", msg);
+                assert!(
+                    msg.contains("No configuration file found"),
+                    "unexpected error: {}",
+                    msg
+                );
             }
             e => panic!("Expected Config error, got: {}", e),
         }
