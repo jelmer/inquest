@@ -17,7 +17,7 @@ Inquest started as a Rust port of the Python [testrepository](https://github.com
 - Full compatibility with testrepository's on-disk repository format
 - Fast, native binary with no Python runtime required
 - All core commands implemented
-- Support for .testr.conf configuration files
+- Configuration via `inquest.toml` (TOML) or `.testr.conf` (legacy INI)
 
 ## Installation
 
@@ -31,12 +31,11 @@ The binary will be available at `target/release/inq`.
 
 ## Quick Start
 
-Create a config file `.testr.conf`:
+Create a config file `inquest.toml`:
 
-```ini
-[DEFAULT]
-test_command=cargo test $IDOPTION
-test_id_option=--test $IDFILE
+```toml
+test_command = "cargo test $IDOPTION"
+test_id_option = "--test $IDFILE"
 ```
 
 Create a repository:
@@ -86,7 +85,7 @@ Initialize a new test repository in the current directory. Creates a `.testrepos
 
 ### `inq run`
 
-Execute tests using the command defined in `.testr.conf` and load the results into the repository.
+Execute tests using the command defined in `inquest.toml` and load the results into the repository.
 
 Options:
 - `--failing`: Run only the tests that failed in the last run
@@ -162,7 +161,12 @@ All commands support:
 
 ## Configuration
 
-The `.testr.conf` file uses INI format with a `[DEFAULT]` section. Key options:
+inq looks for configuration in the following files (in order of priority):
+`inquest.toml`, `.inquest.toml`, `.testr.conf`. The TOML format is preferred;
+`.testr.conf` (INI format with a `[DEFAULT]` section) is supported for backward
+compatibility.
+
+Key options:
 
 - `test_command`: Command to run tests (required)
 - `test_id_option`: Option format for running specific tests (e.g., `--test $IDFILE`)
@@ -188,35 +192,32 @@ The following variables are available for use in `test_command`:
 
 #### Rust with Cargo
 
-```ini
-[DEFAULT]
-test_command=cargo test $IDOPTION
-test_id_option=--test $IDFILE
-test_list_option=--list
+```toml
+test_command = "cargo test $IDOPTION"
+test_id_option = "--test $IDFILE"
+test_list_option = "--list"
 ```
 
 #### Python with pytest
 
-```ini
-[DEFAULT]
-test_command=pytest $IDOPTION
-test_id_option=--test-id-file=$IDFILE
-test_list_option=--collect-only -q
+```toml
+test_command = "pytest $IDOPTION"
+test_id_option = "--test-id-file=$IDFILE"
+test_list_option = "--collect-only -q"
 ```
 
 #### Advanced Configuration with Parallel Execution
 
-```ini
-[DEFAULT]
-test_command=cargo test --quiet $IDOPTION
-test_id_option=$IDLIST
-test_list_option=--list
+```toml
+test_command = "cargo test --quiet $IDOPTION"
+test_id_option = "$IDLIST"
+test_list_option = "--list"
 
 # Use system CPU count for parallel execution
-test_run_concurrency=nproc
+test_run_concurrency = "nproc"
 
 # Group tests by module (keeps related tests together)
-group_regex=^(.*)::[^:]+$
+group_regex = "^(.*)::[^:]+$"
 ```
 
 ## Repository Format

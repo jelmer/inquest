@@ -2,16 +2,16 @@
 
 It is useful to be able to query the test program to see what tests will be
 run - this permits partitioning the tests and running multiple instances with
-separate partitions at once. Set 'test_list_option' in .testr.conf like so:
+separate partitions at once. Set `test_list_option` in your configuration like so:
 
-```ini
-  test_list_option=--list-tests
+```toml
+test_list_option = "--list-tests"
 ```
 
 You also need to use the $LISTOPT option to tell inq where to expand things:
 
-```ini
-  test_command=foo $LISTOPT $IDOPTION
+```toml
+test_command = "foo $LISTOPT $IDOPTION"
 ```
 
 All the normal rules for invoking test program commands apply: extra parameters

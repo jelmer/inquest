@@ -49,7 +49,7 @@ Inquest is under BSD / Apache 2.0 licences.
 Create a config file:
 
 ```sh
-$ touch .testr.conf
+$ touch inquest.toml
 ```
 
 Create a repository:
