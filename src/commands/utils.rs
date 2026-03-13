@@ -278,6 +278,7 @@ mod tests {
         assert_eq!(commit, None);
     }
 
+    #[cfg(feature = "tdb")]
     #[test]
     fn test_store_run_metadata() {
         let temp = TempDir::new().unwrap();

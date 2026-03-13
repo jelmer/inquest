@@ -218,6 +218,7 @@ mod tests {
         assert!(ui.output.iter().any(|s| s.contains("Failed: 0")));
     }
 
+    #[cfg(feature = "tdb")]
     #[test]
     fn test_last_command_with_git_commit_pristine() {
         let temp = TempDir::new().unwrap();
@@ -259,6 +260,7 @@ mod tests {
             .any(|s| s == "Git commit: abc123def456789012345678901234567890abcd"));
     }
 
+    #[cfg(feature = "tdb")]
     #[test]
     fn test_last_command_with_git_commit_dirty() {
         let temp = TempDir::new().unwrap();

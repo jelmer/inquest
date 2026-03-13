@@ -320,6 +320,7 @@ impl FileRepository {
         Ok(result)
     }
 
+    #[cfg(feature = "tdb")]
     fn tdb_fetch_string(tdb: &trivialdb::Tdb, key: &str) -> Result<Option<String>> {
         match tdb.fetch(key.as_bytes()) {
             Ok(Some(value)) => Ok(Some(String::from_utf8_lossy(&value).to_string())),
@@ -331,6 +332,7 @@ impl FileRepository {
         }
     }
 
+    #[cfg(feature = "tdb")]
     fn tdb_store(tdb: &mut trivialdb::Tdb, key: &str, value: &str) -> Result<()> {
         tdb.store(key.as_bytes(), value.as_bytes(), None)
             .map_err(|e| {
@@ -341,6 +343,7 @@ impl FileRepository {
             })
     }
 
+    #[cfg(feature = "tdb")]
     fn open_metadata_tdb(&self, create: bool) -> Result<trivialdb::Tdb> {
         let path = self.path.join("metadata.tdb");
         let flags = if create {
@@ -503,6 +506,7 @@ impl Repository for FileRepository {
         Ok(self.list_run_ids()?.len())
     }
 
+    #[cfg(feature = "tdb")]
     fn get_run_metadata(&self, run_id: &str) -> Result<Option<crate::repository::RunMetadata>> {
         let tdb = match self.open_metadata_tdb(false) {
             Ok(tdb) => tdb,
@@ -524,6 +528,12 @@ impl Repository for FileRepository {
         }
     }
 
+    #[cfg(not(feature = "tdb"))]
+    fn get_run_metadata(&self, _run_id: &str) -> Result<Option<crate::repository::RunMetadata>> {
+        Ok(None)
+    }
+
+    #[cfg(feature = "tdb")]
     fn set_run_metadata(
         &mut self,
         run_id: &str,
@@ -563,6 +573,16 @@ impl Repository for FileRepository {
         Ok(())
     }
 
+    #[cfg(not(feature = "tdb"))]
+    fn set_run_metadata(
+        &mut self,
+        _run_id: &str,
+        _metadata: &crate::repository::RunMetadata,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(feature = "tdb")]
     fn get_runs_for_git_commit(&self, commit: &str) -> Result<Vec<String>> {
         let tdb = match self.open_metadata_tdb(false) {
             Ok(tdb) => tdb,
@@ -573,6 +593,11 @@ impl Repository for FileRepository {
             Some(value) => Ok(value.split(',').map(|s| s.to_string()).collect()),
             None => Ok(Vec::new()),
         }
+    }
+
+    #[cfg(not(feature = "tdb"))]
+    fn get_runs_for_git_commit(&self, _commit: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
     }
 }
 
@@ -1130,6 +1155,7 @@ mod tests {
         assert_eq!(failing.len(), 100);
     }
 
+    #[cfg(feature = "tdb")]
     #[test]
     fn test_metadata_storage() {
         let temp = TempDir::new().unwrap();
@@ -1168,6 +1194,7 @@ mod tests {
         assert_eq!(repo.get_run_metadata("99").unwrap(), None);
     }
 
+    #[cfg(feature = "tdb")]
     #[test]
     fn test_metadata_dirty_tree() {
         let temp = TempDir::new().unwrap();
@@ -1191,6 +1218,7 @@ mod tests {
         assert_eq!(stored.git_dirty, Some(true));
     }
 
+    #[cfg(feature = "tdb")]
     #[test]
     fn test_metadata_reverse_index() {
         let temp = TempDir::new().unwrap();
@@ -1241,6 +1269,7 @@ mod tests {
         assert!(runs.is_empty());
     }
 
+    #[cfg(feature = "tdb")]
     #[test]
     fn test_metadata_backwards_compatible() {
         // Old repositories without metadata.tdb should return None
