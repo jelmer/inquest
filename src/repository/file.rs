@@ -5,7 +5,9 @@
 //! - next-stream: counter for run IDs
 //! - 0, 1, 2, ...: individual test run files (subunit format)
 //! - failing: synthetic run containing current failures
-//! - times.dbm: test timing database (NOT YET IMPLEMENTED - will use different format)
+//! - times.dbm: test timing database (SQLite or GDBM format, for Python compat)
+//! - metadata.tdb: TDB database for run metadata (inquest extension, optional)
+//!   Keys: "run:<id>" (JSON), "git_commit:<sha>" (reverse index)
 
 use crate::error::{Error, Result};
 use crate::repository::{Repository, RepositoryFactory, TestId, TestResult, TestRun};
@@ -318,6 +320,47 @@ impl FileRepository {
         Ok(result)
     }
 
+    #[cfg(feature = "tdb")]
+    fn tdb_fetch_string(tdb: &trivialdb::Tdb, key: &str) -> Result<Option<String>> {
+        match tdb.fetch(key.as_bytes()) {
+            Ok(Some(value)) => Ok(Some(String::from_utf8_lossy(&value).to_string())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(Error::Io(std::io::Error::other(format!(
+                "Failed to read from metadata.tdb: {}",
+                e
+            )))),
+        }
+    }
+
+    #[cfg(feature = "tdb")]
+    fn tdb_store(tdb: &mut trivialdb::Tdb, key: &str, value: &str) -> Result<()> {
+        tdb.store(key.as_bytes(), value.as_bytes(), None)
+            .map_err(|e| {
+                Error::Io(std::io::Error::other(format!(
+                    "Failed to write to metadata.tdb: {}",
+                    e
+                )))
+            })
+    }
+
+    #[cfg(feature = "tdb")]
+    fn open_metadata_tdb(&self, create: bool) -> Result<trivialdb::Tdb> {
+        let path = self.path.join("metadata.tdb");
+        let flags = if create {
+            trivialdb::O_RDWR | trivialdb::O_CREAT
+        } else {
+            trivialdb::O_RDONLY
+        };
+        trivialdb::Tdb::open(&path, None, trivialdb::Flags::empty(), flags, 0o644).ok_or_else(
+            || {
+                Error::Io(std::io::Error::other(format!(
+                    "Failed to open metadata.tdb: {}",
+                    path.display()
+                )))
+            },
+        )
+    }
+
     fn update_test_times_impl(&mut self, times: &HashMap<TestId, Duration>) -> Result<()> {
         if times.is_empty() {
             return Ok(());
@@ -461,6 +504,100 @@ impl Repository for FileRepository {
 
     fn count(&self) -> Result<usize> {
         Ok(self.list_run_ids()?.len())
+    }
+
+    #[cfg(feature = "tdb")]
+    fn get_run_metadata(&self, run_id: &str) -> Result<Option<crate::repository::RunMetadata>> {
+        let tdb = match self.open_metadata_tdb(false) {
+            Ok(tdb) => tdb,
+            Err(_) => return Ok(None), // No metadata.tdb yet
+        };
+        let key = format!("run:{}", run_id);
+        match Self::tdb_fetch_string(&tdb, &key)? {
+            Some(json) => {
+                let metadata: crate::repository::RunMetadata = serde_json::from_str(&json)
+                    .map_err(|e| {
+                        Error::InvalidFormat(format!(
+                            "Invalid metadata JSON for run {}: {}",
+                            run_id, e
+                        ))
+                    })?;
+                Ok(Some(metadata))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[cfg(not(feature = "tdb"))]
+    fn get_run_metadata(&self, _run_id: &str) -> Result<Option<crate::repository::RunMetadata>> {
+        Ok(None)
+    }
+
+    #[cfg(feature = "tdb")]
+    fn set_run_metadata(
+        &mut self,
+        run_id: &str,
+        metadata: &crate::repository::RunMetadata,
+    ) -> Result<()> {
+        let mut tdb = self.open_metadata_tdb(true)?;
+
+        // Store metadata as JSON
+        let json = serde_json::to_string(metadata).map_err(|e| {
+            Error::InvalidFormat(format!(
+                "Failed to serialize metadata for run {}: {}",
+                run_id, e
+            ))
+        })?;
+        let key = format!("run:{}", run_id);
+        Self::tdb_store(&mut tdb, &key, &json)?;
+
+        // Update reverse index: git_commit:<sha> -> comma-separated run IDs
+        if let Some(ref commit) = metadata.git_commit {
+            let reverse_key = format!("git_commit:{}", commit);
+            let existing = Self::tdb_fetch_string(&tdb, &reverse_key)?;
+            let new_value = match existing {
+                Some(existing) => {
+                    // Avoid duplicates
+                    let ids: Vec<&str> = existing.split(',').collect();
+                    if ids.contains(&run_id) {
+                        existing
+                    } else {
+                        format!("{},{}", existing, run_id)
+                    }
+                }
+                None => run_id.to_string(),
+            };
+            Self::tdb_store(&mut tdb, &reverse_key, &new_value)?;
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(feature = "tdb"))]
+    fn set_run_metadata(
+        &mut self,
+        _run_id: &str,
+        _metadata: &crate::repository::RunMetadata,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(feature = "tdb")]
+    fn get_runs_for_git_commit(&self, commit: &str) -> Result<Vec<String>> {
+        let tdb = match self.open_metadata_tdb(false) {
+            Ok(tdb) => tdb,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let key = format!("git_commit:{}", commit);
+        match Self::tdb_fetch_string(&tdb, &key)? {
+            Some(value) => Ok(value.split(',').map(|s| s.to_string()).collect()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    #[cfg(not(feature = "tdb"))]
+    fn get_runs_for_git_commit(&self, _commit: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
     }
 }
 
@@ -1016,6 +1153,138 @@ mod tests {
         // Should successfully read large failing file using mmap
         let failing = file_repo.get_failing_tests().unwrap();
         assert_eq!(failing.len(), 100);
+    }
+
+    #[cfg(feature = "tdb")]
+    #[test]
+    fn test_metadata_storage() {
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        // No metadata stored yet
+        assert_eq!(repo.get_run_metadata("0").unwrap(), None);
+
+        // Insert a test run
+        let mut run = TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::success("test1"));
+        repo.insert_test_run(run).unwrap();
+
+        // Store metadata (pristine tree)
+        let metadata = crate::repository::RunMetadata {
+            git_commit: Some("abc123def456".to_string()),
+            git_dirty: Some(false),
+            command: Some("python -m pytest".to_string()),
+            concurrency: Some(4),
+            duration_secs: Some(12.5),
+            exit_code: Some(0),
+        };
+        repo.set_run_metadata("0", &metadata).unwrap();
+
+        let stored = repo.get_run_metadata("0").unwrap().unwrap();
+        assert_eq!(stored.git_commit, Some("abc123def456".to_string()));
+        assert_eq!(stored.git_dirty, Some(false));
+        assert_eq!(stored.command, Some("python -m pytest".to_string()));
+        assert_eq!(stored.concurrency, Some(4));
+        assert_eq!(stored.duration_secs, Some(12.5));
+        assert_eq!(stored.exit_code, Some(0));
+
+        // Non-existent run has no metadata
+        assert_eq!(repo.get_run_metadata("99").unwrap(), None);
+    }
+
+    #[cfg(feature = "tdb")]
+    #[test]
+    fn test_metadata_dirty_tree() {
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut run = TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::success("test1"));
+        repo.insert_test_run(run).unwrap();
+
+        let metadata = crate::repository::RunMetadata {
+            git_commit: Some("abc123".to_string()),
+            git_dirty: Some(true),
+            ..Default::default()
+        };
+        repo.set_run_metadata("0", &metadata).unwrap();
+
+        let stored = repo.get_run_metadata("0").unwrap().unwrap();
+        assert_eq!(stored.git_commit, Some("abc123".to_string()));
+        assert_eq!(stored.git_dirty, Some(true));
+    }
+
+    #[cfg(feature = "tdb")]
+    #[test]
+    fn test_metadata_reverse_index() {
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        // Insert two runs with the same commit
+        for i in 0..2 {
+            let mut run = TestRun::new(i.to_string());
+            run.timestamp = chrono::DateTime::from_timestamp(1000000000 + i as i64, 0).unwrap();
+            run.add_result(TestResult::success("test1"));
+            repo.insert_test_run(run).unwrap();
+            repo.set_run_metadata(
+                &i.to_string(),
+                &crate::repository::RunMetadata {
+                    git_commit: Some("abc123".to_string()),
+                    git_dirty: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        // Insert a run with a different commit
+        let mut run = TestRun::new("2".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000002, 0).unwrap();
+        run.add_result(TestResult::success("test1"));
+        repo.insert_test_run(run).unwrap();
+        repo.set_run_metadata(
+            "2",
+            &crate::repository::RunMetadata {
+                git_commit: Some("def456".to_string()),
+                git_dirty: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Check reverse index
+        let runs = repo.get_runs_for_git_commit("abc123").unwrap();
+        assert_eq!(runs, vec!["0", "1"]);
+
+        let runs = repo.get_runs_for_git_commit("def456").unwrap();
+        assert_eq!(runs, vec!["2"]);
+
+        // Unknown commit returns empty
+        let runs = repo.get_runs_for_git_commit("unknown").unwrap();
+        assert!(runs.is_empty());
+    }
+
+    #[cfg(feature = "tdb")]
+    #[test]
+    fn test_metadata_backwards_compatible() {
+        // Old repositories without metadata.tdb should return None
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut run = TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::success("test1"));
+        repo.insert_test_run(run).unwrap();
+
+        // No metadata.tdb was created, so all metadata returns None/empty
+        assert_eq!(repo.get_run_metadata("0").unwrap(), None);
+        assert!(repo.get_runs_for_git_commit("anything").unwrap().is_empty());
     }
 
     #[test]

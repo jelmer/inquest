@@ -226,8 +226,13 @@ The `.testrepository/` directory contains:
 - `format`: File containing format version ("1")
 - `next-stream`: Counter for the next run ID
 - `0`, `1`, `2`, ...: Individual test run files in subunit v2 binary format
+- `failing`: Synthetic run containing only the currently failing tests
+- `times.dbm`: Test timing database (SQLite or GDBM, for Python testrepository compatibility)
+- `metadata.tdb`: TDB database for run metadata (inquest extension, optional)
 
-This format is **fully compatible** with the Python testrepository tool, allowing you to use both implementations interchangeably.
+The base format (`format`, `next-stream`, numbered run files, `failing`, `times.dbm`) is **fully compatible** with the Python testrepository tool, allowing you to use both implementations interchangeably.
+
+The `metadata.tdb` file is an inquest extension that stores additional per-run information such as the git commit SHA and whether the working tree was dirty. It also maintains a reverse index from commit SHAs to run IDs. Old repositories without this file are handled gracefully.
 
 ## Compatibility
 

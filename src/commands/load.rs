@@ -125,6 +125,17 @@ impl Command for LoadCommand {
         // Update test times
         crate::commands::utils::update_test_times_from_run(&mut repo, &test_run)?;
 
+        // Store metadata (git info only for load command)
+        crate::commands::utils::store_run_metadata(
+            &mut repo,
+            &run_id,
+            self.base_path.as_deref(),
+            None,
+            None,
+            None,
+            None,
+        )?;
+
         ui.output(&format!(
             "Loaded {} test(s) as run {}",
             test_run.total_tests(),

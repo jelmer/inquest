@@ -508,12 +508,18 @@ impl RunCommand {
         crate::commands::utils::update_repository_failing_tests(repo, &test_run, self.partial)?;
         crate::commands::utils::update_test_times_from_run(repo, &test_run)?;
 
-        // Return exit code based on test command exit code
-        if status.success() {
-            Ok(0)
-        } else {
-            Ok(1)
-        }
+        let exit_code = if status.success() { 0 } else { 1 };
+        crate::commands::utils::store_run_metadata(
+            repo,
+            &run_id,
+            self.base_path.as_deref(),
+            Some(&cmd_str),
+            Some(1),
+            None,
+            Some(exit_code),
+        )?;
+
+        Ok(exit_code)
     }
 
     /// Run tests serially (single process)
@@ -560,6 +566,8 @@ impl RunCommand {
                 .unwrap()
                 .progress_chars("█▓▒░  "),
         );
+
+        let start_time = std::time::Instant::now();
 
         // Spawn test command with both stdout and stderr piped
         let mut child = Command::new("sh")
@@ -697,19 +705,31 @@ impl RunCommand {
 
         progress_bar.finish_and_clear();
 
+        let duration = start_time.elapsed();
+
         // Update failing tests and test times
         crate::commands::utils::update_repository_failing_tests(repo, &test_run, self.partial)?;
         crate::commands::utils::update_test_times_from_run(repo, &test_run)?;
 
+        let exit_code = if test_run.count_failures() > 0 || command_failed {
+            1
+        } else {
+            0
+        };
+        crate::commands::utils::store_run_metadata(
+            repo,
+            &run_id,
+            self.base_path.as_deref(),
+            Some(&cmd_str),
+            Some(1),
+            Some(duration),
+            Some(exit_code),
+        )?;
+
         // Display summary
         crate::commands::utils::display_test_summary(ui, &run_id, &test_run)?;
 
-        // Return exit code based on results
-        if test_run.count_failures() > 0 || command_failed {
-            Ok(1)
-        } else {
-            Ok(0)
-        }
+        Ok(exit_code)
     }
 
     /// Run tests in parallel across multiple workers
@@ -725,6 +745,8 @@ impl RunCommand {
         use std::process::{Command, Stdio};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+
+        let start_time = std::time::Instant::now();
 
         let output_filter = if self.all_output {
             subunit_stream::OutputFilter::All
@@ -1025,9 +1047,26 @@ impl RunCommand {
             combined_run.add_result(result);
         }
 
+        let duration = start_time.elapsed();
+
         // Update failing tests and test times
         crate::commands::utils::update_repository_failing_tests(repo, &combined_run, self.partial)?;
         crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
+
+        let exit_code = if combined_run.count_failures() > 0 || any_failed {
+            1
+        } else {
+            0
+        };
+        crate::commands::utils::store_run_metadata(
+            repo,
+            &run_id_for_display,
+            self.base_path.as_deref(),
+            None, // parallel runs use multiple commands
+            Some(concurrency),
+            Some(duration),
+            Some(exit_code),
+        )?;
 
         // Dispose instances (done explicitly before drop to handle errors)
         drop(dispose_guard);
@@ -1039,12 +1078,7 @@ impl RunCommand {
         // Display summary
         crate::commands::utils::display_test_summary(ui, &run_id_for_display, &combined_run)?;
 
-        // Return exit code based on results
-        if combined_run.count_failures() > 0 || any_failed {
-            Ok(1)
-        } else {
-            Ok(0)
-        }
+        Ok(exit_code)
     }
 
     /// Run each test in complete isolation (one test per process)
@@ -1057,6 +1091,8 @@ impl RunCommand {
     ) -> Result<i32> {
         use std::collections::HashMap;
         use std::process::{Command, Stdio};
+
+        let start_time = std::time::Instant::now();
 
         // Get the base run ID - each isolated test will write to its own file
         let base_run_id = repo.get_next_run_id()?;
@@ -1122,19 +1158,31 @@ impl RunCommand {
             combined_run.add_result(result);
         }
 
+        let duration = start_time.elapsed();
+
         // Update failing tests and test times
         crate::commands::utils::update_repository_failing_tests(repo, &combined_run, self.partial)?;
         crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
 
+        let exit_code = if combined_run.count_failures() > 0 || any_failed {
+            1
+        } else {
+            0
+        };
+        crate::commands::utils::store_run_metadata(
+            repo,
+            &run_id_for_display,
+            self.base_path.as_deref(),
+            None, // isolated runs use multiple commands
+            Some(1),
+            Some(duration),
+            Some(exit_code),
+        )?;
+
         // Display summary
         crate::commands::utils::display_test_summary(ui, &run_id_for_display, &combined_run)?;
 
-        // Return exit code based on results
-        if combined_run.count_failures() > 0 || any_failed {
-            Ok(1)
-        } else {
-            Ok(0)
-        }
+        Ok(exit_code)
     }
 }
 

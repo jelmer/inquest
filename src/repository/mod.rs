@@ -13,6 +13,32 @@ pub mod test_run;
 
 pub use test_run::{TestId, TestResult, TestRun, TestStatus};
 
+/// Metadata associated with a test run.
+///
+/// Stored in `metadata.tdb` as a JSON value under the key `run:<id>`.
+/// A reverse index `git_commit:<sha>` maps commit SHAs to run IDs.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RunMetadata {
+    /// The git commit SHA at the time this test run was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_commit: Option<String>,
+    /// Whether the git working tree had uncommitted changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_dirty: Option<bool>,
+    /// The command that was executed to run the tests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Number of parallel workers used (1 = serial).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<usize>,
+    /// Total wall-clock duration of the test run, in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+    /// Exit code of the test command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
 /// Abstract repository trait for test result storage
 ///
 /// # Examples
@@ -159,6 +185,21 @@ pub trait Repository {
 
     /// Get the number of test runs in the repository
     fn count(&self) -> Result<usize>;
+
+    /// Get metadata for a test run.
+    ///
+    /// Returns `Ok(None)` if no metadata was recorded for this run
+    /// (e.g., for runs from older repositories).
+    fn get_run_metadata(&self, run_id: &str) -> Result<Option<RunMetadata>>;
+
+    /// Store metadata for a test run.
+    ///
+    /// If the run already has metadata, it is replaced.
+    /// Also maintains reverse indexes (e.g., git_commit:<sha> → run IDs).
+    fn set_run_metadata(&mut self, run_id: &str, metadata: &RunMetadata) -> Result<()>;
+
+    /// Get all run IDs associated with a given git commit SHA.
+    fn get_runs_for_git_commit(&self, commit: &str) -> Result<Vec<String>>;
 }
 
 /// Factory trait for creating and opening repositories

@@ -15,14 +15,15 @@ jobs:
 
       - name: Install system dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y libgdbm-dev libsqlite3-dev
+        run: sudo apt-get update && sudo apt-get install -y libgdbm-dev libsqlite3-dev libtdb-dev
 
       - name: Install system dependencies (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          brew install gdbm
-          echo "LIBRARY_PATH=$(brew --prefix gdbm)/lib" >> $GITHUB_ENV
-          echo "CPATH=$(brew --prefix gdbm)/include" >> $GITHUB_ENV
+          brew install gdbm tdb
+          echo "LIBRARY_PATH=$(brew --prefix gdbm)/lib:$(brew --prefix tdb)/lib" >> $GITHUB_ENV
+          echo "CPATH=$(brew --prefix gdbm)/include:$(brew --prefix tdb)/include" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$(brew --prefix tdb)/lib/pkgconfig" >> $GITHUB_ENV
 
       - name: Install system dependencies (Windows)
         if: matrix.os == 'windows-latest'
