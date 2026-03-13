@@ -1,6 +1,6 @@
 //! Load test results from a subunit stream into the repository
 
-use crate::commands::utils::{init_repository, open_repository};
+use crate::commands::utils::open_or_init_repository;
 use crate::commands::Command;
 use crate::error::Result;
 use crate::subunit_stream;
@@ -77,14 +77,8 @@ impl LoadCommand {
 
 impl Command for LoadCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
-        // Open repository
-        let mut repo = if self.force_init {
-            // Try to open, if it fails, initialize
-            open_repository(self.base_path.as_deref())
-                .or_else(|_| init_repository(self.base_path.as_deref()))?
-        } else {
-            open_repository(self.base_path.as_deref())?
-        };
+        // Open repository (auto-init if config file exists or --force-init)
+        let mut repo = open_or_init_repository(self.base_path.as_deref(), self.force_init, ui)?;
 
         // Begin the test run and get a writer for streaming raw bytes
         let (run_id, mut raw_writer) = repo.begin_test_run_raw()?;

@@ -54,10 +54,7 @@ impl TestrConfig {
         let contents = fs::read_to_string(path)
             .map_err(|e| Error::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         if file_name.ends_with(".toml") {
             Self::parse_toml(&contents)
@@ -351,11 +348,7 @@ test_command = "python -m test $IDOPTION"
     fn test_find_in_directory_inquest_toml() {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("inquest.toml");
-        std::fs::write(
-            &config_path,
-            r#"test_command = "python -m test""#,
-        )
-        .unwrap();
+        std::fs::write(&config_path, r#"test_command = "python -m test""#).unwrap();
 
         let (config, path) = TestrConfig::find_in_directory(temp_dir.path()).unwrap();
         assert_eq!(config.test_command, "python -m test");
@@ -366,11 +359,7 @@ test_command = "python -m test $IDOPTION"
     fn test_find_in_directory_dot_inquest_toml() {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join(".inquest.toml");
-        std::fs::write(
-            &config_path,
-            r#"test_command = "python -m test""#,
-        )
-        .unwrap();
+        std::fs::write(&config_path, r#"test_command = "python -m test""#).unwrap();
 
         let (config, path) = TestrConfig::find_in_directory(temp_dir.path()).unwrap();
         assert_eq!(config.test_command, "python -m test");
@@ -381,11 +370,7 @@ test_command = "python -m test $IDOPTION"
     fn test_find_in_directory_testr_conf() {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join(".testr.conf");
-        std::fs::write(
-            &config_path,
-            "[DEFAULT]\ntest_command=python -m test\n",
-        )
-        .unwrap();
+        std::fs::write(&config_path, "[DEFAULT]\ntest_command=python -m test\n").unwrap();
 
         let (config, path) = TestrConfig::find_in_directory(temp_dir.path()).unwrap();
         assert_eq!(config.test_command, "python -m test");
