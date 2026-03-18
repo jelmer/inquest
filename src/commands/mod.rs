@@ -17,7 +17,7 @@ pub mod quickstart;
 pub mod run;
 pub mod slowest;
 pub mod stats;
-mod utils;
+pub mod utils;
 
 pub use analyze_isolation::AnalyzeIsolationCommand;
 pub use failing::FailingCommand;
