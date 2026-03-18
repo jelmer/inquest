@@ -6,7 +6,7 @@ use std::fmt;
 use std::time::Duration;
 
 /// Unique identifier for a test
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct TestId(String);
 
 impl TestId {
@@ -55,7 +55,7 @@ impl std::borrow::Borrow<str> for TestId {
 }
 
 /// Status of a test execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum TestStatus {
     /// Test passed successfully.
     Success,
@@ -110,7 +110,7 @@ impl fmt::Display for TestStatus {
 ///
 /// Contains all information about a test's outcome including status,
 /// timing, error messages, and associated metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TestResult {
     /// Unique identifier for the test.
     pub test_id: TestId,
@@ -195,7 +195,7 @@ impl TestResult {
 }
 
 /// Reason why a subunit stream was interrupted before completion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum StreamInterruption {
     /// Too many consecutive parse errors in the stream.
     ParseErrors(usize),
@@ -220,7 +220,7 @@ impl fmt::Display for StreamInterruption {
 ///
 /// Represents a single execution of a test suite with all test results,
 /// timing information, and metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TestRun {
     /// Unique identifier for this test run.
     pub id: String,
