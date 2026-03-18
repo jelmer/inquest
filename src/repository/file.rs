@@ -1074,4 +1074,44 @@ mod tests {
             "test3 should remain"
         );
     }
+
+    #[test]
+    fn test_update_failing_preserves_tests_missing_from_output() {
+        // Regression test: when re-running only failing tests (--failing),
+        // the test runner may not produce output for all requested tests.
+        // Using update (partial) mode preserves those tests as still-failing,
+        // while replace (non-partial) mode would drop them.
+        let temp = TempDir::new().unwrap();
+        let factory = FileRepositoryFactory;
+        let mut file_repo = factory.initialise(temp.path()).unwrap();
+
+        // Initial run: 3 tests fail
+        let mut run1 = TestRun::new("0".to_string());
+        run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        for i in 1..=3 {
+            run1.add_result(TestResult::failure(format!("test{}", i), "Failed"));
+        }
+        let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run1, &mut writer).unwrap();
+        drop(writer);
+        file_repo.replace_failing_tests(&run1).unwrap();
+        assert_eq!(file_repo.get_failing_tests().unwrap().len(), 3);
+
+        // Second run: only test1 appears in output (test2/test3 missing)
+        let mut run2 = TestRun::new("1".to_string());
+        run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
+        run2.add_result(TestResult::failure("test1", "Still failing"));
+        let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();
+        crate::subunit_stream::write_stream(&run2, &mut writer).unwrap();
+        drop(writer);
+
+        // update mode (used by --failing) preserves test2/test3
+        file_repo.update_failing_tests(&run2).unwrap();
+
+        let failing = file_repo.get_failing_tests().unwrap();
+        assert_eq!(failing.len(), 3);
+        for i in 1..=3 {
+            assert!(failing.contains(&TestId::new(format!("test{}", i))));
+        }
+    }
 }
