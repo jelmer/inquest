@@ -275,7 +275,7 @@ fn main() {
         } => {
             let cmd = RunCommand::with_all_options(
                 cli.directory,
-                partial,
+                partial || failing, // --failing implies partial mode
                 failing,
                 force_init,
                 load_list,
