@@ -77,6 +77,13 @@ impl Command for LogCommand {
             return Ok(1);
         }
 
+        if let Some(interruption) = &test_run.interruption {
+            ui.output(&format!(
+                "WARNING: Stream interrupted ({}), results may be incomplete",
+                interruption
+            ))?;
+        }
+
         for (i, result) in matching_results.iter().enumerate() {
             if i > 0 {
                 ui.output("")?;

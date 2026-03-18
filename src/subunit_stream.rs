@@ -7,7 +7,7 @@
 //! for improved performance with large subunit streams.
 
 use crate::error::{Error, Result};
-use crate::repository::{TestId, TestResult, TestRun, TestStatus};
+use crate::repository::{StreamInterruption, TestId, TestResult, TestRun, TestStatus};
 use std::io::{Read, Write};
 use subunit::io::sync::iter_stream;
 use subunit::serialize::Serializable;
@@ -151,8 +151,8 @@ where
                 // Continue reading to drain the pipe (prevents BrokenPipeError in child process)
                 consecutive_errors += 1;
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                    eprintln!("WARNING: Too many consecutive parsing errors in run {}, stopping early (collected {} results)",
-                             run_id, test_run.results.len());
+                    test_run.interruption =
+                        Some(StreamInterruption::ParseErrors(consecutive_errors));
                     break;
                 }
                 // Silently skip individual parsing errors to drain the pipe
@@ -166,8 +166,8 @@ where
                 // This prevents BrokenPipeError in the child process that's still writing
                 consecutive_errors += 1;
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                    eprintln!("WARNING: Too many unknown items in run {}, stopping early (collected {} results)",
-                             run_id, test_run.results.len());
+                    test_run.interruption =
+                        Some(StreamInterruption::UnknownItems(consecutive_errors));
                     break;
                 }
                 // Silently skip unknown items to drain the pipe
@@ -402,6 +402,8 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
                 // Continue reading to handle partial data gracefully
                 consecutive_errors += 1;
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    test_run.interruption =
+                        Some(StreamInterruption::ParseErrors(consecutive_errors));
                     break;
                 }
                 continue;
@@ -413,6 +415,8 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
                 // Incomplete or corrupted data - continue reading to handle gracefully
                 consecutive_errors += 1;
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    test_run.interruption =
+                        Some(StreamInterruption::UnknownItems(consecutive_errors));
                     break;
                 }
                 continue;
