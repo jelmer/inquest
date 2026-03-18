@@ -11,7 +11,7 @@ use std::time::Duration;
 pub mod file;
 pub mod test_run;
 
-pub use test_run::{TestId, TestResult, TestRun, TestStatus};
+pub use test_run::{StreamInterruption, TestId, TestResult, TestRun, TestStatus};
 
 /// Abstract repository trait for test result storage
 ///

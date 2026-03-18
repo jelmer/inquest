@@ -125,6 +125,13 @@ impl Command for LoadCommand {
             run_id
         ))?;
 
+        if let Some(interruption) = &test_run.interruption {
+            ui.output(&format!(
+                "WARNING: Stream interrupted ({}), results may be incomplete",
+                interruption
+            ))?;
+        }
+
         if test_run.count_failures() > 0 {
             ui.output(&format!("{} test(s) failed", test_run.count_failures()))?;
             Ok(1)

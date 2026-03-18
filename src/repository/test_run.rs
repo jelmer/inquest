@@ -194,6 +194,28 @@ impl TestResult {
     }
 }
 
+/// Reason why a subunit stream was interrupted before completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamInterruption {
+    /// Too many consecutive parse errors in the stream.
+    ParseErrors(usize),
+    /// Too many consecutive unknown/corrupted items in the stream.
+    UnknownItems(usize),
+}
+
+impl fmt::Display for StreamInterruption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StreamInterruption::ParseErrors(n) => {
+                write!(f, "{} consecutive parse errors", n)
+            }
+            StreamInterruption::UnknownItems(n) => {
+                write!(f, "{} consecutive unknown items", n)
+            }
+        }
+    }
+}
+
 /// A complete test run containing results for multiple tests.
 ///
 /// Represents a single execution of a test suite with all test results,
@@ -208,6 +230,8 @@ pub struct TestRun {
     pub results: HashMap<TestId, TestResult>,
     /// Tags associated with this test run.
     pub tags: Vec<String>,
+    /// If the subunit stream was interrupted, describes why/how.
+    pub interruption: Option<StreamInterruption>,
 }
 
 impl TestRun {
@@ -221,6 +245,7 @@ impl TestRun {
             timestamp: Utc::now(),
             results: HashMap::new(),
             tags: Vec::new(),
+            interruption: None,
         }
     }
 
