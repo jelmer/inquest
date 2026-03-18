@@ -132,6 +132,13 @@ pub fn display_test_summary(ui: &mut dyn UI, run_id: &str, test_run: &TestRun) -
     ui.output(&format!("  Passed:  {}", successes))?;
     ui.output(&format!("  Failed:  {}", failures))?;
 
+    if let Some(interruption) = &test_run.interruption {
+        ui.output(&format!(
+            "  WARNING: Stream interrupted ({}), results may be incomplete",
+            interruption
+        ))?;
+    }
+
     Ok(())
 }
 
