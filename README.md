@@ -154,6 +154,23 @@ Example:
 inq analyze-isolation test.module.TestCase.test_flaky
 ```
 
+### `inq completions <SHELL>`
+
+Generate shell completions for the given shell. Supported shells: `bash`, `zsh`, `fish`, `elvish`, `powershell`.
+
+To enable completions:
+
+```sh
+# Zsh (add to ~/.zshrc)
+eval "$(inq completions zsh)"
+
+# Bash (add to ~/.bashrc)
+eval "$(inq completions bash)"
+
+# Fish (add to ~/.config/fish/config.fish)
+inq completions fish | source
+```
+
 ## Global Options
 
 All commands support:
