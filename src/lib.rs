@@ -74,6 +74,8 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub mod grouping;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod partition;
 pub mod repository;
 pub mod subunit_stream;

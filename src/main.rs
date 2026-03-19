@@ -111,6 +111,10 @@ enum Commands {
         test: String,
     },
 
+    /// Start MCP (Model Context Protocol) server over stdio
+    #[cfg(feature = "mcp")]
+    Mcp,
+
     /// Run tests and load results
     Run {
         /// Run only the tests that failed in the last run
@@ -259,6 +263,21 @@ fn main() {
         Commands::AnalyzeIsolation { test } => {
             let cmd = AnalyzeIsolationCommand::new(cli.directory, test);
             cmd.execute(&mut ui)
+        }
+        #[cfg(feature = "mcp")]
+        Commands::Mcp => {
+            let directory = cli
+                .directory
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            match rt.block_on(inquest::mcp::serve(directory)) {
+                Ok(()) => Ok(0),
+                Err(e) => {
+                    let _ = writeln!(std::io::stderr(), "MCP server error: {}", e);
+                    Ok(1)
+                }
+            }
         }
         Commands::Run {
             failing,
