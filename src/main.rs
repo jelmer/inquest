@@ -1,6 +1,8 @@
 //! inq - Command-line tool for test repository management
 
-use clap::{Parser, Subcommand};
+use clap::builder::ValueHint;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use inquest::commands::*;
 use inquest::error::Result;
 use inquest::ui::UI;
@@ -16,7 +18,7 @@ use inquest::commands::AnalyzeIsolationCommand;
 #[command(disable_help_subcommand = true)]
 struct Cli {
     /// Repository path (defaults to current directory)
-    #[arg(short = 'C', long, global = true)]
+    #[arg(short = 'C', long, global = true, value_hint = ValueHint::DirPath)]
     directory: Option<String>,
 
     #[command(subcommand)]
@@ -51,7 +53,7 @@ enum Commands {
     /// Show results from a test run
     Last {
         /// Run ID to show (defaults to latest; supports negative indices like -1, -2)
-        #[arg(long, short = 'r')]
+        #[arg(long, short = 'r', value_hint = ValueHint::Other)]
         run: Option<String>,
 
         /// Show output as a subunit stream
@@ -92,7 +94,7 @@ enum Commands {
     /// Show logs for individual tests
     Log {
         /// Run ID to show logs from (defaults to latest)
-        #[arg(long, short = 'r')]
+        #[arg(long, short = 'r', value_hint = ValueHint::Other)]
         run: Option<String>,
 
         /// Test ID patterns to match (glob-style wildcards)
@@ -109,6 +111,12 @@ enum Commands {
     AnalyzeIsolation {
         /// The test to analyze for isolation issues
         test: String,
+    },
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
     },
 
     /// Start MCP (Model Context Protocol) server over stdio
@@ -130,7 +138,7 @@ enum Commands {
         partial: bool,
 
         /// Only run tests listed in the named file (one test ID per line)
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::FilePath)]
         load_list: Option<String>,
 
         /// Run tests in parallel across multiple workers (defaults to number of CPUs if no value given)
@@ -263,6 +271,10 @@ fn main() {
         Commands::AnalyzeIsolation { test } => {
             let cmd = AnalyzeIsolationCommand::new(cli.directory, test);
             cmd.execute(&mut ui)
+        }
+        Commands::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "inq", &mut std::io::stdout());
+            Ok(0)
         }
         #[cfg(feature = "mcp")]
         Commands::Mcp => {
