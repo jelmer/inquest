@@ -27,6 +27,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Auto-detect project type and generate inquest.toml
+    Auto,
+
     /// Initialize a new test repository
     Init,
 
@@ -133,6 +136,10 @@ enum Commands {
         #[arg(long)]
         force_init: bool,
 
+        /// Auto-detect project type and generate inquest.toml if missing
+        #[arg(long)]
+        auto: bool,
+
         /// Partial run mode (update failing tests additively)
         #[arg(long)]
         partial: bool,
@@ -197,6 +204,10 @@ fn main() {
     let mut ui = CliUI;
 
     let result = match cli.command {
+        Commands::Auto => {
+            let cmd = AutoCommand::new(cli.directory);
+            cmd.execute(&mut ui)
+        }
         Commands::Init => {
             let cmd = InitCommand::new(cli.directory);
             cmd.execute(&mut ui)
@@ -294,6 +305,7 @@ fn main() {
         Commands::Run {
             failing,
             force_init,
+            auto,
             partial,
             load_list,
             parallel,
@@ -309,6 +321,7 @@ fn main() {
                 partial || failing, // --failing implies partial mode
                 failing,
                 force_init,
+                auto,
                 load_list,
                 parallel,
                 until_failure,

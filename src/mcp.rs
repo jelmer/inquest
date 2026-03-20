@@ -308,8 +308,9 @@ impl InquestMcpService {
             Some(base.to_string_lossy().to_string()),
             partial,
             failing_only,
-            true, // force_init
-            None, // load_list
+            true,  // force_init
+            false, // auto
+            None,  // load_list
             params.0.concurrency,
             false, // until_failure
             false, // isolated

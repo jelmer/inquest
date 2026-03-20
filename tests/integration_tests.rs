@@ -334,6 +334,7 @@ test_command=python3 -c "import sys; import time; sys.stdout.buffer.write(b'\xb3
         false,   // partial
         false,   // failing
         false,   // force_init
+        false,   // auto
         None,    // load_list
         Some(2), // concurrency
         false,   // until_failure
@@ -408,6 +409,7 @@ test_command=echo ""
         false, // partial
         false, // failing
         false, // force_init
+        false, // auto
         None,  // load_list
         None,  // concurrency
         true,  // until_failure
@@ -449,6 +451,7 @@ test_command=echo ""
         false, // partial
         false, // failing
         false, // force_init
+        false, // auto
         None,  // load_list
         None,  // concurrency
         false, // until_failure
