@@ -263,6 +263,7 @@ pub struct RunCommand {
     failing_only: bool,
     force_init: bool,
     partial: bool,
+    auto: bool,
     load_list: Option<String>,
     concurrency: Option<usize>,
     until_failure: bool,
@@ -284,6 +285,7 @@ impl RunCommand {
             failing_only: false,
             force_init: false,
             partial: false,
+            auto: false,
             load_list: None,
             concurrency: None,
             until_failure: false,
@@ -305,6 +307,7 @@ impl RunCommand {
             failing_only: true,
             force_init: false,
             partial: true, // --failing implies partial mode
+            auto: false,
             load_list: None,
             concurrency: None,
             until_failure: false,
@@ -327,6 +330,7 @@ impl RunCommand {
             failing_only,
             force_init: true,
             partial: failing_only, // --failing implies partial mode
+            auto: false,
             load_list: None,
             concurrency: None,
             until_failure: false,
@@ -356,6 +360,7 @@ impl RunCommand {
             failing_only,
             force_init,
             partial,
+            auto: false,
             load_list: None,
             concurrency: None,
             until_failure: false,
@@ -388,6 +393,7 @@ impl RunCommand {
         partial: bool,
         failing_only: bool,
         force_init: bool,
+        auto: bool,
         load_list: Option<String>,
         concurrency: Option<usize>,
         until_failure: bool,
@@ -402,6 +408,7 @@ impl RunCommand {
             failing_only,
             force_init,
             partial,
+            auto,
             load_list,
             concurrency,
             until_failure,
@@ -1142,8 +1149,18 @@ impl Command for RunCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
         let base = Path::new(self.base_path.as_deref().unwrap_or("."));
 
+        // Auto-detect and generate config if --auto and no config exists yet
+        if self.auto && crate::config::TestrConfig::find_in_directory(base).is_err() {
+            let auto_cmd = crate::commands::auto::AutoCommand::new(self.base_path.clone());
+            let exit_code = auto_cmd.execute(ui)?;
+            if exit_code != 0 {
+                return Ok(exit_code);
+            }
+        }
+
         // Open repository (auto-init if config file exists or --force-init)
-        let mut repo = open_or_init_repository(self.base_path.as_deref(), self.force_init, ui)?;
+        let mut repo =
+            open_or_init_repository(self.base_path.as_deref(), self.force_init || self.auto, ui)?;
 
         // Load test command configuration
         let test_cmd = TestCommand::from_directory(base)?;
