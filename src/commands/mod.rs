@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::ui::UI;
 
 pub mod analyze_isolation;
+pub mod auto;
 pub mod failing;
 pub mod help;
 pub mod init;
@@ -20,6 +21,7 @@ pub mod stats;
 pub mod utils;
 
 pub use analyze_isolation::AnalyzeIsolationCommand;
+pub use auto::AutoCommand;
 pub use failing::FailingCommand;
 pub use help::HelpCommand;
 pub use init::InitCommand;

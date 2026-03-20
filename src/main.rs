@@ -27,6 +27,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Auto-detect project type and generate inquest.toml
+    Auto,
+
     /// Initialize a new test repository
     Init,
 
@@ -197,6 +200,10 @@ fn main() {
     let mut ui = CliUI;
 
     let result = match cli.command {
+        Commands::Auto => {
+            let cmd = AutoCommand::new(cli.directory);
+            cmd.execute(&mut ui)
+        }
         Commands::Init => {
             let cmd = InitCommand::new(cli.directory);
             cmd.execute(&mut ui)
