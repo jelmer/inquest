@@ -136,6 +136,10 @@ enum Commands {
         #[arg(long)]
         force_init: bool,
 
+        /// Auto-detect project type and generate inquest.toml if missing
+        #[arg(long)]
+        auto: bool,
+
         /// Partial run mode (update failing tests additively)
         #[arg(long)]
         partial: bool,
@@ -301,6 +305,7 @@ fn main() {
         Commands::Run {
             failing,
             force_init,
+            auto,
             partial,
             load_list,
             parallel,
@@ -316,6 +321,7 @@ fn main() {
                 partial || failing, // --failing implies partial mode
                 failing,
                 force_init,
+                auto,
                 load_list,
                 parallel,
                 until_failure,

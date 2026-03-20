@@ -347,6 +347,7 @@ test_command=echo "test1"
         false,
         false,
         false,
+        false, // auto
         Some("/nonexistent/list.txt".to_string()),
         None,
         false, // until_failure
