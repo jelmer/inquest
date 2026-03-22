@@ -228,6 +228,10 @@ pub struct RunMetadata {
     pub command: Option<String>,
     /// Number of parallel workers used.
     pub concurrency: Option<u32>,
+    /// Wall-clock duration of the run in seconds.
+    pub duration_secs: Option<f64>,
+    /// Exit code of the test command.
+    pub exit_code: Option<i32>,
 }
 
 /// A complete test run containing results for multiple tests.

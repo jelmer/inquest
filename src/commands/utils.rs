@@ -120,12 +120,14 @@ pub fn update_test_times_from_run(
     Ok(())
 }
 
-/// Capture and store run metadata (git commit, command, concurrency)
+/// Capture and store run metadata (git commit, command, concurrency, duration, exit code)
 pub fn store_run_metadata(
     repo: &mut Box<dyn Repository>,
     run_id: &str,
     command: Option<&str>,
     concurrency: Option<u32>,
+    duration: Option<std::time::Duration>,
+    exit_code: Option<i32>,
 ) -> Result<()> {
     let git_commit = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -145,6 +147,8 @@ pub fn store_run_metadata(
         git_commit,
         command: command.map(|s| s.to_string()),
         concurrency,
+        duration_secs: duration.map(|d| d.as_secs_f64()),
+        exit_code,
     };
 
     repo.set_run_metadata(run_id, metadata)
