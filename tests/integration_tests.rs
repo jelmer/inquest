@@ -64,8 +64,8 @@ fn test_full_workflow_init_load_last() {
     assert!(ui.output[0].contains("Initialized"));
 
     // Verify repository was created
-    assert!(temp.path().join(".testrepository").exists());
-    assert!(temp.path().join(".testrepository/format").exists());
+    assert!(temp.path().join(".inquest").exists());
+    assert!(temp.path().join(".inquest/format").exists());
 
     // Step 2: Load a test run
     let mut test_run = TestRun::new("0".to_string());
@@ -76,7 +76,7 @@ fn test_full_workflow_init_load_last() {
 
     // Load the test run directly using the repository API
     // (In real usage, this would be done via LoadCommand reading from stdin)
-    let factory = inquest::repository::file::FileRepositoryFactory;
+    let factory = inquest::repository::inquest::InquestRepositoryFactory;
     let mut repo = factory.open(temp.path()).unwrap();
     repo.insert_test_run(test_run).unwrap();
 
@@ -132,7 +132,7 @@ fn test_workflow_with_failing_tests() {
     run1.add_result(TestResult::failure("test2", "Error"));
     run1.add_result(TestResult::failure("test3", "Error"));
 
-    let factory = inquest::repository::file::FileRepositoryFactory;
+    let factory = inquest::repository::inquest::InquestRepositoryFactory;
     let mut repo = factory.open(temp.path()).unwrap();
     repo.insert_test_run_partial(run1, false).unwrap();
 
@@ -176,7 +176,7 @@ fn test_workflow_partial_mode() {
     let init_cmd = InitCommand::new(Some(base_path.clone()));
     init_cmd.execute(&mut ui).unwrap();
 
-    let factory = inquest::repository::file::FileRepositoryFactory;
+    let factory = inquest::repository::inquest::InquestRepositoryFactory;
     let mut repo = factory.open(temp.path()).unwrap();
 
     // First full run
@@ -235,7 +235,7 @@ fn test_workflow_times_database() {
     let init_cmd = InitCommand::new(Some(base_path));
     init_cmd.execute(&mut ui).unwrap();
 
-    let factory = inquest::repository::file::FileRepositoryFactory;
+    let factory = inquest::repository::inquest::InquestRepositoryFactory;
     let mut repo = factory.open(temp.path()).unwrap();
 
     // Insert run with durations
@@ -250,12 +250,27 @@ fn test_workflow_times_database() {
 
     repo.insert_test_run(run).unwrap();
 
-    // Verify times.dbm file was created
-    let times_path = temp.path().join(".testrepository/times.dbm");
-    assert!(times_path.exists());
-
-    // Verify we can read times back
-    // (This would require accessing the FileRepository directly, which we do via downcast in unit tests)
+    // Verify times were stored in the database
+    let test_ids = vec![
+        inquest::repository::TestId::new("test1"),
+        inquest::repository::TestId::new("test2"),
+    ];
+    let times = repo.get_test_times_for_ids(&test_ids).unwrap();
+    assert_eq!(times.len(), 2);
+    assert_eq!(
+        times
+            .get(&inquest::repository::TestId::new("test1"))
+            .unwrap()
+            .as_secs_f64(),
+        1.5
+    );
+    assert_eq!(
+        times
+            .get(&inquest::repository::TestId::new("test2"))
+            .unwrap()
+            .as_secs_f64(),
+        0.3
+    );
 }
 
 #[test]
@@ -268,7 +283,7 @@ fn test_workflow_list_flag() {
     let init_cmd = InitCommand::new(Some(base_path.clone()));
     init_cmd.execute(&mut ui).unwrap();
 
-    let factory = inquest::repository::file::FileRepositoryFactory;
+    let factory = inquest::repository::inquest::InquestRepositoryFactory;
     let mut repo = factory.open(temp.path()).unwrap();
 
     // Add a run with failures
@@ -311,13 +326,13 @@ fn test_error_handling_no_repository() {
 #[test]
 fn test_parallel_execution() {
     use inquest::commands::RunCommand;
-    use inquest::repository::file::FileRepositoryFactory;
+    use inquest::repository::inquest::InquestRepositoryFactory;
 
     let temp = TempDir::new().unwrap();
     let base_path = temp.path().to_string_lossy().to_string();
 
     // Initialize repository
-    let factory = FileRepositoryFactory;
+    let factory = InquestRepositoryFactory;
     factory.initialise(temp.path()).unwrap();
 
     // Create a simple test configuration that outputs subunit
@@ -385,13 +400,13 @@ fn test_parallel_execution_with_worker_tags() {
 #[test]
 fn test_until_failure_flag_behavior() {
     use inquest::commands::RunCommand;
-    use inquest::repository::file::FileRepositoryFactory;
+    use inquest::repository::inquest::InquestRepositoryFactory;
 
     let temp = TempDir::new().unwrap();
     let base_path = temp.path().to_string_lossy().to_string();
 
     // Initialize repository
-    let factory = FileRepositoryFactory;
+    let factory = InquestRepositoryFactory;
     factory.initialise(temp.path()).unwrap();
 
     // Create a simple test configuration that always succeeds
@@ -429,13 +444,13 @@ test_command=echo ""
 #[test]
 fn test_isolated_flag_behavior() {
     use inquest::commands::RunCommand;
-    use inquest::repository::file::FileRepositoryFactory;
+    use inquest::repository::inquest::InquestRepositoryFactory;
 
     let temp = TempDir::new().unwrap();
     let base_path = temp.path().to_string_lossy().to_string();
 
     // Initialize repository
-    let factory = FileRepositoryFactory;
+    let factory = InquestRepositoryFactory;
     factory.initialise(temp.path()).unwrap();
 
     // Create a simple test configuration

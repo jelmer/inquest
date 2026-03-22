@@ -216,6 +216,20 @@ impl fmt::Display for StreamInterruption {
     }
 }
 
+/// Metadata about a test run's execution context.
+///
+/// Captures information about the environment and configuration
+/// used when executing the test run.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RunMetadata {
+    /// Git commit hash at the time of the run.
+    pub git_commit: Option<String>,
+    /// The test command that was executed.
+    pub command: Option<String>,
+    /// Number of parallel workers used.
+    pub concurrency: Option<u32>,
+}
+
 /// A complete test run containing results for multiple tests.
 ///
 /// Represents a single execution of a test suite with all test results,

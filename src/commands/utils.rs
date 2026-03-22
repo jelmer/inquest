@@ -2,24 +2,37 @@
 
 use crate::config::CONFIG_FILE_NAMES;
 use crate::error::Result;
-use crate::repository::file::FileRepositoryFactory;
+use crate::repository::inquest::InquestRepositoryFactory;
+use crate::repository::testr::FileRepositoryFactory;
 use crate::repository::{Repository, RepositoryFactory, TestRun};
 use crate::ui::UI;
 use std::path::Path;
 
 /// Open a repository at the given path (or current directory if None)
+///
+/// Tries the inquest-native format (`.inquest/`) first, then falls back
+/// to the legacy format (`.testrepository/`).
 pub fn open_repository(base_path: Option<&str>) -> Result<Box<dyn Repository>> {
     let base = base_path.map(Path::new).unwrap_or_else(|| Path::new("."));
 
-    let factory = FileRepositoryFactory;
-    factory.open(base)
+    // Try inquest-native format first
+    let inquest_factory = InquestRepositoryFactory;
+    if let Ok(repo) = inquest_factory.open(base) {
+        return Ok(repo);
+    }
+
+    // Fall back to legacy format
+    let file_factory = FileRepositoryFactory;
+    file_factory.open(base)
 }
 
 /// Initialize a repository at the given path (or current directory if None)
+///
+/// Uses the inquest-native format (`.inquest/`) by default.
 pub fn init_repository(base_path: Option<&str>) -> Result<Box<dyn Repository>> {
     let base = base_path.map(Path::new).unwrap_or_else(|| Path::new("."));
 
-    let factory = FileRepositoryFactory;
+    let factory = InquestRepositoryFactory;
     factory.initialise(base)
 }
 
@@ -46,7 +59,7 @@ pub fn open_or_init_repository(
         Err(e) => {
             if force_init || has_config_file(base_path) {
                 let base = base_path.unwrap_or(".");
-                let repo_path = Path::new(base).join(".testrepository");
+                let repo_path = Path::new(base).join(".inquest");
                 ui.output(&format!("Creating repository in {}", repo_path.display()))?;
                 init_repository(base_path)
             } else {
@@ -105,6 +118,36 @@ pub fn update_test_times_from_run(
     }
 
     Ok(())
+}
+
+/// Capture and store run metadata (git commit, command, concurrency)
+pub fn store_run_metadata(
+    repo: &mut Box<dyn Repository>,
+    run_id: &str,
+    command: Option<&str>,
+    concurrency: Option<u32>,
+) -> Result<()> {
+    let git_commit = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                String::from_utf8(output.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    let metadata = crate::repository::RunMetadata {
+        git_commit,
+        command: command.map(|s| s.to_string()),
+        concurrency,
+    };
+
+    repo.set_run_metadata(run_id, metadata)
 }
 
 /// Update repository failing tests based on partial mode
@@ -183,7 +226,7 @@ mod tests {
         let mut ui = crate::ui::test_ui::TestUI::new();
         let repo = open_or_init_repository(Some(&path), false, &mut ui);
         assert!(repo.is_ok());
-        assert!(temp.path().join(".testrepository").exists());
+        assert!(temp.path().join(".inquest").exists());
         let output = ui.output.join("\n");
         assert!(output.contains("Creating repository"), "got: {}", output);
     }
@@ -196,7 +239,7 @@ mod tests {
         let mut ui = crate::ui::test_ui::TestUI::new();
         let repo = open_or_init_repository(Some(&path), false, &mut ui);
         assert!(repo.is_err());
-        assert!(!temp.path().join(".testrepository").exists());
+        assert!(!temp.path().join(".inquest").exists());
     }
 
     #[test]
@@ -207,7 +250,7 @@ mod tests {
         let mut ui = crate::ui::test_ui::TestUI::new();
         let repo = open_or_init_repository(Some(&path), true, &mut ui);
         assert!(repo.is_ok());
-        assert!(temp.path().join(".testrepository").exists());
+        assert!(temp.path().join(".inquest").exists());
     }
 
     #[test]

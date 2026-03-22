@@ -7,7 +7,7 @@ use inquest::commands::{
     Command, FailingCommand, InitCommand, LastCommand, LoadCommand, RunCommand, StatsCommand,
 };
 use inquest::error::Result;
-use inquest::repository::file::FileRepositoryFactory;
+use inquest::repository::testr::FileRepositoryFactory;
 use inquest::repository::{RepositoryFactory, TestResult, TestRun};
 use inquest::ui::UI;
 use std::fs;
@@ -140,7 +140,7 @@ fn test_init_command_already_initialized() {
     let temp = TempDir::new().unwrap();
 
     // Initialize once
-    let factory = FileRepositoryFactory;
+    let factory = inquest::repository::inquest::InquestRepositoryFactory;
     factory.initialise(temp.path()).unwrap();
 
     // Try to initialize again

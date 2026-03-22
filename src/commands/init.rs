@@ -2,14 +2,14 @@
 
 use crate::commands::Command;
 use crate::error::Result;
-use crate::repository::file::FileRepositoryFactory;
+use crate::repository::inquest::InquestRepositoryFactory;
 use crate::repository::RepositoryFactory;
 use crate::ui::UI;
 use std::path::Path;
 
 /// Command to initialize a new test repository.
 ///
-/// Creates a `.testrepository` directory with the necessary structure
+/// Creates a `.inquest` directory with the necessary structure
 /// to store test results and metadata.
 pub struct InitCommand {
     base_path: Option<String>,
@@ -33,7 +33,15 @@ impl Command for InitCommand {
             .map(Path::new)
             .unwrap_or_else(|| Path::new("."));
 
-        let factory = FileRepositoryFactory;
+        // Check for legacy .testrepository/ and suggest upgrade
+        if base.join(".testrepository").exists() {
+            ui.error(
+                "A legacy .testrepository/ directory exists. Run 'inq upgrade' to convert it to the new .inquest/ format.",
+            )?;
+            return Ok(1);
+        }
+
+        let factory = InquestRepositoryFactory;
 
         match factory.initialise(base) {
             Ok(_) => {
@@ -106,8 +114,8 @@ mod tests {
         assert!(ui.output[0].contains("Initialized"));
 
         // Verify repository was created
-        assert!(temp.path().join(".testrepository").exists());
-        assert!(temp.path().join(".testrepository/format").exists());
+        assert!(temp.path().join(".inquest").exists());
+        assert!(temp.path().join(".inquest/metadata.db").exists());
     }
 
     #[test]
@@ -128,5 +136,28 @@ mod tests {
         assert_eq!(result.unwrap(), 1);
         assert_eq!(ui.errors.len(), 1);
         assert!(ui.errors[0].contains("Failed"));
+    }
+
+    #[test]
+    fn test_init_command_legacy_testrepository_exists() {
+        let temp = TempDir::new().unwrap();
+
+        // Create a legacy .testrepository/ directory
+        let factory = crate::repository::testr::FileRepositoryFactory;
+        crate::repository::RepositoryFactory::initialise(&factory, temp.path()).unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = InitCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui);
+
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(ui.errors.len(), 1);
+        assert!(
+            ui.errors[0].contains("inq upgrade"),
+            "got: {}",
+            ui.errors[0]
+        );
+        // Should not have created .inquest/
+        assert!(!temp.path().join(".inquest").exists());
     }
 }
