@@ -152,7 +152,7 @@ impl Command for LoadCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::file::FileRepositoryFactory;
+    use crate::repository::testr::FileRepositoryFactory;
     use crate::repository::{RepositoryFactory, TestId, TestResult, TestRun, TestStatus};
     use tempfile::TempDir;
 

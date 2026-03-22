@@ -18,6 +18,7 @@ pub mod quickstart;
 pub mod run;
 pub mod slowest;
 pub mod stats;
+pub mod upgrade;
 pub mod utils;
 
 pub use analyze_isolation::AnalyzeIsolationCommand;
@@ -33,6 +34,7 @@ pub use quickstart::QuickstartCommand;
 pub use run::RunCommand;
 pub use slowest::SlowestCommand;
 pub use stats::StatsCommand;
+pub use upgrade::UpgradeCommand;
 
 /// Trait that all commands must implement
 pub trait Command {
