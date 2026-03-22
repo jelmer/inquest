@@ -8,10 +8,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-pub mod file;
+pub mod inquest;
 pub mod test_run;
+pub mod testr;
 
-pub use test_run::{StreamInterruption, TestId, TestResult, TestRun, TestStatus};
+pub use test_run::{RunMetadata, StreamInterruption, TestId, TestResult, TestRun, TestStatus};
 
 /// Abstract repository trait for test result storage
 ///
@@ -19,7 +20,7 @@ pub use test_run::{StreamInterruption, TestId, TestResult, TestRun, TestStatus};
 ///
 /// ```
 /// use inquest::repository::{Repository, RepositoryFactory, TestResult, TestRun};
-/// use inquest::repository::file::FileRepositoryFactory;
+/// use inquest::repository::testr::FileRepositoryFactory;
 /// use tempfile::TempDir;
 ///
 /// # fn main() -> inquest::error::Result<()> {
@@ -159,6 +160,14 @@ pub trait Repository {
 
     /// Get the number of test runs in the repository
     fn count(&self) -> Result<usize>;
+
+    /// Set metadata for a test run (git commit, command, concurrency, etc.)
+    ///
+    /// The default implementation is a no-op for backends that don't support
+    /// extended metadata.
+    fn set_run_metadata(&mut self, _run_id: &str, _metadata: RunMetadata) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Factory trait for creating and opening repositories

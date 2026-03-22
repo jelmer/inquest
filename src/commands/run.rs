@@ -514,6 +514,12 @@ impl RunCommand {
 
         crate::commands::utils::update_repository_failing_tests(repo, &test_run, self.partial)?;
         crate::commands::utils::update_test_times_from_run(repo, &test_run)?;
+        crate::commands::utils::store_run_metadata(
+            repo,
+            &run_id,
+            Some(&test_cmd.config().test_command),
+            None,
+        )?;
 
         // Return exit code based on test command exit code
         if status.success() {
@@ -707,6 +713,12 @@ impl RunCommand {
         // Update failing tests and test times
         crate::commands::utils::update_repository_failing_tests(repo, &test_run, self.partial)?;
         crate::commands::utils::update_test_times_from_run(repo, &test_run)?;
+        crate::commands::utils::store_run_metadata(
+            repo,
+            &run_id,
+            Some(&test_cmd.config().test_command),
+            Some(1),
+        )?;
 
         // Display summary
         crate::commands::utils::display_test_summary(ui, &run_id, &test_run)?;
@@ -1035,6 +1047,12 @@ impl RunCommand {
         // Update failing tests and test times
         crate::commands::utils::update_repository_failing_tests(repo, &combined_run, self.partial)?;
         crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
+        crate::commands::utils::store_run_metadata(
+            repo,
+            &run_id_for_display,
+            Some(&test_cmd.config().test_command),
+            Some(concurrency as u32),
+        )?;
 
         // Dispose instances (done explicitly before drop to handle errors)
         drop(dispose_guard);
@@ -1132,6 +1150,12 @@ impl RunCommand {
         // Update failing tests and test times
         crate::commands::utils::update_repository_failing_tests(repo, &combined_run, self.partial)?;
         crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
+        crate::commands::utils::store_run_metadata(
+            repo,
+            &run_id_for_display,
+            Some(&test_cmd.config().test_command),
+            Some(1),
+        )?;
 
         // Display summary
         crate::commands::utils::display_test_summary(ui, &run_id_for_display, &combined_run)?;
@@ -1356,7 +1380,7 @@ impl<'a> Drop for InstanceDisposeGuard<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::file::FileRepositoryFactory;
+    use crate::repository::testr::FileRepositoryFactory;
     use crate::repository::RepositoryFactory;
     use crate::ui::test_ui::TestUI;
     use std::fs;

@@ -23,27 +23,32 @@
 //! - [`ui`]: User interface abstraction for output
 //! - [`error`]: Error types and Result alias
 //!
-//! # Repository Format
+//! # Repository Formats
 //!
-//! The `.testrepository/` directory contains:
+//! ## Inquest format (default)
+//!
+//! The `.inquest/` directory contains:
 //!
 //! - `format`: Version file containing "1"
-//! - `next-stream`: Counter for the next run ID
-//! - `0`, `1`, `2`, ...: Individual test run files in subunit v2 binary format
+//! - `metadata.db`: SQLite database with run metadata, test results, times, and failing tests
+//! - `runs/0`, `runs/1`, ...: Individual test run files in subunit v2 binary format
 //!
-//! This format is fully compatible with the Python version of testrepository.
+//! ## Legacy format
+//!
+//! The `.testrepository/` directory is also supported for backwards compatibility
+//! with the Python version of testrepository.
 //!
 //! # Example
 //!
 //! ```no_run
-//! use inquest::repository::{RepositoryFactory, file::FileRepositoryFactory};
+//! use inquest::repository::{RepositoryFactory, inquest::InquestRepositoryFactory};
 //! use inquest::commands::{Command, InitCommand, StatsCommand};
 //! use inquest::ui::UI;
 //! use std::path::Path;
 //!
 //! # fn main() -> inquest::error::Result<()> {
 //! // Initialize a new repository
-//! let factory = FileRepositoryFactory;
+//! let factory = InquestRepositoryFactory;
 //! let repo = factory.initialise(Path::new("."))?;
 //!
 //! // Commands can be executed via the Command trait

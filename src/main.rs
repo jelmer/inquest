@@ -122,6 +122,9 @@ enum Commands {
         shell: Shell,
     },
 
+    /// Upgrade a .testrepository/ to .inquest/ format
+    Upgrade,
+
     /// Start MCP (Model Context Protocol) server over stdio
     #[cfg(feature = "mcp")]
     Mcp,
@@ -286,6 +289,10 @@ fn main() {
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "inq", &mut std::io::stdout());
             Ok(0)
+        }
+        Commands::Upgrade => {
+            let cmd = UpgradeCommand::new(cli.directory);
+            cmd.execute(&mut ui)
         }
         #[cfg(feature = "mcp")]
         Commands::Mcp => {

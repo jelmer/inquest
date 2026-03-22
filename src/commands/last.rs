@@ -158,7 +158,7 @@ impl Command for LastCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::file::FileRepositoryFactory;
+    use crate::repository::testr::FileRepositoryFactory;
     use crate::repository::{RepositoryFactory, TestId, TestResult, TestRun, TestStatus};
     use crate::ui::test_ui::TestUI;
     use tempfile::TempDir;
