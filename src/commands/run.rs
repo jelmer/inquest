@@ -3,11 +3,14 @@
 use crate::commands::utils::open_or_init_repository;
 use crate::commands::Command;
 use crate::error::Result;
+use crate::repository::TestId;
 use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 use crate::ui::UI;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 /// Helper to truncate test name to fit in available space
 fn truncate_test_name(test_id: &str, max_len: usize, fail_msg_len: usize) -> String {
@@ -55,6 +58,54 @@ fn get_progress_bar_colors(failure_rate: f64) -> (&'static str, &'static str) {
     } else {
         ("red", "red")
     }
+}
+
+/// Format a duration as a human-readable string (e.g., "1m 23s", "45s", "2h 05m")
+fn format_duration_short(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        format!("{}h {:02}m", hours, mins)
+    } else if secs >= 60 {
+        let mins = secs / 60;
+        let remaining_secs = secs % 60;
+        format!("{}m {:02}s", mins, remaining_secs)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+/// Format an ETA string based on historical test times.
+///
+/// Uses elapsed wall-clock time and the fraction of estimated total duration
+/// that has been completed to project the remaining time.
+fn format_eta(
+    estimated_total: Duration,
+    completed_duration: Duration,
+    elapsed: Duration,
+) -> String {
+    if estimated_total.is_zero() || elapsed.is_zero() {
+        return String::new();
+    }
+
+    // What fraction of the estimated work is done?
+    let fraction_done = completed_duration.as_secs_f64() / estimated_total.as_secs_f64();
+    if fraction_done <= 0.0 || fraction_done > 1.0 {
+        return String::new();
+    }
+
+    // Project total wall-clock time from fraction done and elapsed time
+    let projected_total = elapsed.as_secs_f64() / fraction_done;
+    let remaining = projected_total - elapsed.as_secs_f64();
+    if remaining <= 0.0 {
+        return String::new();
+    }
+
+    format!(
+        " ETA: {}",
+        format_duration_short(Duration::from_secs_f64(remaining))
+    )
 }
 
 /// Update progress bar style based on current failure rate
@@ -251,6 +302,68 @@ mod helper_tests {
         let result = truncate_test_name(name, 5, 0);
         assert_eq!(result.len(), 3); // 5 - 2 = 3
         assert_eq!(result, "ame"); // Last 3 chars
+    }
+
+    #[test]
+    fn test_format_duration_short_seconds() {
+        assert_eq!(format_duration_short(Duration::from_secs(45)), "45s");
+    }
+
+    #[test]
+    fn test_format_duration_short_minutes() {
+        assert_eq!(format_duration_short(Duration::from_secs(90)), "1m 30s");
+    }
+
+    #[test]
+    fn test_format_duration_short_hours() {
+        assert_eq!(format_duration_short(Duration::from_secs(3661)), "1h 01m");
+    }
+
+    #[test]
+    fn test_format_duration_short_zero() {
+        assert_eq!(format_duration_short(Duration::ZERO), "0s");
+    }
+
+    #[test]
+    fn test_format_eta_with_history() {
+        // Estimated total: 100s, completed 50s worth, elapsed 60s wall-clock
+        // fraction_done = 0.5, projected_total = 120s, remaining = 60s
+        let eta = format_eta(
+            Duration::from_secs(100),
+            Duration::from_secs(50),
+            Duration::from_secs(60),
+        );
+        assert_eq!(eta, " ETA: 1m 00s");
+    }
+
+    #[test]
+    fn test_format_eta_no_history() {
+        // Zero estimated total means no ETA
+        let eta = format_eta(Duration::ZERO, Duration::ZERO, Duration::from_secs(10));
+        assert_eq!(eta, "");
+    }
+
+    #[test]
+    fn test_format_eta_no_elapsed() {
+        // Zero elapsed means no ETA
+        let eta = format_eta(
+            Duration::from_secs(100),
+            Duration::from_secs(10),
+            Duration::ZERO,
+        );
+        assert_eq!(eta, "");
+    }
+
+    #[test]
+    fn test_format_eta_nearly_done() {
+        // Completed more than estimated (tests ran faster than historical)
+        let eta = format_eta(
+            Duration::from_secs(100),
+            Duration::from_secs(120),
+            Duration::from_secs(90),
+        );
+        // fraction_done > 1.0, should return empty
+        assert_eq!(eta, "");
     }
 }
 
@@ -498,6 +611,8 @@ impl RunCommand {
             writer2: UIWriter { ui },
         };
 
+        let start_time = std::time::Instant::now();
+
         std::io::copy(&mut stdout, &mut tee).map_err(crate::error::Error::Io)?;
         tee.flush().map_err(crate::error::Error::Io)?;
 
@@ -505,6 +620,9 @@ impl RunCommand {
         let status = child.wait().map_err(|e| {
             crate::error::Error::CommandExecution(format!("Failed to wait for test command: {}", e))
         })?;
+
+        let duration = start_time.elapsed();
+        let exit_code = if status.success() { 0 } else { 1 };
 
         // Explicitly drop temp file now that child process has completed
         drop(_temp_file);
@@ -519,14 +637,12 @@ impl RunCommand {
             &run_id,
             Some(&test_cmd.config().test_command),
             None,
+            Some(duration),
+            Some(exit_code),
         )?;
 
         // Return exit code based on test command exit code
-        if status.success() {
-            Ok(0)
-        } else {
-            Ok(1)
-        }
+        Ok(exit_code)
     }
 
     /// Run tests serially (single process)
@@ -545,6 +661,14 @@ impl RunCommand {
         } else {
             test_cmd.list_tests()?.len()
         };
+
+        // Get historical test times for ETA estimation (only for the tests being run)
+        let historical_times: HashMap<TestId, Duration> = if let Some(ids) = test_ids {
+            repo.get_test_times_for_ids(ids).unwrap_or_default()
+        } else {
+            repo.get_test_times().unwrap_or_default()
+        };
+        let estimated_total: Duration = historical_times.values().sum();
 
         // Build command with test IDs if provided
         // IMPORTANT: Keep _temp_file alive until after child process completes
@@ -617,8 +741,10 @@ impl RunCommand {
             subunit_stream::OutputFilter::FailuresOnly
         };
 
+        let start_time = std::time::Instant::now();
         let parse_thread = std::thread::spawn(move || {
             let mut failures = 0;
+            let mut completed_duration = Duration::ZERO;
             let progress_bar_for_bytes = progress_bar_clone.clone();
             let progress_bar_for_style = progress_bar_clone.clone();
 
@@ -629,6 +755,11 @@ impl RunCommand {
                     let indicator = status.indicator();
                     if !indicator.is_empty() {
                         progress_bar_clone.inc(1);
+
+                        // Track completed historical duration for ETA
+                        if let Some(&dur) = historical_times.get(&TestId::new(test_id)) {
+                            completed_duration += dur;
+                        }
 
                         // Track failures
                         if matches!(
@@ -649,15 +780,19 @@ impl RunCommand {
                         );
 
                         let fail_msg = format_failure_msg(failures, false);
-                        let fail_len = if failures > 0 {
+                        let eta_msg =
+                            format_eta(estimated_total, completed_duration, start_time.elapsed());
+                        let extra_len = if failures > 0 {
                             12 + failures.to_string().len()
                         } else {
                             0
-                        };
-                        let short_name = truncate_test_name(test_id, max_msg_len, fail_len);
+                        } + eta_msg.len();
+                        let short_name = truncate_test_name(test_id, max_msg_len, extra_len);
 
-                        progress_bar_clone
-                            .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
+                        progress_bar_clone.set_message(format!(
+                            "{} {}{}{}",
+                            indicator, short_name, fail_msg, eta_msg
+                        ));
                     }
                 },
                 |bytes| {
@@ -710,6 +845,13 @@ impl RunCommand {
 
         progress_bar.finish_and_clear();
 
+        let duration = start_time.elapsed();
+        let exit_code = if test_run.count_failures() > 0 || command_failed {
+            1
+        } else {
+            0
+        };
+
         // Update failing tests and test times
         crate::commands::utils::update_repository_failing_tests(repo, &test_run, self.partial)?;
         crate::commands::utils::update_test_times_from_run(repo, &test_run)?;
@@ -718,17 +860,14 @@ impl RunCommand {
             &run_id,
             Some(&test_cmd.config().test_command),
             Some(1),
+            Some(duration),
+            Some(exit_code),
         )?;
 
         // Display summary
         crate::commands::utils::display_test_summary(ui, &run_id, &test_run)?;
 
-        // Return exit code based on results
-        if test_run.count_failures() > 0 || command_failed {
-            Ok(1)
-        } else {
-            Ok(0)
-        }
+        Ok(exit_code)
     }
 
     /// Run tests in parallel across multiple workers
@@ -750,6 +889,8 @@ impl RunCommand {
         } else {
             subunit_stream::OutputFilter::FailuresOnly
         };
+
+        let start_time = std::time::Instant::now();
 
         // Get the base run ID - each worker will write to run_id-{worker_id}
         let base_run_id = repo.get_next_run_id()?;
@@ -781,6 +922,12 @@ impl RunCommand {
             group_regex,
         )
         .map_err(|e| crate::error::Error::Config(format!("Invalid group_regex pattern: {}", e)))?;
+
+        // Compute estimated duration per partition from historical times for ETA
+        let partition_estimated_totals: Vec<Duration> = partitions
+            .iter()
+            .map(|partition| partition.iter().filter_map(|id| durations.get(id)).sum())
+            .collect();
 
         // Create multi-progress for tracking all workers
         let term_width = console::Term::stdout().size().1 as usize;
@@ -838,7 +985,7 @@ impl RunCommand {
             worker_bar.set_style(
                 ProgressStyle::default_bar()
                     .template(&format!(
-                        "Worker {}: [{{bar:{}.green/blue}}] {{pos}}/{{len}} {{msg}}",
+                        "Worker {}: [{{elapsed_precise}}] [{{bar:{}.green/blue}}] {{pos}}/{{len}} {{msg}}",
                         worker_id, worker_bar_width
                     ))
                     .unwrap()
@@ -895,10 +1042,14 @@ impl RunCommand {
             let overall_bar_clone = overall_bar.clone();
             let worker_run_id_clone = worker_run_id.clone();
             let total_failures_clone = Arc::clone(&total_failures);
+            let worker_durations = durations.clone();
+            let worker_estimated_total = partition_estimated_totals[worker_id];
 
             let output_filter_clone = output_filter;
+            let worker_start_time = std::time::Instant::now();
             let parse_thread = std::thread::spawn(move || {
                 let mut failures = 0;
+                let mut completed_duration = Duration::ZERO;
                 let worker_bar_for_bytes = worker_bar_clone.clone();
                 // Parse stdout stream for real-time progress
                 subunit_stream::parse_stream_with_progress(
@@ -909,6 +1060,11 @@ impl RunCommand {
                         if !indicator.is_empty() {
                             worker_bar_clone.inc(1);
                             overall_bar_clone.inc(1);
+
+                            // Track completed historical duration for ETA
+                            if let Some(&dur) = worker_durations.get(&TestId::new(test_id)) {
+                                completed_duration += dur;
+                            }
 
                             // Track failures
                             if matches!(
@@ -936,15 +1092,22 @@ impl RunCommand {
                             }
 
                             let fail_msg = format_failure_msg(failures, true);
-                            let fail_len = if failures > 0 {
+                            let eta_msg = format_eta(
+                                worker_estimated_total,
+                                completed_duration,
+                                worker_start_time.elapsed(),
+                            );
+                            let extra_len = if failures > 0 {
                                 9 + failures.to_string().len()
                             } else {
                                 0
-                            };
-                            let short_name = truncate_test_name(test_id, worker_max_msg, fail_len);
+                            } + eta_msg.len();
+                            let short_name = truncate_test_name(test_id, worker_max_msg, extra_len);
 
-                            worker_bar_clone
-                                .set_message(format!("{} {}{}", indicator, short_name, fail_msg));
+                            worker_bar_clone.set_message(format!(
+                                "{} {}{}{}",
+                                indicator, short_name, fail_msg, eta_msg
+                            ));
                         }
                     },
                     |bytes| {
@@ -1044,6 +1207,13 @@ impl RunCommand {
             combined_run.add_result(result);
         }
 
+        let duration = start_time.elapsed();
+        let exit_code = if combined_run.count_failures() > 0 || any_failed {
+            1
+        } else {
+            0
+        };
+
         // Update failing tests and test times
         crate::commands::utils::update_repository_failing_tests(repo, &combined_run, self.partial)?;
         crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
@@ -1052,6 +1222,8 @@ impl RunCommand {
             &run_id_for_display,
             Some(&test_cmd.config().test_command),
             Some(concurrency as u32),
+            Some(duration),
+            Some(exit_code),
         )?;
 
         // Dispose instances (done explicitly before drop to handle errors)
@@ -1064,12 +1236,7 @@ impl RunCommand {
         // Display summary
         crate::commands::utils::display_test_summary(ui, &run_id_for_display, &combined_run)?;
 
-        // Return exit code based on results
-        if combined_run.count_failures() > 0 || any_failed {
-            Ok(1)
-        } else {
-            Ok(0)
-        }
+        Ok(exit_code)
     }
 
     /// Run each test in complete isolation (one test per process)
@@ -1082,6 +1249,8 @@ impl RunCommand {
     ) -> Result<i32> {
         use std::collections::HashMap;
         use std::process::{Command, Stdio};
+
+        let start_time = std::time::Instant::now();
 
         // Get the base run ID - each isolated test will write to its own file
         let base_run_id = repo.get_next_run_id()?;
@@ -1147,6 +1316,13 @@ impl RunCommand {
             combined_run.add_result(result);
         }
 
+        let duration = start_time.elapsed();
+        let exit_code = if combined_run.count_failures() > 0 || any_failed {
+            1
+        } else {
+            0
+        };
+
         // Update failing tests and test times
         crate::commands::utils::update_repository_failing_tests(repo, &combined_run, self.partial)?;
         crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
@@ -1155,17 +1331,14 @@ impl RunCommand {
             &run_id_for_display,
             Some(&test_cmd.config().test_command),
             Some(1),
+            Some(duration),
+            Some(exit_code),
         )?;
 
         // Display summary
         crate::commands::utils::display_test_summary(ui, &run_id_for_display, &combined_run)?;
 
-        // Return exit code based on results
-        if combined_run.count_failures() > 0 || any_failed {
-            Ok(1)
-        } else {
-            Ok(0)
-        }
+        Ok(exit_code)
     }
 }
 

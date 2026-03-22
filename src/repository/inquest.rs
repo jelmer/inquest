@@ -92,6 +92,8 @@ impl RepositoryFactory for InquestRepositoryFactory {
             )));
         }
 
+        migrate_schema(&conn)?;
+
         Ok(Box::new(InquestRepository {
             path: repo_path,
             conn,
@@ -112,6 +114,8 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             git_commit TEXT,
             command TEXT,
             concurrency INTEGER,
+            duration_secs REAL,
+            exit_code INTEGER,
             total_tests INTEGER NOT NULL DEFAULT 0,
             failures INTEGER NOT NULL DEFAULT 0,
             errors INTEGER NOT NULL DEFAULT 0,
@@ -149,6 +153,23 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
         [SCHEMA_VERSION],
     )?;
 
+    Ok(())
+}
+
+/// Try to add a column, ignoring "duplicate column name" errors.
+fn add_column_if_missing(conn: &rusqlite::Connection, table: &str, column: &str, col_type: &str) {
+    let sql = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, col_type);
+    match conn.execute_batch(&sql) {
+        Ok(()) => {}
+        Err(e) if e.to_string().contains("duplicate column name") => {}
+        Err(e) => eprintln!("Warning: failed to add column {}.{}: {}", table, column, e),
+    }
+}
+
+/// Add columns that may be missing from older databases.
+fn migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
+    add_column_if_missing(conn, "runs", "duration_secs", "REAL");
+    add_column_if_missing(conn, "runs", "exit_code", "INTEGER");
     Ok(())
 }
 
@@ -455,11 +476,13 @@ impl Repository for InquestRepository {
 
     fn set_run_metadata(&mut self, run_id: &str, metadata: RunMetadata) -> Result<()> {
         self.conn.execute(
-            "UPDATE runs SET git_commit = ?, command = ?, concurrency = ? WHERE id = ?",
+            "UPDATE runs SET git_commit = ?, command = ?, concurrency = ?, duration_secs = ?, exit_code = ? WHERE id = ?",
             params![
                 metadata.git_commit,
                 metadata.command,
                 metadata.concurrency,
+                metadata.duration_secs,
+                metadata.exit_code,
                 run_id,
             ],
         )?;
@@ -832,6 +855,8 @@ mod tests {
                 git_commit: Some("abc123".to_string()),
                 command: Some("python -m pytest".to_string()),
                 concurrency: Some(4),
+                duration_secs: Some(12.5),
+                exit_code: Some(1),
             },
         )
         .unwrap();
@@ -839,17 +864,112 @@ mod tests {
         // Verify metadata was stored (open as new connection to verify)
         let db_path = temp.path().join(REPO_DIR).join("metadata.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        let (git_commit, command, concurrency): (Option<String>, Option<String>, Option<i64>) =
-            conn.query_row(
-                "SELECT git_commit, command, concurrency FROM runs WHERE id = ?",
+        let (git_commit, command, concurrency, duration_secs, exit_code): (
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<f64>,
+            Option<i32>,
+        ) = conn
+            .query_row(
+                "SELECT git_commit, command, concurrency, duration_secs, exit_code FROM runs WHERE id = ?",
                 [&run_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .unwrap();
 
         assert_eq!(git_commit, Some("abc123".to_string()));
         assert_eq!(command, Some("python -m pytest".to_string()));
         assert_eq!(concurrency, Some(4));
+        assert_eq!(duration_secs, Some(12.5));
+        assert_eq!(exit_code, Some(1));
+    }
+
+    #[test]
+    fn test_migrate_adds_missing_columns() {
+        let temp = TempDir::new().unwrap();
+        let repo_dir = temp.path().join(REPO_DIR);
+        fs::create_dir_all(repo_dir.join("runs")).unwrap();
+        fs::write(repo_dir.join("format"), FORMAT_VERSION).unwrap();
+
+        // Create a database with the old schema (no duration_secs or exit_code)
+        let db_path = repo_dir.join("metadata.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (1);
+            CREATE TABLE runs (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                git_commit TEXT,
+                command TEXT,
+                concurrency INTEGER,
+                total_tests INTEGER NOT NULL DEFAULT 0,
+                failures INTEGER NOT NULL DEFAULT 0,
+                errors INTEGER NOT NULL DEFAULT 0,
+                skips INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE test_results (
+                run_id INTEGER NOT NULL REFERENCES runs(id),
+                test_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                duration_secs REAL,
+                message TEXT,
+                details TEXT,
+                tags TEXT,
+                PRIMARY KEY (run_id, test_id)
+            );
+            CREATE TABLE test_times (
+                test_id TEXT PRIMARY KEY,
+                duration_secs REAL NOT NULL
+            );
+            CREATE TABLE failing_tests (
+                test_id TEXT PRIMARY KEY,
+                run_id INTEGER NOT NULL REFERENCES runs(id),
+                status TEXT NOT NULL,
+                message TEXT,
+                details TEXT
+            );
+            ",
+        )
+        .unwrap();
+        drop(conn);
+
+        // Open via the factory — migration should add the missing columns
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.open(temp.path()).unwrap();
+
+        // Create a run and set metadata with the new fields
+        let run = TestRun::new("0".to_string());
+        let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
+        subunit_stream::write_stream(&run, &mut writer).unwrap();
+        drop(writer);
+
+        repo.set_run_metadata(
+            &run_id,
+            RunMetadata {
+                git_commit: Some("def456".to_string()),
+                command: Some("cargo test".to_string()),
+                concurrency: Some(2),
+                duration_secs: Some(45.3),
+                exit_code: Some(0),
+            },
+        )
+        .unwrap();
+
+        // Verify the new columns are populated
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let (duration_secs, exit_code): (Option<f64>, Option<i32>) = conn
+            .query_row(
+                "SELECT duration_secs, exit_code FROM runs WHERE id = ?",
+                [&run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(duration_secs, Some(45.3));
+        assert_eq!(exit_code, Some(0));
     }
 
     #[test]
