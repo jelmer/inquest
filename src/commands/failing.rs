@@ -105,7 +105,7 @@ impl Command for FailingCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::testr::FileRepositoryFactory;
+    use crate::repository::inquest::InquestRepositoryFactory;
     use crate::repository::{RepositoryFactory, TestId, TestResult, TestRun, TestStatus};
     use crate::ui::test_ui::TestUI;
     use tempfile::TempDir;
@@ -114,7 +114,7 @@ mod tests {
     fn test_failing_command_no_failures() {
         let temp = TempDir::new().unwrap();
 
-        let factory = FileRepositoryFactory;
+        let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         let mut test_run = TestRun::new("0".to_string());
@@ -142,7 +142,7 @@ mod tests {
     fn test_failing_command_with_failures() {
         let temp = TempDir::new().unwrap();
 
-        let factory = FileRepositoryFactory;
+        let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         let mut test_run = TestRun::new("0".to_string());
@@ -189,7 +189,7 @@ mod tests {
     fn test_failing_command_list_mode() {
         let temp = TempDir::new().unwrap();
 
-        let factory = FileRepositoryFactory;
+        let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         let mut test_run = TestRun::new("0".to_string());

@@ -19,6 +19,7 @@ pub mod quickstart;
 pub mod run;
 pub mod slowest;
 pub mod stats;
+#[cfg(feature = "testr")]
 pub mod upgrade;
 pub mod utils;
 
@@ -36,6 +37,7 @@ pub use quickstart::QuickstartCommand;
 pub use run::RunCommand;
 pub use slowest::SlowestCommand;
 pub use stats::StatsCommand;
+#[cfg(feature = "testr")]
 pub use upgrade::UpgradeCommand;
 
 /// Trait that all commands must implement

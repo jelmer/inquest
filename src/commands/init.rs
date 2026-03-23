@@ -34,6 +34,7 @@ impl Command for InitCommand {
             .unwrap_or_else(|| Path::new("."));
 
         // Check for legacy .testrepository/ and suggest upgrade
+        #[cfg(feature = "testr")]
         if base.join(".testrepository").exists() {
             ui.error(
                 "A legacy .testrepository/ directory exists. Run 'inq upgrade' to convert it to the new .inquest/ format.",
@@ -139,6 +140,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "testr")]
     fn test_init_command_legacy_testrepository_exists() {
         let temp = TempDir::new().unwrap();
 

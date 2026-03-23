@@ -116,7 +116,7 @@ impl Command for LogCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::testr::FileRepositoryFactory;
+    use crate::repository::inquest::InquestRepositoryFactory;
     use crate::repository::{RepositoryFactory, TestId, TestResult, TestRun, TestStatus};
     use crate::ui::test_ui::TestUI;
     use tempfile::TempDir;
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn test_log_command_latest_run() {
         let temp = TempDir::new().unwrap();
-        let factory = FileRepositoryFactory;
+        let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         let mut test_run = TestRun::new("0".to_string());
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn test_log_command_specific_run() {
         let temp = TempDir::new().unwrap();
-        let factory = FileRepositoryFactory;
+        let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         let mut run0 = TestRun::new("0".to_string());
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn test_log_command_wildcard() {
         let temp = TempDir::new().unwrap();
-        let factory = FileRepositoryFactory;
+        let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         let mut test_run = TestRun::new("0".to_string());
@@ -250,7 +250,7 @@ mod tests {
     #[test]
     fn test_log_command_no_patterns_shows_all() {
         let temp = TempDir::new().unwrap();
-        let factory = FileRepositoryFactory;
+        let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         let mut test_run = TestRun::new("0".to_string());
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn test_log_command_no_match() {
         let temp = TempDir::new().unwrap();
-        let factory = FileRepositoryFactory;
+        let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         let mut test_run = TestRun::new("0".to_string());

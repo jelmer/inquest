@@ -3,6 +3,7 @@
 use crate::config::CONFIG_FILE_NAMES;
 use crate::error::Result;
 use crate::repository::inquest::InquestRepositoryFactory;
+#[cfg(feature = "testr")]
 use crate::repository::testr::FileRepositoryFactory;
 use crate::repository::{Repository, RepositoryFactory, TestRun};
 use crate::ui::UI;
@@ -17,13 +18,21 @@ pub fn open_repository(base_path: Option<&str>) -> Result<Box<dyn Repository>> {
 
     // Try inquest-native format first
     let inquest_factory = InquestRepositoryFactory;
-    if let Ok(repo) = inquest_factory.open(base) {
-        return Ok(repo);
+    #[cfg(not(feature = "testr"))]
+    {
+        inquest_factory.open(base)
     }
 
-    // Fall back to legacy format
-    let file_factory = FileRepositoryFactory;
-    file_factory.open(base)
+    #[cfg(feature = "testr")]
+    {
+        if let Ok(repo) = inquest_factory.open(base) {
+            return Ok(repo);
+        }
+
+        // Fall back to legacy format
+        let file_factory = FileRepositoryFactory;
+        file_factory.open(base)
+    }
 }
 
 /// Initialize a repository at the given path (or current directory if None)
