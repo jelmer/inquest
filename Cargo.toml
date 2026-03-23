@@ -12,6 +12,7 @@ categories = ["development-tools::testing"]
 [features]
 default = ["gdbm", "testr"]
 testr = []
+gdbm = ["testr", "dep:gdbm"]
 mcp = ["dep:rmcp", "dep:tokio", "dep:schemars", "dep:serde_json"]
 
 [[bin]]
