@@ -1,0 +1,288 @@
+.TH INQ "1" "March 2026" "inq 0.1.2" "User Commands"
+.SH NAME
+inq \- test repository management tool
+.SH SYNOPSIS
+.B inq
+[\fI\,OPTIONS\/\fR] \fI\,<COMMAND>\/\fR
+.SH DESCRIPTION
+.B inq
+is a test repository management tool for tracking and analyzing test results.
+It stores test run data in a local repository and provides commands for
+running tests, viewing results, analyzing failures, and identifying slow or
+flaky tests.
+.PP
+Configuration is read from
+.B inquest.toml
+(preferred) or
+.B .testr.conf
+(legacy INI format).
+.SH OPTIONS
+.TP
+\fB\-C\fR, \fB\-\-directory\fR \fI\,DIRECTORY\/\fR
+Repository path (defaults to current directory)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH COMMANDS
+.SS "auto"
+Auto\-detect project type and generate
+.B inquest.toml
+configuration file.
+.PP
+Detects the project type based on files present in the directory. Supported
+project types include Cargo (Rust), pytest (Python), and unittest/subunit
+(Python).
+.SS "init"
+Initialize a new test repository.
+.PP
+Creates a
+.B .inquest
+directory with the necessary structure to store test results and metadata.
+If a legacy
+.B .testrepository/
+directory exists, it will suggest running
+.B inq upgrade
+to convert to the new format.
+.SS "run"
+Run tests and load results.
+.PP
+Executes the test command from the configuration file and loads the results
+into the repository. Displays a progress bar with color\-coded failure rates
+and ETA based on historical test times.
+.TP
+\fB\-\-failing\fR
+Run only the tests that failed in the last run
+.TP
+\fB\-\-force\-init\fR
+Create repository if it doesn't exist
+.TP
+\fB\-\-auto\fR
+Auto\-detect project type and generate inquest.toml if missing
+.TP
+\fB\-\-partial\fR
+Partial run mode (update failing tests additively without clearing previous failures)
+.TP
+\fB\-\-load\-list\fR \fI\,FILE\/\fR
+Only run tests listed in the named file (one test ID per line)
+.TP
+\fB\-j\fR, \fB\-\-parallel\fR [\fI\,N\/\fR]
+Run tests in parallel across multiple workers (defaults to number of CPUs)
+.TP
+\fB\-\-concurrency\fR
+Alias for \fB\-\-parallel\fR
+.TP
+\fB\-\-until\-failure\fR
+Run tests repeatedly until they fail
+.TP
+\fB\-\-isolated\fR
+Run each test in a separate process
+.TP
+\fB\-\-subunit\fR
+Show output as a subunit stream
+.TP
+\fB\-\-all\-output\fR
+Show output from all tests (by default only failed tests show output)
+.TP
+\fI\,TESTFILTER\/\fR ...
+Test ID filters (regex patterns to filter which tests to run)
+.PP
+Additional arguments can be passed to the underlying test command after \fB\-\-\fR.
+.PP
+Exit code is 0 if all tests passed, 1 if there are failures.
+.SS "load"
+Load test results from stdin.
+.PP
+Reads test results from stdin in subunit format and stores them in the
+repository.
+.TP
+\fB\-\-force\-init\fR
+Create repository if it doesn't exist
+.TP
+\fB\-\-partial\fR
+Partial run mode (update failing tests additively)
+.SS "last"
+Show results from a test run.
+.PP
+Displays test statistics and details about failed tests from a specific run
+or the most recent run.
+.TP
+\fB\-r\fR, \fB\-\-run\fR \fI\,RUN_ID\/\fR
+Run ID to show (defaults to latest; supports negative indices like \-1, \-2)
+.TP
+\fB\-\-subunit\fR
+Show output as a subunit stream
+.TP
+\fB\-\-no\-output\fR
+Don't show test output/tracebacks for failed tests
+.PP
+Exit code is 0 if all tests passed, 1 if there are failures.
+.SS "failing"
+Show failing tests from the last run.
+.TP
+\fB\-\-list\fR
+List test IDs only, one per line (for scripting)
+.TP
+\fB\-\-subunit\fR
+Show output as a subunit stream
+.PP
+Exit code is 0 if no failing tests, 1 if there are failures.
+.SS "stats"
+Show repository statistics.
+.PP
+Displays information about the test repository including total runs, latest
+run ID, tests in latest run, failures in latest run, and total tests
+executed across all runs.
+.SS "slowest"
+Show the slowest tests from the last run.
+.PP
+Displays test execution times sorted from slowest to fastest, with timing
+information and percentage of total time.
+.TP
+\fB\-n\fR, \fB\-\-count\fR \fI\,N\/\fR
+Number of tests to show (default: 10)
+.TP
+\fB\-\-all\fR
+Show all tests
+.SS "log"
+Show logs for individual tests.
+.PP
+Displays logs and details for specific tests from a test run. Supports
+glob\-style wildcard patterns for matching test IDs.
+.TP
+\fB\-r\fR, \fB\-\-run\fR \fI\,RUN_ID\/\fR
+Run ID to show logs from (defaults to latest)
+.TP
+\fI\,TESTPATTERN\/\fR ...
+Test ID patterns to match (glob\-style wildcards). If no patterns are
+provided, shows all tests.
+.SS "list\-tests"
+List all available tests.
+.PP
+Queries the test command to discover all available tests in the test suite.
+Requires a configuration file with a test_list_option or \-\-list flag.
+.SS "analyze\-isolation"
+Analyze test isolation issues using bisection.
+.PP
+Identifies test interactions by bisecting the test suite to find which tests
+affect the outcome of a target test.
+.TP
+\fI\,TEST\/\fR
+The test to analyze for isolation issues (required)
+.PP
+The command runs the target test in isolation, then runs all tests together,
+and uses binary bisection to find and minimize the set of tests that
+interact with the target test.
+.SS "completions"
+Generate shell completions.
+.TP
+\fI\,SHELL\/\fR
+Shell to generate completions for (bash, zsh, fish, etc.)
+.SS "upgrade"
+Upgrade a .testrepository/ to .inquest/ format.
+.PP
+Migrates all test run data, failing tests, and timing information from the
+legacy .testrepository/ format to the new .inquest/ SQLite\-based format.
+Only available when compiled with the
+.B testr
+feature (enabled by default).
+.SS "quickstart"
+Show quickstart documentation.
+.SS "help"
+Show help information for commands.
+.TP
+\fI\,COMMAND\/\fR
+Optional command name to show detailed help for
+.SH CONFIGURATION
+Configuration is read from
+.B inquest.toml
+in the repository root. Legacy
+.B .testr.conf
+(INI format) is also supported.
+.PP
+Key configuration options:
+.TP
+.B test_command
+The command to run tests. Supports
+.B $LISTOPT
+and
+.B $IDOPTION
+placeholders.
+.TP
+.B test_id_option
+Option to pass test IDs to the test command (e.g., \fB\-\-load\-list $IDFILE\fR)
+.TP
+.B test_list_option
+Option to list available tests (e.g., \fB\-\-list\fR)
+.SH FILES
+.TP
+.B .inquest/
+Directory containing the test repository database and metadata
+.TP
+.B inquest.toml
+Configuration file for the test runner
+.TP
+.B .testrepository/
+Legacy test repository directory (can be upgraded with \fBinq upgrade\fR)
+.SH EXAMPLES
+Initialize and run tests:
+.PP
+.RS 4
+.nf
+inq auto
+inq run
+.fi
+.RE
+.PP
+Run only failing tests in parallel:
+.PP
+.RS 4
+.nf
+inq run \-\-failing \-j4
+.fi
+.RE
+.PP
+Show the 5 slowest tests:
+.PP
+.RS 4
+.nf
+inq slowest \-n 5
+.fi
+.RE
+.PP
+Load test results from a subunit stream:
+.PP
+.RS 4
+.nf
+python \-m subunit.run discover | inq load
+.fi
+.RE
+.PP
+View logs for tests matching a pattern:
+.PP
+.RS 4
+.nf
+inq log 'test_auth*'
+.fi
+.RE
+.PP
+Analyze test isolation for a specific test:
+.PP
+.RS 4
+.nf
+inq analyze\-isolation mypackage.tests.test_foo.TestFoo.test_bar
+.fi
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Success (or no failing tests for test\-related commands)
+.TP
+.B 1
+Failure (test failures detected or command error)
+.SH SEE ALSO
+.BR subunit (1),
+.BR pytest (1),
+.BR cargo\-test (1)
