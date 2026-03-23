@@ -152,7 +152,7 @@ impl Command for LoadCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::testr::FileRepositoryFactory;
+    use crate::repository::inquest::InquestRepositoryFactory;
     use crate::repository::{RepositoryFactory, TestId, TestResult, TestRun, TestStatus};
     use tempfile::TempDir;
 
@@ -161,7 +161,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
 
         // Initialize repository first
-        let factory = FileRepositoryFactory;
+        let factory = InquestRepositoryFactory;
         factory.initialise(temp.path()).unwrap();
 
         // Create a test run to load

@@ -1553,7 +1553,7 @@ impl<'a> Drop for InstanceDisposeGuard<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::testr::FileRepositoryFactory;
+    use crate::repository::inquest::InquestRepositoryFactory;
     use crate::repository::RepositoryFactory;
     use crate::ui::test_ui::TestUI;
     use std::fs;
@@ -1564,7 +1564,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
 
         // Initialize repo but no .testr.conf
-        let factory = FileRepositoryFactory;
+        let factory = InquestRepositoryFactory;
         factory.initialise(temp.path()).unwrap();
 
         let mut ui = TestUI::new();
@@ -1580,7 +1580,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
 
         // Initialize repo
-        let factory = FileRepositoryFactory;
+        let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         // Add a passing test run

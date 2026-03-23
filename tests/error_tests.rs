@@ -7,7 +7,7 @@ use inquest::commands::{
     Command, FailingCommand, InitCommand, LastCommand, LoadCommand, RunCommand, StatsCommand,
 };
 use inquest::error::Result;
-use inquest::repository::testr::FileRepositoryFactory;
+use inquest::repository::inquest::InquestRepositoryFactory;
 use inquest::repository::{RepositoryFactory, TestResult, TestRun};
 use inquest::ui::UI;
 use std::fs;
@@ -93,7 +93,7 @@ fn test_last_command_empty_repository() {
     let temp = TempDir::new().unwrap();
 
     // Initialize empty repository
-    let factory = FileRepositoryFactory;
+    let factory = InquestRepositoryFactory;
     factory.initialise(temp.path()).unwrap();
 
     let mut ui = TestUI::new();
@@ -111,7 +111,7 @@ fn test_stats_command_empty_repository() {
     let temp = TempDir::new().unwrap();
 
     // Initialize empty repository
-    let factory = FileRepositoryFactory;
+    let factory = InquestRepositoryFactory;
     factory.initialise(temp.path()).unwrap();
 
     let mut ui = TestUI::new();
@@ -163,7 +163,7 @@ fn test_run_command_no_test_command() {
     let temp = TempDir::new().unwrap();
 
     // Initialize repository but don't create .testr.conf
-    let factory = FileRepositoryFactory;
+    let factory = InquestRepositoryFactory;
     factory.initialise(temp.path()).unwrap();
 
     let mut ui = TestUI::new();
@@ -181,7 +181,7 @@ fn test_run_command_invalid_test_command() {
     let temp = TempDir::new().unwrap();
 
     // Initialize repository
-    let factory = FileRepositoryFactory;
+    let factory = InquestRepositoryFactory;
     factory.initialise(temp.path()).unwrap();
 
     // Create .testr.conf with invalid command
@@ -234,11 +234,12 @@ fn test_load_invalid_subunit_data() {
 }
 
 #[test]
+#[cfg(feature = "testr")]
 fn test_repository_corrupted_next_stream() {
     let temp = TempDir::new().unwrap();
 
     // Initialize repository
-    let factory = FileRepositoryFactory;
+    let factory = inquest::repository::testr::FileRepositoryFactory;
     factory.initialise(temp.path()).unwrap();
 
     // Corrupt the next-stream file
@@ -263,7 +264,7 @@ fn test_repository_missing_directory() {
     let temp = TempDir::new().unwrap();
     let nonexistent = temp.path().join("nonexistent");
 
-    let factory = FileRepositoryFactory;
+    let factory = InquestRepositoryFactory;
     let result = factory.open(&nonexistent);
 
     // Should fail because directory doesn't exist
@@ -271,6 +272,7 @@ fn test_repository_missing_directory() {
 }
 
 #[test]
+#[cfg(feature = "testr")]
 fn test_repository_file_permissions() {
     // This test only makes sense on Unix-like systems
     #[cfg(unix)]
@@ -280,7 +282,7 @@ fn test_repository_file_permissions() {
         let temp = TempDir::new().unwrap();
 
         // Initialize repository
-        let factory = FileRepositoryFactory;
+        let factory = inquest::repository::testr::FileRepositoryFactory;
         factory.initialise(temp.path()).unwrap();
 
         // Make .testrepository directory read-only
@@ -331,7 +333,7 @@ fn test_run_command_with_load_list_nonexistent() {
     let temp = TempDir::new().unwrap();
 
     // Initialize repository
-    let factory = FileRepositoryFactory;
+    let factory = InquestRepositoryFactory;
     factory.initialise(temp.path()).unwrap();
 
     // Create .testr.conf
@@ -379,7 +381,7 @@ fn test_repository_insert_duplicate_run_id() {
     let temp = TempDir::new().unwrap();
 
     // Initialize repository
-    let factory = FileRepositoryFactory;
+    let factory = InquestRepositoryFactory;
     let mut repo = factory.initialise(temp.path()).unwrap();
 
     // Insert a test run
