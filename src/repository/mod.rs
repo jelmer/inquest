@@ -10,6 +10,7 @@ use std::time::Duration;
 
 pub mod inquest;
 pub mod test_run;
+#[cfg(feature = "testr")]
 pub mod testr;
 
 pub use test_run::{RunMetadata, StreamInterruption, TestId, TestResult, TestRun, TestStatus};
@@ -20,7 +21,7 @@ pub use test_run::{RunMetadata, StreamInterruption, TestId, TestResult, TestRun,
 ///
 /// ```
 /// use inquest::repository::{Repository, RepositoryFactory, TestResult, TestRun};
-/// use inquest::repository::testr::FileRepositoryFactory;
+/// use inquest::repository::inquest::InquestRepositoryFactory;
 /// use tempfile::TempDir;
 ///
 /// # fn main() -> inquest::error::Result<()> {
@@ -28,7 +29,7 @@ pub use test_run::{RunMetadata, StreamInterruption, TestId, TestResult, TestRun,
 /// let temp = TempDir::new().unwrap();
 ///
 /// // Initialize a new repository
-/// let factory = FileRepositoryFactory;
+/// let factory = InquestRepositoryFactory;
 /// let mut repo = factory.initialise(temp.path())?;
 ///
 /// // Create a test run with results

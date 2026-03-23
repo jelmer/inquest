@@ -10,7 +10,8 @@ keywords = ["subunit", "testrunner", "unittest", "testing"]
 categories = ["development-tools::testing"]
 
 [features]
-default = ["gdbm"]
+default = ["gdbm", "testr"]
+testr = []
 mcp = ["dep:rmcp", "dep:tokio", "dep:schemars", "dep:serde_json"]
 
 [[bin]]
