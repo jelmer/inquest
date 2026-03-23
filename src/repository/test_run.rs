@@ -224,6 +224,8 @@ impl fmt::Display for StreamInterruption {
 pub struct RunMetadata {
     /// Git commit hash at the time of the run.
     pub git_commit: Option<String>,
+    /// Whether the git working tree had uncommitted changes.
+    pub git_dirty: Option<bool>,
     /// The test command that was executed.
     pub command: Option<String>,
     /// Number of parallel workers used.
