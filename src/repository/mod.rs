@@ -168,6 +168,14 @@ pub trait Repository {
     fn set_run_metadata(&mut self, _run_id: &str, _metadata: RunMetadata) -> Result<()> {
         Ok(())
     }
+
+    /// Get metadata for a test run.
+    ///
+    /// The default implementation returns empty metadata for backends that
+    /// don't support extended metadata.
+    fn get_run_metadata(&self, _run_id: &str) -> Result<RunMetadata> {
+        Ok(RunMetadata::default())
+    }
 }
 
 /// Factory trait for creating and opening repositories

@@ -112,6 +112,7 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             id INTEGER PRIMARY KEY,
             timestamp TEXT NOT NULL,
             git_commit TEXT,
+            git_dirty INTEGER,
             command TEXT,
             concurrency INTEGER,
             duration_secs REAL,
@@ -170,6 +171,7 @@ fn add_column_if_missing(conn: &rusqlite::Connection, table: &str, column: &str,
 fn migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
     add_column_if_missing(conn, "runs", "duration_secs", "REAL");
     add_column_if_missing(conn, "runs", "exit_code", "INTEGER");
+    add_column_if_missing(conn, "runs", "git_dirty", "INTEGER");
     Ok(())
 }
 
@@ -474,11 +476,34 @@ impl Repository for InquestRepository {
         Ok(count as usize)
     }
 
+    fn get_run_metadata(&self, run_id: &str) -> Result<RunMetadata> {
+        let result = self.conn.query_row(
+            "SELECT git_commit, git_dirty, command, concurrency, duration_secs, exit_code FROM runs WHERE id = ?",
+            [run_id],
+            |row| {
+                Ok(RunMetadata {
+                    git_commit: row.get(0)?,
+                    git_dirty: row.get(1)?,
+                    command: row.get(2)?,
+                    concurrency: row.get::<_, Option<i64>>(3)?.map(|v| v as u32),
+                    duration_secs: row.get(4)?,
+                    exit_code: row.get(5)?,
+                })
+            },
+        );
+        match result {
+            Ok(metadata) => Ok(metadata),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(RunMetadata::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     fn set_run_metadata(&mut self, run_id: &str, metadata: RunMetadata) -> Result<()> {
         self.conn.execute(
-            "UPDATE runs SET git_commit = ?, command = ?, concurrency = ?, duration_secs = ?, exit_code = ? WHERE id = ?",
+            "UPDATE runs SET git_commit = ?, git_dirty = ?, command = ?, concurrency = ?, duration_secs = ?, exit_code = ? WHERE id = ?",
             params![
                 metadata.git_commit,
+                metadata.git_dirty,
                 metadata.command,
                 metadata.concurrency,
                 metadata.duration_secs,
@@ -853,6 +878,7 @@ mod tests {
             &run_id,
             RunMetadata {
                 git_commit: Some("abc123".to_string()),
+                git_dirty: Some(true),
                 command: Some("python -m pytest".to_string()),
                 concurrency: Some(4),
                 duration_secs: Some(12.5),
@@ -864,21 +890,23 @@ mod tests {
         // Verify metadata was stored (open as new connection to verify)
         let db_path = temp.path().join(REPO_DIR).join("metadata.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        let (git_commit, command, concurrency, duration_secs, exit_code): (
+        let (git_commit, git_dirty, command, concurrency, duration_secs, exit_code): (
             Option<String>,
+            Option<bool>,
             Option<String>,
             Option<i64>,
             Option<f64>,
             Option<i32>,
         ) = conn
             .query_row(
-                "SELECT git_commit, command, concurrency, duration_secs, exit_code FROM runs WHERE id = ?",
+                "SELECT git_commit, git_dirty, command, concurrency, duration_secs, exit_code FROM runs WHERE id = ?",
                 [&run_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
             .unwrap();
 
         assert_eq!(git_commit, Some("abc123".to_string()));
+        assert_eq!(git_dirty, Some(true));
         assert_eq!(command, Some("python -m pytest".to_string()));
         assert_eq!(concurrency, Some(4));
         assert_eq!(duration_secs, Some(12.5));
@@ -950,6 +978,7 @@ mod tests {
             &run_id,
             RunMetadata {
                 git_commit: Some("def456".to_string()),
+                git_dirty: Some(false),
                 command: Some("cargo test".to_string()),
                 concurrency: Some(2),
                 duration_secs: Some(45.3),
@@ -960,16 +989,17 @@ mod tests {
 
         // Verify the new columns are populated
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        let (duration_secs, exit_code): (Option<f64>, Option<i32>) = conn
+        let (duration_secs, exit_code, git_dirty): (Option<f64>, Option<i32>, Option<bool>) = conn
             .query_row(
-                "SELECT duration_secs, exit_code FROM runs WHERE id = ?",
+                "SELECT duration_secs, exit_code, git_dirty FROM runs WHERE id = ?",
                 [&run_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
 
         assert_eq!(duration_secs, Some(45.3));
         assert_eq!(exit_code, Some(0));
+        assert_eq!(git_dirty, Some(false));
     }
 
     #[test]

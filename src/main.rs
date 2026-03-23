@@ -33,6 +33,13 @@ enum Commands {
     /// Initialize a new test repository
     Init,
 
+    /// Show detailed information about a test run
+    Info {
+        /// Run ID to show (defaults to latest; supports negative indices like -1, -2)
+        #[arg(long, short = 'r', value_hint = ValueHint::Other)]
+        run: Option<String>,
+    },
+
     /// Show help information for commands
     Help {
         /// Command to show help for
@@ -213,6 +220,10 @@ fn main() {
         }
         Commands::Init => {
             let cmd = InitCommand::new(cli.directory);
+            cmd.execute(&mut ui)
+        }
+        Commands::Info { run } => {
+            let cmd = InfoCommand::new(cli.directory, run);
             cmd.execute(&mut ui)
         }
         Commands::Help { command } => {

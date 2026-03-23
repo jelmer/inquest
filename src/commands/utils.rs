@@ -143,8 +143,21 @@ pub fn store_run_metadata(
             }
         });
 
+    let git_dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                Some(!output.stdout.is_empty())
+            } else {
+                None
+            }
+        });
+
     let metadata = crate::repository::RunMetadata {
         git_commit,
+        git_dirty,
         command: command.map(|s| s.to_string()),
         concurrency,
         duration_secs: duration.map(|d| d.as_secs_f64()),
