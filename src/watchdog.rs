@@ -1,0 +1,199 @@
+//! Test timeout watchdog for detecting and killing hung tests.
+//!
+//! Provides [`TestWatchdog`] for tracking per-test deadlines in streaming mode,
+//! and [`wait_with_timeout`] for waiting on child processes with multiple
+//! timeout conditions (overall, no-output, and per-test).
+
+use crate::config::TIMEOUT_POLL_INTERVAL;
+use crate::test_runner::ActivityTracker;
+use std::collections::{HashMap, HashSet};
+use std::process::{Child, ExitStatus};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Why a process was killed by the timeout logic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimeoutReason {
+    /// The overall timeout expired.
+    Timeout,
+    /// No output was received for too long.
+    NoOutput,
+    /// A specific test exceeded its per-test timeout.
+    TestTimeout(String),
+}
+
+/// Tracks per-test deadlines for tests running inside a single process.
+///
+/// The parse thread calls [`on_test_start`](TestWatchdog::on_test_start) and
+/// [`on_test_complete`](TestWatchdog::on_test_complete) as subunit events arrive.
+/// The wait loop polls [`check_timeout`](TestWatchdog::check_timeout) to detect
+/// hung tests.
+#[derive(Clone, Default)]
+pub struct TestWatchdog {
+    inner: Arc<Mutex<WatchdogState>>,
+}
+
+#[derive(Default)]
+struct WatchdogState {
+    /// Currently in-progress tests with their deadlines.
+    in_progress: HashMap<String, Instant>,
+    /// Tests that reached a terminal status.
+    completed: HashSet<String>,
+}
+
+impl TestWatchdog {
+    /// Create a new watchdog with no tests tracked.
+    pub fn new() -> Self {
+        TestWatchdog {
+            inner: Arc::new(Mutex::new(WatchdogState {
+                in_progress: HashMap::new(),
+                completed: HashSet::new(),
+            })),
+        }
+    }
+
+    /// Record that a test has started. If `timeout` is `Some`, a deadline is set.
+    pub fn on_test_start(&self, test_id: &str, timeout: Option<Duration>) {
+        let mut state = self.inner.lock().unwrap();
+        if let Some(t) = timeout {
+            state
+                .in_progress
+                .insert(test_id.to_string(), Instant::now() + t);
+        }
+    }
+
+    /// Record that a test has completed (any terminal status).
+    pub fn on_test_complete(&self, test_id: &str) {
+        let mut state = self.inner.lock().unwrap();
+        state.in_progress.remove(test_id);
+        state.completed.insert(test_id.to_string());
+    }
+
+    /// Check whether any in-progress test has exceeded its deadline.
+    ///
+    /// Returns the test ID of the first overdue test, or `None`.
+    pub fn check_timeout(&self) -> Option<String> {
+        let state = self.inner.lock().unwrap();
+        let now = Instant::now();
+        // Return the test with the earliest expired deadline
+        state
+            .in_progress
+            .iter()
+            .filter(|(_, deadline)| now >= **deadline)
+            .min_by_key(|(_, deadline)| *deadline)
+            .map(|(id, _)| id.clone())
+    }
+
+    /// Snapshot of all test IDs that have completed so far.
+    pub fn completed_tests(&self) -> HashSet<String> {
+        self.inner.lock().unwrap().completed.clone()
+    }
+}
+
+/// Wait for a child process with optional timeout, no-output detection,
+/// and per-test watchdog.
+///
+/// Returns:
+/// - `Ok(Ok(status))` — process exited normally
+/// - `Ok(Err(reason))` — process was killed due to a timeout
+/// - `Err(io_error)` — system error waiting/killing
+pub fn wait_with_timeout(
+    child: &mut Child,
+    timeout: Option<Duration>,
+    no_output_timeout: Option<Duration>,
+    activity: Option<&ActivityTracker>,
+    watchdog: Option<&TestWatchdog>,
+) -> std::io::Result<Result<ExitStatus, TimeoutReason>> {
+    let needs_polling =
+        timeout.is_some() || no_output_timeout.is_some() || watchdog.is_some();
+
+    if !needs_polling {
+        return child.wait().map(Ok);
+    }
+
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Ok(status));
+        }
+        if let Some(t) = timeout {
+            if start.elapsed() >= t {
+                child.kill()?;
+                let _ = child.wait();
+                return Ok(Err(TimeoutReason::Timeout));
+            }
+        }
+        if let (Some(no_out), Some(tracker)) = (no_output_timeout, activity) {
+            if tracker.elapsed_since_last() >= no_out {
+                child.kill()?;
+                let _ = child.wait();
+                return Ok(Err(TimeoutReason::NoOutput));
+            }
+        }
+        if let Some(wd) = watchdog {
+            if let Some(hung_test) = wd.check_timeout() {
+                child.kill()?;
+                let _ = child.wait();
+                return Ok(Err(TimeoutReason::TestTimeout(hung_test)));
+            }
+        }
+        std::thread::sleep(TIMEOUT_POLL_INTERVAL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_watchdog_no_timeout_returns_none() {
+        let wd = TestWatchdog::new();
+        wd.on_test_start("test1", None);
+        assert_eq!(wd.check_timeout(), None);
+    }
+
+    #[test]
+    fn test_watchdog_not_expired() {
+        let wd = TestWatchdog::new();
+        wd.on_test_start("test1", Some(Duration::from_secs(60)));
+        assert_eq!(wd.check_timeout(), None);
+    }
+
+    #[test]
+    fn test_watchdog_expired() {
+        let wd = TestWatchdog::new();
+        wd.on_test_start("test1", Some(Duration::ZERO));
+        std::thread::sleep(Duration::from_millis(1));
+        assert_eq!(wd.check_timeout(), Some("test1".to_string()));
+    }
+
+    #[test]
+    fn test_watchdog_complete_clears() {
+        let wd = TestWatchdog::new();
+        wd.on_test_start("test1", Some(Duration::ZERO));
+        wd.on_test_complete("test1");
+        std::thread::sleep(Duration::from_millis(1));
+        assert_eq!(wd.check_timeout(), None);
+        assert!(wd.completed_tests().contains("test1"));
+    }
+
+    #[test]
+    fn test_watchdog_multiple_tests() {
+        let wd = TestWatchdog::new();
+        wd.on_test_start("fast", Some(Duration::from_secs(60)));
+        wd.on_test_start("hung", Some(Duration::ZERO));
+        std::thread::sleep(Duration::from_millis(1));
+        assert_eq!(wd.check_timeout(), Some("hung".to_string()));
+    }
+
+    #[test]
+    fn test_watchdog_completed_tests_snapshot() {
+        let wd = TestWatchdog::new();
+        wd.on_test_start("a", Some(Duration::from_secs(60)));
+        wd.on_test_start("b", Some(Duration::from_secs(60)));
+        wd.on_test_complete("a");
+        let completed = wd.completed_tests();
+        assert_eq!(completed.len(), 1);
+        assert!(completed.contains("a"));
+    }
+}

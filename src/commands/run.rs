@@ -3,65 +3,23 @@
 use crate::commands::utils::open_or_init_repository;
 use crate::commands::Command;
 use crate::config::{
-    TimeoutSetting, AUTO_MAX_DURATION_MINIMUM, AUTO_TIMEOUT_MULTIPLIER, TIMEOUT_POLL_INTERVAL,
+    TimeoutSetting, AUTO_MAX_DURATION_MINIMUM, AUTO_TIMEOUT_MULTIPLIER,
+    MAX_TEST_TIMEOUT_RESTARTS,
 };
 use crate::error::Result;
 use crate::repository::TestId;
 use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 use crate::ui::UI;
+use crate::watchdog::{wait_with_timeout, TestWatchdog, TimeoutReason};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
-/// Why a process was killed by the timeout logic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TimeoutReason {
-    /// The overall timeout expired.
-    Timeout,
-    /// No output was received for too long.
-    NoOutput,
-}
-
-/// Wait for a child process with optional timeout and no-output detection.
-///
-/// Returns:
-/// - `Ok(Ok(status))` — process exited normally
-/// - `Ok(Err(reason))` — process was killed due to a timeout
-/// - `Err(io_error)` — system error waiting/killing
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: Option<Duration>,
-    no_output_timeout: Option<Duration>,
-    activity: Option<&crate::test_runner::ActivityTracker>,
-) -> std::io::Result<std::result::Result<std::process::ExitStatus, TimeoutReason>> {
-    if timeout.is_none() && no_output_timeout.is_none() {
-        return child.wait().map(Ok);
-    }
-
-    let start = std::time::Instant::now();
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Ok(status));
-        }
-        if let Some(t) = timeout {
-            if start.elapsed() >= t {
-                child.kill()?;
-                let _ = child.wait();
-                return Ok(Err(TimeoutReason::Timeout));
-            }
-        }
-        if let (Some(no_out), Some(tracker)) = (no_output_timeout, activity) {
-            if tracker.elapsed_since_last() >= no_out {
-                child.kill()?;
-                let _ = child.wait();
-                return Ok(Err(TimeoutReason::NoOutput));
-            }
-        }
-        std::thread::sleep(TIMEOUT_POLL_INTERVAL);
-    }
-}
+/// Type alias for the per-test timeout lookup function.
+type TestTimeoutFn = Arc<dyn Fn(&str) -> Option<Duration> + Send + Sync>;
 
 /// Helper to truncate test name to fit in available space
 fn truncate_test_name(test_id: &str, max_len: usize, fail_msg_len: usize) -> String {
@@ -720,7 +678,7 @@ impl RunCommand {
         Ok(exit_code)
     }
 
-    /// Run tests serially (single process)
+    /// Run tests serially (single process), with per-test timeout and restart.
     #[allow(clippy::too_many_arguments)]
     fn run_serial(
         &self,
@@ -730,17 +688,10 @@ impl RunCommand {
         test_ids: Option<&[crate::repository::TestId]>,
         max_duration: Option<Duration>,
         no_output_timeout: Option<Duration>,
+        test_timeout_fn: Option<&TestTimeoutFn>,
     ) -> Result<i32> {
         use std::process::{Command, Stdio};
 
-        // Get test count for progress bar
-        let test_count = if let Some(ids) = test_ids {
-            ids.len()
-        } else {
-            test_cmd.list_tests()?.len()
-        };
-
-        // Get historical test times for ETA estimation (only for the tests being run)
         let historical_times: HashMap<TestId, Duration> = if let Some(ids) = test_ids {
             repo.get_test_times_for_ids(ids).unwrap_or_default()
         } else {
@@ -748,24 +699,26 @@ impl RunCommand {
         };
         let estimated_total: Duration = historical_times.values().sum();
 
-        // Build command with test IDs if provided
-        // IMPORTANT: Keep _temp_file alive until after child process completes
-        let (cmd_str, _temp_file) =
-            test_cmd.build_command_full(test_ids, false, None, self.test_args.as_deref())?;
+        let mut remaining_tests: Option<Vec<TestId>> = test_ids.map(|ids| ids.to_vec());
+        let mut all_results: HashMap<TestId, crate::repository::TestResult> = HashMap::new();
+        let mut restarts = 0;
+        let mut any_command_failed = false;
 
-        // Begin the test run and get a writer for streaming raw bytes
-        let (run_id, raw_writer) = repo.begin_test_run_raw()?;
+        let total_test_count = if let Some(ids) = test_ids {
+            ids.len()
+        } else {
+            test_cmd.list_tests()?.len()
+        };
 
-        // Create progress bar with dynamic width
+        let start_time = std::time::Instant::now();
+        let (run_id, _) = repo.begin_test_run_raw()?;
+
         let term_width = console::Term::stdout().size().1 as usize;
-        // Template: "[HH:MM:SS] [bar] pos/len msg"
-        // Fixed elements: "[HH:MM:SS] " (11) + " " (1) + " " (1) + "9999/9999" (9) + " " (1) = ~23 chars
-        let fixed_width = 25; // Add a bit of margin
-        let bar_width = term_width.saturating_sub(fixed_width + 30).clamp(20, 60); // Bar between 20-60 chars
-                                                                                   // Calculate max message length
+        let fixed_width = 25;
+        let bar_width = term_width.saturating_sub(fixed_width + 30).clamp(20, 60);
         let max_msg_len = term_width.saturating_sub(bar_width + fixed_width).max(30);
 
-        let progress_bar = ProgressBar::new(test_count as u64);
+        let progress_bar = ProgressBar::new(total_test_count as u64);
         progress_bar.set_style(
             ProgressStyle::default_bar()
                 .template(&format!(
@@ -775,51 +728,7 @@ impl RunCommand {
                 .unwrap()
                 .progress_chars("█▓▒░  "),
         );
-
-        // Spawn test command with both stdout and stderr piped
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(&cmd_str)
-            .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                progress_bar.finish_and_clear();
-                crate::error::Error::CommandExecution(format!(
-                    "Failed to execute test command: {}",
-                    e
-                ))
-            })?;
-
-        // Take stdout and stderr for streaming
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let stderr = child.stderr.take().expect("stderr was piped");
-
-        // Tee the stream: capture raw bytes for storage AND parse for progress display
-        let (tx, rx) = std::sync::mpsc::sync_channel(100);
-
-        // Set up activity tracking for no-output timeout detection
-        let activity_tracker =
-            no_output_timeout.map(|_| crate::test_runner::ActivityTracker::new());
-
-        // Thread for stdout (with optional activity tracking)
-        let tee_thread = if let Some(ref tracker) = activity_tracker {
-            crate::test_runner::spawn_stdout_tee_tracked(stdout, raw_writer, tx, tracker.clone())
-        } else {
-            crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx)
-        };
-
-        // Thread for stderr - write directly to stderr (not to parser or storage)
-        let stderr_thread =
-            crate::test_runner::spawn_stderr_forwarder(stderr, progress_bar.clone());
-
-        // Parse stdout stream in a thread for real-time progress
-        let progress_bar_clone = progress_bar.clone();
-        let run_id_clone = run_id.clone();
-
-        // Create a reader from the channel
-        let channel_reader = crate::test_runner::ChannelReader::new(rx);
+        progress_bar.set_position(all_results.len() as u64);
 
         let output_filter = if self.all_output {
             subunit_stream::OutputFilter::All
@@ -827,145 +736,268 @@ impl RunCommand {
             subunit_stream::OutputFilter::FailuresOnly
         };
 
-        let start_time = std::time::Instant::now();
-        let historical_times_for_thread = historical_times.clone();
-        let parse_thread = std::thread::spawn(move || {
-            let historical_times = historical_times_for_thread;
-            let mut failures = 0;
-            let mut completed_duration = Duration::ZERO;
-            let progress_bar_for_bytes = progress_bar_clone.clone();
-            let progress_bar_for_style = progress_bar_clone.clone();
+        loop {
+            let current_ids = remaining_tests.as_deref();
+            let (cmd_str, _temp_file) =
+                test_cmd.build_command_full(current_ids, false, None, self.test_args.as_deref())?;
+            let (_, raw_writer) = repo.begin_test_run_raw()?;
 
-            let result = subunit_stream::parse_stream_with_progress(
-                channel_reader,
-                run_id_clone,
-                |test_id, status| {
-                    let indicator = status.indicator();
-                    if !indicator.is_empty() {
-                        progress_bar_clone.inc(1);
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg(&cmd_str)
+                .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| {
+                    progress_bar.finish_and_clear();
+                    crate::error::Error::CommandExecution(format!(
+                        "Failed to execute test command: {}",
+                        e
+                    ))
+                })?;
 
-                        // Track completed historical duration for ETA
-                        if let Some(&dur) = historical_times.get(&TestId::new(test_id)) {
-                            completed_duration += dur;
+            let stdout = child.stdout.take().expect("stdout was piped");
+            let stderr = child.stderr.take().expect("stderr was piped");
+
+            let (tx, rx) = std::sync::mpsc::sync_channel(100);
+            let activity_tracker =
+                no_output_timeout.map(|_| crate::test_runner::ActivityTracker::new());
+            let tee_thread = if let Some(ref tracker) = activity_tracker {
+                crate::test_runner::spawn_stdout_tee_tracked(
+                    stdout,
+                    raw_writer,
+                    tx,
+                    tracker.clone(),
+                )
+            } else {
+                crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx)
+            };
+            let stderr_thread =
+                crate::test_runner::spawn_stderr_forwarder(stderr, progress_bar.clone());
+
+            let watchdog = test_timeout_fn.as_ref().map(|_| TestWatchdog::new());
+            let watchdog_for_thread = watchdog.clone();
+            let test_timeout_fn_clone = test_timeout_fn.cloned();
+
+            let progress_bar_clone = progress_bar.clone();
+            let run_id_clone = run_id.clone();
+            let channel_reader = crate::test_runner::ChannelReader::new(rx);
+            let historical_times_for_thread = historical_times.clone();
+
+            let parse_thread = std::thread::spawn(move || {
+                let historical_times = historical_times_for_thread;
+                let mut failures = 0;
+                let mut completed_duration = Duration::ZERO;
+                let progress_bar_for_bytes = progress_bar_clone.clone();
+                let progress_bar_for_style = progress_bar_clone.clone();
+
+                subunit_stream::parse_stream_with_progress(
+                    channel_reader,
+                    run_id_clone,
+                    |test_id, status| {
+                        if let Some(ref wd) = watchdog_for_thread {
+                            if matches!(status, subunit_stream::ProgressStatus::InProgress) {
+                                let timeout =
+                                    test_timeout_fn_clone.as_ref().and_then(|f| f(test_id));
+                                wd.on_test_start(test_id, timeout);
+                            } else if !status.indicator().is_empty() {
+                                wd.on_test_complete(test_id);
+                            }
                         }
 
-                        // Track failures
-                        if matches!(
-                            status,
-                            subunit_stream::ProgressStatus::Failed
-                                | subunit_stream::ProgressStatus::UnexpectedSuccess
-                        ) {
-                            failures += 1;
+                        let indicator = status.indicator();
+                        if !indicator.is_empty() {
+                            progress_bar_clone.inc(1);
+
+                            if let Some(&dur) = historical_times.get(&TestId::new(test_id)) {
+                                completed_duration += dur;
+                            }
+                            if matches!(
+                                status,
+                                subunit_stream::ProgressStatus::Failed
+                                    | subunit_stream::ProgressStatus::UnexpectedSuccess
+                            ) {
+                                failures += 1;
+                            }
+
+                            let completed = progress_bar_clone.position();
+                            update_progress_bar_style(
+                                &progress_bar_for_style,
+                                bar_width,
+                                completed,
+                                failures,
+                            );
+
+                            let fail_msg = format_failure_msg(failures, false);
+                            let eta_msg = format_eta(
+                                estimated_total,
+                                completed_duration,
+                                start_time.elapsed(),
+                            );
+                            let extra_len = if failures > 0 {
+                                12 + failures.to_string().len()
+                            } else {
+                                0
+                            } + eta_msg.len();
+                            let short_name = truncate_test_name(test_id, max_msg_len, extra_len);
+
+                            progress_bar_clone.set_message(format!(
+                                "{} {}{}{}",
+                                indicator, short_name, fail_msg, eta_msg
+                            ));
                         }
+                    },
+                    |bytes| {
+                        write_non_subunit_output(&progress_bar_for_bytes, bytes);
+                    },
+                    output_filter,
+                )
+            });
 
-                        // Update progress bar color based on failure rate
-                        let completed = progress_bar_clone.position();
-                        update_progress_bar_style(
-                            &progress_bar_for_style,
-                            bar_width,
-                            completed,
-                            failures,
-                        );
+            let wait_result = wait_with_timeout(
+                &mut child,
+                max_duration.map(|d| d.saturating_sub(start_time.elapsed())),
+                no_output_timeout,
+                activity_tracker.as_ref(),
+                watchdog.as_ref(),
+            )
+            .map_err(|e| {
+                progress_bar.finish_and_clear();
+                crate::error::Error::CommandExecution(format!(
+                    "Failed to wait for test command: {}",
+                    e
+                ))
+            })?;
 
-                        let fail_msg = format_failure_msg(failures, false);
-                        let eta_msg =
-                            format_eta(estimated_total, completed_duration, start_time.elapsed());
-                        let extra_len = if failures > 0 {
-                            12 + failures.to_string().len()
-                        } else {
-                            0
-                        } + eta_msg.len();
-                        let short_name = truncate_test_name(test_id, max_msg_len, extra_len);
+            drop(_temp_file);
 
-                        progress_bar_clone.set_message(format!(
-                            "{} {}{}{}",
-                            indicator, short_name, fail_msg, eta_msg
-                        ));
-                    }
-                },
-                |bytes| {
-                    write_non_subunit_output(&progress_bar_for_bytes, bytes);
-                },
-                output_filter,
-            );
-            result
-        });
+            let partial_run = parse_thread.join().map_err(|_| {
+                progress_bar.finish_and_clear();
+                crate::error::Error::CommandExecution("Parse thread panicked".to_string())
+            })??;
 
-        // Wait for process to complete (with optional timeout / no-output detection)
-        let wait_result = wait_with_timeout(
-            &mut child,
-            max_duration,
-            no_output_timeout,
-            activity_tracker.as_ref(),
-        )
-        .map_err(|e| {
-            progress_bar.finish_and_clear();
-            crate::error::Error::CommandExecution(format!("Failed to wait for test command: {}", e))
-        })?;
+            tee_thread
+                .join()
+                .map_err(|_| {
+                    progress_bar.finish_and_clear();
+                    crate::error::Error::CommandExecution("Tee thread panicked".to_string())
+                })?
+                .map_err(|e| {
+                    progress_bar.finish_and_clear();
+                    crate::error::Error::Io(e)
+                })?;
+            stderr_thread
+                .join()
+                .map_err(|_| {
+                    progress_bar.finish_and_clear();
+                    crate::error::Error::CommandExecution("Stderr thread panicked".to_string())
+                })?
+                .map_err(|e| {
+                    progress_bar.finish_and_clear();
+                    crate::error::Error::Io(e)
+                })?;
 
-        // Explicitly drop temp file now that child process has completed
-        drop(_temp_file);
-
-        let command_failed = match &wait_result {
-            Ok(status) => !status.success(),
-            Err(reason) => {
-                let elapsed = start_time.elapsed();
-                match reason {
-                    TimeoutReason::Timeout => tracing::warn!(
-                        "test run killed after {:.1}s (max duration exceeded)",
-                        elapsed.as_secs_f64()
-                    ),
-                    TimeoutReason::NoOutput => tracing::warn!(
-                        "test run killed after {:.1}s (no output for {:?})",
-                        elapsed.as_secs_f64(),
-                        no_output_timeout.unwrap()
-                    ),
-                }
-                true
+            for (id, result) in partial_run.results {
+                all_results.insert(id, result);
             }
-        };
 
-        // Get results from parse thread
-        let test_run = parse_thread.join().map_err(|_| {
-            progress_bar.finish_and_clear();
-            crate::error::Error::CommandExecution("Parse thread panicked".to_string())
-        })??;
+            match wait_result {
+                Err(TimeoutReason::TestTimeout(ref hung_test)) => {
+                    tracing::warn!(
+                        "test {} timed out, killing process and restarting",
+                        hung_test
+                    );
+                    let test_id = TestId::new(hung_test);
+                    all_results.insert(
+                        test_id.clone(),
+                        crate::repository::TestResult::error(
+                            test_id,
+                            "test timed out (killed after per-test timeout)",
+                        ),
+                    );
+                    any_command_failed = true;
 
-        // Wait for tee threads to finish writing raw bytes
-        tee_thread
-            .join()
-            .map_err(|_| {
-                progress_bar.finish_and_clear();
-                crate::error::Error::CommandExecution("Tee thread panicked".to_string())
-            })?
-            .map_err(|e| {
-                progress_bar.finish_and_clear();
-                crate::error::Error::Io(e)
-            })?;
+                    let completed = watchdog
+                        .as_ref()
+                        .map(|wd| wd.completed_tests())
+                        .unwrap_or_default();
+                    let next_remaining: Vec<TestId> = if let Some(ref ids) = remaining_tests {
+                        ids.iter()
+                            .filter(|id| {
+                                !completed.contains(id.as_str()) && id.as_str() != hung_test
+                            })
+                            .cloned()
+                            .collect()
+                    } else {
+                        break;
+                    };
 
-        stderr_thread
-            .join()
-            .map_err(|_| {
-                progress_bar.finish_and_clear();
-                crate::error::Error::CommandExecution("Stderr thread panicked".to_string())
-            })?
-            .map_err(|e| {
-                progress_bar.finish_and_clear();
-                crate::error::Error::Io(e)
-            })?;
+                    restarts += 1;
+                    if restarts >= MAX_TEST_TIMEOUT_RESTARTS || next_remaining.is_empty() {
+                        if restarts >= MAX_TEST_TIMEOUT_RESTARTS {
+                            tracing::error!(
+                                "exceeded maximum restart limit ({}), stopping",
+                                MAX_TEST_TIMEOUT_RESTARTS
+                            );
+                        }
+                        break;
+                    }
+
+                    tracing::info!(
+                        "restarting with {} remaining tests",
+                        next_remaining.len()
+                    );
+                    remaining_tests = Some(next_remaining);
+                    continue;
+                }
+                Err(ref reason) => {
+                    let elapsed = start_time.elapsed();
+                    match reason {
+                        TimeoutReason::Timeout => tracing::warn!(
+                            "test run killed after {:.1}s (max duration exceeded)",
+                            elapsed.as_secs_f64()
+                        ),
+                        TimeoutReason::NoOutput => tracing::warn!(
+                            "test run killed after {:.1}s (no output for {:?})",
+                            elapsed.as_secs_f64(),
+                            no_output_timeout.unwrap()
+                        ),
+                        TimeoutReason::TestTimeout(_) => unreachable!(),
+                    }
+                    any_command_failed = true;
+                    break;
+                }
+                Ok(status) => {
+                    if !status.success() {
+                        any_command_failed = true;
+                    }
+                    break;
+                }
+            }
+        }
 
         progress_bar.finish_and_clear();
 
+        let mut combined_run = crate::repository::TestRun::new(run_id.clone());
+        combined_run.timestamp = chrono::Utc::now();
+        for (_, result) in all_results {
+            combined_run.add_result(result);
+        }
+
         let duration = start_time.elapsed();
-        let exit_code = if test_run.count_failures() > 0 || command_failed {
+        let exit_code = if combined_run.count_failures() > 0 || any_command_failed {
             1
         } else {
             0
         };
 
-        // Update failing tests and test times
-        crate::commands::utils::update_repository_failing_tests(repo, &test_run, self.partial)?;
-        crate::commands::utils::update_test_times_from_run(repo, &test_run)?;
+        crate::commands::utils::update_repository_failing_tests(
+            repo,
+            &combined_run,
+            self.partial,
+        )?;
+        crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
         crate::commands::utils::store_run_metadata(
             repo,
             &run_id,
@@ -975,9 +1007,8 @@ impl RunCommand {
             Some(exit_code),
         )?;
 
-        // Display summary and slow test warnings
-        crate::commands::utils::display_test_summary(ui, &run_id, &test_run)?;
-        crate::commands::utils::warn_slow_tests(ui, &test_run, &historical_times)?;
+        crate::commands::utils::display_test_summary(ui, &run_id, &combined_run)?;
+        crate::commands::utils::warn_slow_tests(ui, &combined_run, &historical_times)?;
 
         Ok(exit_code)
     }
@@ -993,6 +1024,7 @@ impl RunCommand {
         concurrency: usize,
         max_duration: Option<Duration>,
         no_output_timeout: Option<Duration>,
+        test_timeout_fn: Option<&TestTimeoutFn>,
     ) -> Result<i32> {
         use std::collections::HashMap;
         use std::process::{Command, Stdio};
@@ -1165,6 +1197,11 @@ impl RunCommand {
             // Create a reader from the channel
             let channel_reader = crate::test_runner::ChannelReader::new(rx);
 
+            // Set up per-test timeout watchdog for this worker
+            let worker_watchdog = test_timeout_fn.as_ref().map(|_| TestWatchdog::new());
+            let watchdog_for_thread = worker_watchdog.clone();
+            let test_timeout_fn_clone = test_timeout_fn.cloned();
+
             // Spawn thread to parse output in real-time
             let worker_bar_clone = worker_bar.clone();
             let overall_bar_clone = overall_bar.clone();
@@ -1184,6 +1221,18 @@ impl RunCommand {
                     channel_reader,
                     worker_run_id_clone,
                     |test_id, status| {
+                        // Update watchdog on test lifecycle events
+                        if let Some(ref wd) = watchdog_for_thread {
+                            if matches!(status, subunit_stream::ProgressStatus::InProgress) {
+                                let timeout = test_timeout_fn_clone
+                                    .as_ref()
+                                    .and_then(|f| f(test_id));
+                                wd.on_test_start(test_id, timeout);
+                            } else if !status.indicator().is_empty() {
+                                wd.on_test_complete(test_id);
+                            }
+                        }
+
                         let indicator = status.indicator();
                         if !indicator.is_empty() {
                             worker_bar_clone.inc(1);
@@ -1252,7 +1301,7 @@ impl RunCommand {
                 tee_thread,
                 stderr_thread,
             ));
-            workers.push((worker_id, child, _temp_file, worker_activity));
+            workers.push((worker_id, child, _temp_file, worker_activity, worker_watchdog));
         }
 
         // Collect results from parse threads and wait for workers to complete
@@ -1311,12 +1360,13 @@ impl RunCommand {
 
         // Now wait for all worker processes to complete (with optional timeouts)
         let remaining_timeout = max_duration.map(|d| d.saturating_sub(start_time.elapsed()));
-        for (worker_id, mut child, _temp_file, worker_activity) in workers {
+        for (worker_id, mut child, _temp_file, worker_activity, worker_watchdog) in workers {
             let wait_result = wait_with_timeout(
                 &mut child,
                 remaining_timeout,
                 no_output_timeout,
                 worker_activity.as_ref(),
+                worker_watchdog.as_ref(),
             )
             .map_err(|e| {
                 crate::error::Error::CommandExecution(format!(
@@ -1340,6 +1390,14 @@ impl RunCommand {
                         "worker {} killed (no output for {:?})",
                         worker_id,
                         no_output_timeout.unwrap()
+                    );
+                    any_failed = true;
+                }
+                Err(TimeoutReason::TestTimeout(ref test_id)) => {
+                    tracing::warn!(
+                        "worker {} killed (test {} timed out)",
+                        worker_id,
+                        test_id
                     );
                     any_failed = true;
                 }
@@ -1476,7 +1534,7 @@ impl RunCommand {
             });
 
             let wait_result =
-                wait_with_timeout(&mut child, per_test_timeout, None, None).map_err(|e| {
+                wait_with_timeout(&mut child, per_test_timeout, None, None, None).map_err(|e| {
                     crate::error::Error::CommandExecution(format!(
                         "Failed to wait for test {}: {}",
                         test_id, e
@@ -1498,7 +1556,7 @@ impl RunCommand {
             if let Err(reason) = wait_result {
                 let elapsed = test_start.elapsed();
                 let msg = match reason {
-                    TimeoutReason::Timeout => {
+                    TimeoutReason::Timeout | TimeoutReason::TestTimeout(_) => {
                         format!("test timed out after {:.1}s", elapsed.as_secs_f64())
                     }
                     TimeoutReason::NoOutput => {
@@ -1733,6 +1791,17 @@ impl Command for RunCommand {
             }
         };
 
+        // Build per-test timeout lookup closure
+        let test_timeout_fn: Option<TestTimeoutFn> = if test_timeout != TimeoutSetting::Disabled {
+            let tt = test_timeout.clone();
+            let ht = historical_times.clone();
+            Some(Arc::new(move |test_id: &str| {
+                tt.effective_timeout(ht.get(&TestId::new(test_id)).copied())
+            }))
+        } else {
+            None
+        };
+
         // For isolated mode, we need a list of tests
         if self.isolated {
             let all_tests = if let Some(ids) = test_ids {
@@ -1795,6 +1864,7 @@ impl Command for RunCommand {
                         concurrency,
                         max_duration_value,
                         no_output_timeout,
+                        test_timeout_fn.as_ref(),
                     )?
                 } else {
                     self.run_serial(
@@ -1804,6 +1874,7 @@ impl Command for RunCommand {
                         test_ids.as_deref(),
                         max_duration_value,
                         no_output_timeout,
+                        test_timeout_fn.as_ref(),
                     )?
                 };
 
@@ -1827,6 +1898,7 @@ impl Command for RunCommand {
                     concurrency,
                     max_duration_value,
                     no_output_timeout,
+                    test_timeout_fn.as_ref(),
                 )
             } else {
                 // Serial execution
@@ -1837,6 +1909,7 @@ impl Command for RunCommand {
                     test_ids.as_deref(),
                     max_duration_value,
                     no_output_timeout,
+                    test_timeout_fn.as_ref(),
                 )
             }
         }
