@@ -42,6 +42,8 @@ num_cpus = "1.16"
 indicatif = ">=0.17,<0.19"
 console = ">=0.15,<0.17"
 toml = "1.0.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 rmcp = { version = "1", features = ["server", "transport-io"], optional = true }
 tokio = { version = "1", features = ["rt", "macros"], optional = true }
 schemars = { version = "1", optional = true }

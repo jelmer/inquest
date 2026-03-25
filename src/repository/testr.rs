@@ -264,7 +264,7 @@ impl FileRepository {
         }
 
         // If neither format works, return empty (with warning)
-        eprintln!("Warning: Could not read times database in SQLite or GDBM format, continuing without historical timing data");
+        tracing::warn!("Could not read times database in SQLite or GDBM format, continuing without historical timing data");
         Ok(HashMap::new())
     }
 

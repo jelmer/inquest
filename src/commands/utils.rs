@@ -1,6 +1,6 @@
 //! Utility functions for command implementation
 
-use crate::config::CONFIG_FILE_NAMES;
+use crate::config::{CONFIG_FILE_NAMES, SLOW_TEST_WARNING_MULTIPLIER};
 use crate::error::Result;
 use crate::repository::inquest::InquestRepositoryFactory;
 #[cfg(feature = "testr")]
@@ -205,6 +205,59 @@ pub fn display_test_summary(ui: &mut dyn UI, run_id: &str, test_run: &TestRun) -
         ui.output(&format!(
             "  WARNING: Stream interrupted ({}), results may be incomplete",
             interruption
+        ))?;
+    }
+
+    Ok(())
+}
+
+/// Warn about tests that ran significantly slower than their historical average.
+pub fn warn_slow_tests(
+    ui: &mut dyn UI,
+    test_run: &TestRun,
+    historical_times: &std::collections::HashMap<crate::repository::TestId, std::time::Duration>,
+) -> Result<()> {
+    if historical_times.is_empty() {
+        return Ok(());
+    }
+
+    let mut slow_tests: Vec<_> = test_run
+        .results
+        .values()
+        .filter_map(|result| {
+            let actual = result.duration?;
+            let historical = historical_times.get(&result.test_id)?;
+            let threshold = std::time::Duration::from_secs_f64(
+                historical.as_secs_f64() * SLOW_TEST_WARNING_MULTIPLIER,
+            );
+            if actual > threshold {
+                Some((&result.test_id, actual, *historical))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if slow_tests.is_empty() {
+        return Ok(());
+    }
+
+    slow_tests.sort_by(|a, b| b.1.cmp(&a.1));
+
+    ui.output(&format!(
+        "\n  {} test(s) ran significantly slower than historical average ({:.0}x threshold):",
+        slow_tests.len(),
+        SLOW_TEST_WARNING_MULTIPLIER,
+    ))?;
+
+    for (test_id, actual, historical) in slow_tests.iter().take(10) {
+        let ratio = actual.as_secs_f64() / historical.as_secs_f64();
+        ui.output(&format!(
+            "    {}: {:.1}s (was {:.1}s, {:.1}x slower)",
+            test_id,
+            actual.as_secs_f64(),
+            historical.as_secs_f64(),
+            ratio,
         ))?;
     }
 

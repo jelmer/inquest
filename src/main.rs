@@ -4,9 +4,9 @@ use clap::builder::ValueHint;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use inquest::commands::*;
+use inquest::config::{parse_duration_string, TimeoutSetting};
 use inquest::error::Result;
 use inquest::ui::UI;
-use std::io::Write;
 
 // Explicit imports for commands not covered by wildcard
 use inquest::commands::AnalyzeIsolationCommand;
@@ -183,6 +183,18 @@ enum Commands {
         #[arg(value_name = "TESTFILTER")]
         testfilters: Vec<String>,
 
+        /// Per-test timeout: "5m", "auto" (from history), or "disabled" (default)
+        #[arg(long, value_name = "TIMEOUT")]
+        test_timeout: Option<String>,
+
+        /// Overall run timeout: "30m", "auto" (from history), or "disabled" (default)
+        #[arg(long, value_name = "DURATION")]
+        max_duration: Option<String>,
+
+        /// Kill test process if no output for this duration (e.g. "60s")
+        #[arg(long, value_name = "DURATION")]
+        no_output_timeout: Option<String>,
+
         /// Additional arguments to pass to the test command (use after --)
         #[arg(last = true, value_name = "TESTARGS")]
         testargs: Vec<String>,
@@ -199,17 +211,28 @@ impl UI for CliUI {
     }
 
     fn error(&mut self, message: &str) -> Result<()> {
-        eprintln!("Error: {}", message);
+        tracing::error!("{}", message);
         Ok(())
     }
 
     fn warning(&mut self, message: &str) -> Result<()> {
-        eprintln!("Warning: {}", message);
+        tracing::warn!("{}", message);
         Ok(())
     }
 }
 
 fn main() {
+    // Initialize tracing with stderr output, respecting RUST_LOG env var
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .without_time()
+        .init();
+
     let cli = Cli::parse();
 
     let mut ui = CliUI;
@@ -283,7 +306,7 @@ fn main() {
             {
                 Ok(p) => p,
                 Err(e) => {
-                    let _ = writeln!(std::io::stderr(), "Error: invalid pattern: {}", e);
+                    tracing::error!("invalid pattern: {}", e);
                     std::process::exit(1);
                 }
             };
@@ -317,7 +340,7 @@ fn main() {
             match rt.block_on(inquest::mcp::serve(directory)) {
                 Ok(()) => Ok(0),
                 Err(e) => {
-                    let _ = writeln!(std::io::stderr(), "MCP server error: {}", e);
+                    tracing::error!("MCP server error: {}", e);
                     Ok(1)
                 }
             }
@@ -333,9 +356,45 @@ fn main() {
             isolated,
             subunit,
             all_output,
+            test_timeout,
+            max_duration,
+            no_output_timeout,
             testfilters,
             testargs,
         } => {
+            // Parse timeout settings: CLI flags override config file values.
+            // Config file values are resolved later in RunCommand::execute() if these are Disabled/None.
+            let test_timeout = match test_timeout {
+                Some(s) => match TimeoutSetting::parse(&s) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => TimeoutSetting::Disabled,
+            };
+            let max_duration = match max_duration {
+                Some(s) => match TimeoutSetting::parse(&s) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => TimeoutSetting::Disabled,
+            };
+            let no_output_timeout = match no_output_timeout {
+                Some(s) => match parse_duration_string(&s) {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
+
             let cmd = RunCommand::with_all_options(
                 cli.directory,
                 partial || failing, // --failing implies partial mode
@@ -358,6 +417,9 @@ fn main() {
                 } else {
                     Some(testargs)
                 },
+                test_timeout,
+                max_duration,
+                no_output_timeout,
             );
             cmd.execute(&mut ui)
         }
@@ -366,10 +428,9 @@ fn main() {
     match result {
         Ok(exit_code) => std::process::exit(exit_code),
         Err(e) => {
-            let _ = writeln!(std::io::stderr(), "Error: {}", e);
+            tracing::error!("{}", e);
             if matches!(e, inquest::error::Error::RepositoryNotFound(_)) {
-                let _ = writeln!(
-                    std::io::stderr(),
+                tracing::info!(
                     "Hint: Run 'inq init', use '--force-init', or add an inquest.toml to create a repository automatically."
                 );
             }

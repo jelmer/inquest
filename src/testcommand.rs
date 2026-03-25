@@ -355,9 +355,10 @@ impl TestCommand {
 
             if !output.status.success() {
                 // Log warning but continue disposing other instances
-                eprintln!(
-                    "Warning: instance_dispose failed for {} with status: {}",
-                    instance_id, output.status
+                tracing::warn!(
+                    "instance_dispose failed for {} with status: {}",
+                    instance_id,
+                    output.status
                 );
             }
         }
