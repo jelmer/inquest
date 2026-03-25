@@ -11,6 +11,25 @@ use std::process::{Child, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Kill a child process and all its descendants by sending SIGKILL to its
+/// process group. Falls back to killing just the child if the group kill fails.
+#[cfg(unix)]
+fn kill_process_tree(child: &mut Child) -> std::io::Result<()> {
+    let pid = child.id() as libc::pid_t;
+    // Try to kill the process group (negative PID)
+    let ret = unsafe { libc::kill(-pid, libc::SIGKILL) };
+    if ret != 0 {
+        // Fall back to killing just the child
+        child.kill()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn kill_process_tree(child: &mut Child) -> std::io::Result<()> {
+    child.kill()
+}
+
 /// Why a process was killed by the timeout logic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimeoutReason {
@@ -118,21 +137,21 @@ pub fn wait_with_timeout(
         }
         if let Some(t) = timeout {
             if start.elapsed() >= t {
-                child.kill()?;
+                kill_process_tree(child)?;
                 let _ = child.wait();
                 return Ok(Err(TimeoutReason::Timeout));
             }
         }
         if let (Some(no_out), Some(tracker)) = (no_output_timeout, activity) {
             if tracker.elapsed_since_last() >= no_out {
-                child.kill()?;
+                kill_process_tree(child)?;
                 let _ = child.wait();
                 return Ok(Err(TimeoutReason::NoOutput));
             }
         }
         if let Some(wd) = watchdog {
             if let Some(hung_test) = wd.check_timeout() {
-                child.kill()?;
+                kill_process_tree(child)?;
                 let _ = child.wait();
                 return Ok(Err(TimeoutReason::TestTimeout(hung_test)));
             }
@@ -195,5 +214,75 @@ mod tests {
         let completed = wd.completed_tests();
         assert_eq!(completed.len(), 1);
         assert!(completed.contains("a"));
+    }
+
+    #[test]
+    fn test_wait_with_timeout_normal_exit() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("true")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let result = wait_with_timeout(&mut child, None, None, None, None).unwrap();
+        assert!(result.is_ok());
+        assert!(result.unwrap().success());
+    }
+
+    #[test]
+    fn test_wait_with_timeout_overall_timeout() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let result = wait_with_timeout(
+            &mut child,
+            Some(Duration::from_millis(100)),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result, Err(TimeoutReason::Timeout));
+    }
+
+    #[test]
+    fn test_wait_with_timeout_watchdog_kills_process() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let wd = TestWatchdog::new();
+        // Set a test with an already-expired deadline
+        wd.on_test_start("hung_test", Some(Duration::ZERO));
+        std::thread::sleep(Duration::from_millis(1));
+
+        let result =
+            wait_with_timeout(&mut child, None, None, None, Some(&wd)).unwrap();
+        assert_eq!(
+            result,
+            Err(TimeoutReason::TestTimeout("hung_test".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_wait_with_timeout_watchdog_no_timeout_if_test_completes() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("true")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let wd = TestWatchdog::new();
+        wd.on_test_start("fast_test", Some(Duration::from_secs(60)));
+
+        let result =
+            wait_with_timeout(&mut child, None, None, None, Some(&wd)).unwrap();
+        // Process exits before timeout
+        assert!(result.is_ok());
     }
 }

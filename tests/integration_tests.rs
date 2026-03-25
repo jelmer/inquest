@@ -616,3 +616,74 @@ test_run_concurrency = "echo 2"
     let concurrency = test_cmd.get_concurrency().unwrap();
     assert_eq!(concurrency, Some(2));
 }
+
+#[test]
+fn test_serial_run_with_max_duration_kills_hanging_process() {
+    use inquest::commands::RunCommand;
+    use inquest::repository::inquest::InquestRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    let config = "test_command = \"sleep 300\"\n";
+    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+    // Write a load-list file so list_tests() is never called (which would hang)
+    let load_list_path = temp.path().join("test_ids.txt");
+    fs::write(&load_list_path, "fake_test\n").unwrap();
+
+    let mut ui = TestUI::new();
+    let cmd = RunCommand::with_all_options(
+        Some(base_path),
+        false, false, false, false,
+        Some(load_list_path.to_string_lossy().to_string()),
+        None, false, false, false, false,
+        None, None,
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
+        None,
+    );
+
+    let result = cmd.execute(&mut ui);
+    // Should complete (not hang) — max_duration kills the process
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), 1);
+}
+
+#[test]
+fn test_serial_run_with_no_output_timeout_kills_silent_process() {
+    use inquest::commands::RunCommand;
+    use inquest::repository::inquest::InquestRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    let config = "test_command = \"sleep 300\"\n";
+    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+    let load_list_path = temp.path().join("test_ids.txt");
+    fs::write(&load_list_path, "fake_test\n").unwrap();
+
+    let mut ui = TestUI::new();
+    let cmd = RunCommand::with_all_options(
+        Some(base_path),
+        false, false, false, false,
+        Some(load_list_path.to_string_lossy().to_string()),
+        None, false, false, false, false,
+        None, None,
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Disabled,
+        Some(std::time::Duration::from_secs(2)),
+    );
+
+    let result = cmd.execute(&mut ui);
+    // Should complete (not hang) — no_output_timeout kills the process
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), 1);
+}
