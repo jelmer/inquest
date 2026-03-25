@@ -422,4 +422,51 @@ mod tests {
 
         assert!(resolve_run_id(&*repo, Some("-0")).is_err());
     }
+
+    #[test]
+    fn test_warn_slow_tests_no_history() {
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let run = crate::repository::TestRun::new("0".to_string());
+        let historical = std::collections::HashMap::new();
+        warn_slow_tests(&mut ui, &run, &historical).unwrap();
+        assert!(ui.output.is_empty());
+    }
+
+    #[test]
+    fn test_warn_slow_tests_no_slow_tests() {
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let mut run = crate::repository::TestRun::new("0".to_string());
+        run.add_result(
+            crate::repository::TestResult::success("test1")
+                .with_duration(std::time::Duration::from_secs(1)),
+        );
+        let mut historical = std::collections::HashMap::new();
+        historical.insert(
+            crate::repository::TestId::new("test1"),
+            std::time::Duration::from_secs(1),
+        );
+        warn_slow_tests(&mut ui, &run, &historical).unwrap();
+        assert!(ui.output.is_empty());
+    }
+
+    #[test]
+    fn test_warn_slow_tests_detects_slow_test() {
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let mut run = crate::repository::TestRun::new("0".to_string());
+        // Test took 10s but historical is 1s (10x slower, above 3x threshold)
+        run.add_result(
+            crate::repository::TestResult::success("slow_test")
+                .with_duration(std::time::Duration::from_secs(10)),
+        );
+        let mut historical = std::collections::HashMap::new();
+        historical.insert(
+            crate::repository::TestId::new("slow_test"),
+            std::time::Duration::from_secs(1),
+        );
+        warn_slow_tests(&mut ui, &run, &historical).unwrap();
+        assert!(!ui.output.is_empty());
+        let output = ui.output.join("\n");
+        assert!(output.contains("slow_test"), "got: {}", output);
+        assert!(output.contains("slower"), "got: {}", output);
+    }
 }

@@ -21,6 +21,26 @@ use std::time::Duration;
 /// Type alias for the per-test timeout lookup function.
 type TestTimeoutFn = Arc<dyn Fn(&str) -> Option<Duration> + Send + Sync>;
 
+/// Spawn a shell command in its own process group so the entire tree can be killed on timeout.
+fn spawn_in_process_group(
+    cmd_str: &str,
+    working_dir: &Path,
+) -> std::io::Result<std::process::Child> {
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(cmd_str)
+        .current_dir(working_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn()
+}
+
 /// Helper to truncate test name to fit in available space
 fn truncate_test_name(test_id: &str, max_len: usize, fail_msg_len: usize) -> String {
     let max_name = max_len.saturating_sub(2 + fail_msg_len); // 2 for indicator + space
@@ -576,7 +596,7 @@ impl RunCommand {
         _run_id: String,
     ) -> Result<i32> {
         use std::io::Write;
-        use std::process::{Command, Stdio};
+
 
         // Build command with test IDs if provided
         // IMPORTANT: Keep _temp_file alive until after child process completes
@@ -587,18 +607,16 @@ impl RunCommand {
         let (run_id, raw_writer) = repo.begin_test_run_raw()?;
 
         // Spawn test command with piped stdout
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(&cmd_str)
-            .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
-            .stdout(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                crate::error::Error::CommandExecution(format!(
-                    "Failed to execute test command: {}",
-                    e
-                ))
-            })?;
+        let mut child = spawn_in_process_group(
+            &cmd_str,
+            Path::new(self.base_path.as_deref().unwrap_or(".")),
+        )
+        .map_err(|e| {
+            crate::error::Error::CommandExecution(format!(
+                "Failed to execute test command: {}",
+                e
+            ))
+        })?;
 
         let mut stdout = child.stdout.take().expect("stdout was piped");
 
@@ -690,7 +708,7 @@ impl RunCommand {
         no_output_timeout: Option<Duration>,
         test_timeout_fn: Option<&TestTimeoutFn>,
     ) -> Result<i32> {
-        use std::process::{Command, Stdio};
+
 
         let historical_times: HashMap<TestId, Duration> = if let Some(ids) = test_ids {
             repo.get_test_times_for_ids(ids).unwrap_or_default()
@@ -742,20 +760,17 @@ impl RunCommand {
                 test_cmd.build_command_full(current_ids, false, None, self.test_args.as_deref())?;
             let (_, raw_writer) = repo.begin_test_run_raw()?;
 
-            let mut child = Command::new("sh")
-                .arg("-c")
-                .arg(&cmd_str)
-                .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| {
-                    progress_bar.finish_and_clear();
-                    crate::error::Error::CommandExecution(format!(
-                        "Failed to execute test command: {}",
-                        e
-                    ))
-                })?;
+            let mut child = spawn_in_process_group(
+                &cmd_str,
+                Path::new(self.base_path.as_deref().unwrap_or(".")),
+            )
+            .map_err(|e| {
+                progress_bar.finish_and_clear();
+                crate::error::Error::CommandExecution(format!(
+                    "Failed to execute test command: {}",
+                    e
+                ))
+            })?;
 
             let stdout = child.stdout.take().expect("stdout was piped");
             let stderr = child.stderr.take().expect("stderr was piped");
@@ -1027,7 +1042,7 @@ impl RunCommand {
         test_timeout_fn: Option<&TestTimeoutFn>,
     ) -> Result<i32> {
         use std::collections::HashMap;
-        use std::process::{Command, Stdio};
+
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
@@ -1148,20 +1163,17 @@ impl RunCommand {
                 self.test_args.as_deref(),
             )?;
 
-            // Spawn the worker process with both stdout and stderr piped
-            let mut child = Command::new("sh")
-                .arg("-c")
-                .arg(&cmd_str)
-                .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| {
-                    crate::error::Error::CommandExecution(format!(
-                        "Failed to spawn worker {}: {}",
-                        worker_id, e
-                    ))
-                })?;
+            // Spawn the worker process in its own process group
+            let mut child = spawn_in_process_group(
+                &cmd_str,
+                Path::new(self.base_path.as_deref().unwrap_or(".")),
+            )
+            .map_err(|e| {
+                crate::error::Error::CommandExecution(format!(
+                    "Failed to spawn worker {}: {}",
+                    worker_id, e
+                ))
+            })?;
 
             // Take stdout and stderr for streaming
             let stdout = child.stdout.take().expect("stdout was piped");
@@ -1463,7 +1475,7 @@ impl RunCommand {
         max_duration: Option<Duration>,
     ) -> Result<i32> {
         use std::collections::HashMap;
-        use std::process::{Command, Stdio};
+
 
         let start_time = std::time::Instant::now();
 
@@ -1507,21 +1519,18 @@ impl RunCommand {
                 self.test_args.as_deref(),
             )?;
 
-            // Spawn process for this test
+            // Spawn process for this test in its own process group
             let test_start = std::time::Instant::now();
-            let mut child = Command::new("sh")
-                .arg("-c")
-                .arg(&cmd_str)
-                .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| {
-                    crate::error::Error::CommandExecution(format!(
-                        "Failed to execute test {}: {}",
-                        test_id, e
-                    ))
-                })?;
+            let mut child = spawn_in_process_group(
+                &cmd_str,
+                Path::new(self.base_path.as_deref().unwrap_or(".")),
+            )
+            .map_err(|e| {
+                crate::error::Error::CommandExecution(format!(
+                    "Failed to execute test {}: {}",
+                    test_id, e
+                ))
+            })?;
 
             // Drain stdout in a background thread to prevent pipe buffer deadlock
             let stdout = child.stdout.take().expect("stdout was piped");

@@ -652,6 +652,7 @@ dependencies = [
  "gdbm",
  "glob",
  "indicatif",
+ "libc",
  "memmap2",
  "num_cpus",
  "regex",
