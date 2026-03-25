@@ -626,6 +626,24 @@ test_command = "python -m test $IDOPTION"
     }
 
     #[test]
+    fn test_parse_duration_string_fractional() {
+        assert_eq!(
+            parse_duration_string("1.5m").unwrap(),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            parse_duration_string("0.5h").unwrap(),
+            Duration::from_secs(1800)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_string_zero_is_error() {
+        assert!(parse_duration_string("0").is_err());
+        assert!(parse_duration_string("0s").is_err());
+    }
+
+    #[test]
     fn test_timeout_setting_parse_disabled() {
         assert_eq!(
             TimeoutSetting::parse("disabled").unwrap(),

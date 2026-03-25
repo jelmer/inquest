@@ -285,4 +285,51 @@ mod tests {
         // Process exits before timeout
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_wait_with_timeout_no_output_timeout() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let tracker = crate::test_runner::ActivityTracker::new();
+        // Don't touch the tracker — no output simulated
+
+        let result = wait_with_timeout(
+            &mut child,
+            None,
+            Some(Duration::from_millis(100)),
+            Some(&tracker),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result, Err(TimeoutReason::NoOutput));
+    }
+
+    #[test]
+    fn test_wait_with_timeout_no_output_averted_by_activity() {
+        use std::process::{Command, Stdio};
+        // Process that exits quickly
+        let mut child = Command::new("true")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let tracker = crate::test_runner::ActivityTracker::new();
+        tracker.touch(); // Simulate recent output
+
+        let result = wait_with_timeout(
+            &mut child,
+            None,
+            Some(Duration::from_secs(60)),
+            Some(&tracker),
+            None,
+        )
+        .unwrap();
+        // Process exits before no-output timeout
+        assert!(result.is_ok());
+    }
 }

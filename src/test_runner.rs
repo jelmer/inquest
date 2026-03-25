@@ -320,4 +320,37 @@ mod tests {
         let handle = spawn_stderr_forwarder(&input[..], progress_bar);
         assert!(handle.join().unwrap().is_ok());
     }
+
+    #[test]
+    fn test_activity_tracker_touch_and_elapsed() {
+        let tracker = ActivityTracker::new();
+        // Immediately after creation, elapsed should be very small
+        assert!(tracker.elapsed_since_last() < std::time::Duration::from_secs(1));
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let elapsed = tracker.elapsed_since_last();
+        assert!(elapsed >= std::time::Duration::from_millis(50));
+
+        // After touch, elapsed resets
+        tracker.touch();
+        assert!(tracker.elapsed_since_last() < std::time::Duration::from_millis(10));
+    }
+
+    #[test]
+    fn test_tee_writer_with_activity_tracking() {
+        let (tx, rx) = mpsc::sync_channel(10);
+        let mut file_output = Vec::new();
+        let tracker = ActivityTracker::new();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(tracker.elapsed_since_last() >= std::time::Duration::from_millis(50));
+
+        {
+            let mut tee = TeeWriter::with_activity(&mut file_output, tx, tracker.clone());
+            tee.write_all(b"data").unwrap();
+        }
+
+        // After writing, activity should be very recent
+        assert!(tracker.elapsed_since_last() < std::time::Duration::from_millis(10));
+    }
 }
