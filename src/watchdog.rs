@@ -123,8 +123,7 @@ pub fn wait_with_timeout(
     activity: Option<&ActivityTracker>,
     watchdog: Option<&TestWatchdog>,
 ) -> std::io::Result<Result<ExitStatus, TimeoutReason>> {
-    let needs_polling =
-        timeout.is_some() || no_output_timeout.is_some() || watchdog.is_some();
+    let needs_polling = timeout.is_some() || no_output_timeout.is_some() || watchdog.is_some();
 
     if !needs_polling {
         return child.wait().map(Ok);
@@ -219,10 +218,7 @@ mod tests {
     #[test]
     fn test_wait_with_timeout_normal_exit() {
         use std::process::{Command, Stdio};
-        let mut child = Command::new("true")
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = Command::new("true").stdout(Stdio::null()).spawn().unwrap();
         let result = wait_with_timeout(&mut child, None, None, None, None).unwrap();
         assert!(result.is_ok());
         assert!(result.unwrap().success());
@@ -261,8 +257,7 @@ mod tests {
         wd.on_test_start("hung_test", Some(Duration::ZERO));
         std::thread::sleep(Duration::from_millis(1));
 
-        let result =
-            wait_with_timeout(&mut child, None, None, None, Some(&wd)).unwrap();
+        let result = wait_with_timeout(&mut child, None, None, None, Some(&wd)).unwrap();
         assert_eq!(
             result,
             Err(TimeoutReason::TestTimeout("hung_test".to_string()))
@@ -272,16 +267,12 @@ mod tests {
     #[test]
     fn test_wait_with_timeout_watchdog_no_timeout_if_test_completes() {
         use std::process::{Command, Stdio};
-        let mut child = Command::new("true")
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = Command::new("true").stdout(Stdio::null()).spawn().unwrap();
 
         let wd = TestWatchdog::new();
         wd.on_test_start("fast_test", Some(Duration::from_secs(60)));
 
-        let result =
-            wait_with_timeout(&mut child, None, None, None, Some(&wd)).unwrap();
+        let result = wait_with_timeout(&mut child, None, None, None, Some(&wd)).unwrap();
         // Process exits before timeout
         assert!(result.is_ok());
     }
@@ -313,10 +304,7 @@ mod tests {
     fn test_wait_with_timeout_no_output_averted_by_activity() {
         use std::process::{Command, Stdio};
         // Process that exits quickly
-        let mut child = Command::new("true")
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut child = Command::new("true").stdout(Stdio::null()).spawn().unwrap();
 
         let tracker = crate::test_runner::ActivityTracker::new();
         tracker.touch(); // Simulate recent output

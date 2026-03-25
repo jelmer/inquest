@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn test_tee_writer_with_activity_tracking() {
-        let (tx, rx) = mpsc::sync_channel(10);
+        let (tx, _rx) = mpsc::sync_channel(10);
         let mut file_output = Vec::new();
         let tracker = ActivityTracker::new();
 
