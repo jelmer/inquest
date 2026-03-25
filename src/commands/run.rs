@@ -2,6 +2,9 @@
 
 use crate::commands::utils::open_or_init_repository;
 use crate::commands::Command;
+use crate::config::{
+    TimeoutSetting, AUTO_MAX_DURATION_MINIMUM, AUTO_TIMEOUT_MULTIPLIER, TIMEOUT_POLL_INTERVAL,
+};
 use crate::error::Result;
 use crate::repository::TestId;
 use crate::subunit_stream;
@@ -11,6 +14,54 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
+
+/// Why a process was killed by the timeout logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeoutReason {
+    /// The overall timeout expired.
+    Timeout,
+    /// No output was received for too long.
+    NoOutput,
+}
+
+/// Wait for a child process with optional timeout and no-output detection.
+///
+/// Returns:
+/// - `Ok(Ok(status))` — process exited normally
+/// - `Ok(Err(reason))` — process was killed due to a timeout
+/// - `Err(io_error)` — system error waiting/killing
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout: Option<Duration>,
+    no_output_timeout: Option<Duration>,
+    activity: Option<&crate::test_runner::ActivityTracker>,
+) -> std::io::Result<std::result::Result<std::process::ExitStatus, TimeoutReason>> {
+    if timeout.is_none() && no_output_timeout.is_none() {
+        return child.wait().map(Ok);
+    }
+
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Ok(status));
+        }
+        if let Some(t) = timeout {
+            if start.elapsed() >= t {
+                child.kill()?;
+                let _ = child.wait();
+                return Ok(Err(TimeoutReason::Timeout));
+            }
+        }
+        if let (Some(no_out), Some(tracker)) = (no_output_timeout, activity) {
+            if tracker.elapsed_since_last() >= no_out {
+                child.kill()?;
+                let _ = child.wait();
+                return Ok(Err(TimeoutReason::NoOutput));
+            }
+        }
+        std::thread::sleep(TIMEOUT_POLL_INTERVAL);
+    }
+}
 
 /// Helper to truncate test name to fit in available space
 fn truncate_test_name(test_id: &str, max_len: usize, fail_msg_len: usize) -> String {
@@ -385,6 +436,9 @@ pub struct RunCommand {
     all_output: bool,
     test_filters: Option<Vec<String>>,
     test_args: Option<Vec<String>>,
+    test_timeout: TimeoutSetting,
+    max_duration: TimeoutSetting,
+    no_output_timeout: Option<Duration>,
 }
 
 impl RunCommand {
@@ -407,6 +461,9 @@ impl RunCommand {
             all_output: false,
             test_filters: None,
             test_args: None,
+            test_timeout: TimeoutSetting::Disabled,
+            max_duration: TimeoutSetting::Disabled,
+            no_output_timeout: None,
         }
     }
 
@@ -429,6 +486,9 @@ impl RunCommand {
             all_output: false,
             test_filters: None,
             test_args: None,
+            test_timeout: TimeoutSetting::Disabled,
+            max_duration: TimeoutSetting::Disabled,
+            no_output_timeout: None,
         }
     }
 
@@ -452,6 +512,9 @@ impl RunCommand {
             all_output: false,
             test_filters: None,
             test_args: None,
+            test_timeout: TimeoutSetting::Disabled,
+            max_duration: TimeoutSetting::Disabled,
+            no_output_timeout: None,
         }
     }
 
@@ -482,6 +545,9 @@ impl RunCommand {
             all_output: false,
             test_filters: None,
             test_args: None,
+            test_timeout: TimeoutSetting::Disabled,
+            max_duration: TimeoutSetting::Disabled,
+            no_output_timeout: None,
         }
     }
 
@@ -500,6 +566,9 @@ impl RunCommand {
     /// * `all_output` - If true, show all test output instead of just failures
     /// * `test_filters` - Optional list of test patterns to filter
     /// * `test_args` - Optional additional arguments to pass to the test command
+    /// * `test_timeout` - Per-test timeout setting
+    /// * `max_duration` - Overall run timeout setting
+    /// * `no_output_timeout` - Kill test if no output for this duration
     #[allow(clippy::too_many_arguments)]
     pub fn with_all_options(
         base_path: Option<String>,
@@ -515,6 +584,9 @@ impl RunCommand {
         all_output: bool,
         test_filters: Option<Vec<String>>,
         test_args: Option<Vec<String>>,
+        test_timeout: TimeoutSetting,
+        max_duration: TimeoutSetting,
+        no_output_timeout: Option<Duration>,
     ) -> Self {
         RunCommand {
             base_path,
@@ -530,6 +602,9 @@ impl RunCommand {
             all_output,
             test_filters,
             test_args,
+            test_timeout,
+            max_duration,
+            no_output_timeout,
         }
     }
 
@@ -646,12 +721,15 @@ impl RunCommand {
     }
 
     /// Run tests serially (single process)
+    #[allow(clippy::too_many_arguments)]
     fn run_serial(
         &self,
         ui: &mut dyn UI,
         repo: &mut Box<dyn crate::repository::Repository>,
         test_cmd: &TestCommand,
         test_ids: Option<&[crate::repository::TestId]>,
+        max_duration: Option<Duration>,
+        no_output_timeout: Option<Duration>,
     ) -> Result<i32> {
         use std::process::{Command, Stdio};
 
@@ -721,8 +799,16 @@ impl RunCommand {
         // Tee the stream: capture raw bytes for storage AND parse for progress display
         let (tx, rx) = std::sync::mpsc::sync_channel(100);
 
-        // Thread for stdout
-        let tee_thread = crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx);
+        // Set up activity tracking for no-output timeout detection
+        let activity_tracker =
+            no_output_timeout.map(|_| crate::test_runner::ActivityTracker::new());
+
+        // Thread for stdout (with optional activity tracking)
+        let tee_thread = if let Some(ref tracker) = activity_tracker {
+            crate::test_runner::spawn_stdout_tee_tracked(stdout, raw_writer, tx, tracker.clone())
+        } else {
+            crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx)
+        };
 
         // Thread for stderr - write directly to stderr (not to parser or storage)
         let stderr_thread =
@@ -742,7 +828,9 @@ impl RunCommand {
         };
 
         let start_time = std::time::Instant::now();
+        let historical_times_for_thread = historical_times.clone();
         let parse_thread = std::thread::spawn(move || {
+            let historical_times = historical_times_for_thread;
             let mut failures = 0;
             let mut completed_duration = Duration::ZERO;
             let progress_bar_for_bytes = progress_bar_clone.clone();
@@ -803,8 +891,14 @@ impl RunCommand {
             result
         });
 
-        // Wait for process to complete
-        let status = child.wait().map_err(|e| {
+        // Wait for process to complete (with optional timeout / no-output detection)
+        let wait_result = wait_with_timeout(
+            &mut child,
+            max_duration,
+            no_output_timeout,
+            activity_tracker.as_ref(),
+        )
+        .map_err(|e| {
             progress_bar.finish_and_clear();
             crate::error::Error::CommandExecution(format!("Failed to wait for test command: {}", e))
         })?;
@@ -812,7 +906,24 @@ impl RunCommand {
         // Explicitly drop temp file now that child process has completed
         drop(_temp_file);
 
-        let command_failed = !status.success();
+        let command_failed = match &wait_result {
+            Ok(status) => !status.success(),
+            Err(reason) => {
+                let elapsed = start_time.elapsed();
+                match reason {
+                    TimeoutReason::Timeout => tracing::warn!(
+                        "test run killed after {:.1}s (max duration exceeded)",
+                        elapsed.as_secs_f64()
+                    ),
+                    TimeoutReason::NoOutput => tracing::warn!(
+                        "test run killed after {:.1}s (no output for {:?})",
+                        elapsed.as_secs_f64(),
+                        no_output_timeout.unwrap()
+                    ),
+                }
+                true
+            }
+        };
 
         // Get results from parse thread
         let test_run = parse_thread.join().map_err(|_| {
@@ -864,13 +975,15 @@ impl RunCommand {
             Some(exit_code),
         )?;
 
-        // Display summary
+        // Display summary and slow test warnings
         crate::commands::utils::display_test_summary(ui, &run_id, &test_run)?;
+        crate::commands::utils::warn_slow_tests(ui, &test_run, &historical_times)?;
 
         Ok(exit_code)
     }
 
     /// Run tests in parallel across multiple workers
+    #[allow(clippy::too_many_arguments)]
     fn run_parallel(
         &self,
         ui: &mut dyn UI,
@@ -878,6 +991,8 @@ impl RunCommand {
         test_cmd: &TestCommand,
         test_ids: Option<&[crate::repository::TestId]>,
         concurrency: usize,
+        max_duration: Option<Duration>,
+        no_output_timeout: Option<Duration>,
     ) -> Result<i32> {
         use std::collections::HashMap;
         use std::process::{Command, Stdio};
@@ -1027,8 +1142,21 @@ impl RunCommand {
             // Tee the stream: capture raw bytes for storage AND parse for progress display
             let (tx, rx) = std::sync::mpsc::sync_channel(100);
 
-            // Thread for stdout
-            let tee_thread = crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx);
+            // Set up activity tracking for no-output timeout detection
+            let worker_activity =
+                no_output_timeout.map(|_| crate::test_runner::ActivityTracker::new());
+
+            // Thread for stdout (with optional activity tracking)
+            let tee_thread = if let Some(ref tracker) = worker_activity {
+                crate::test_runner::spawn_stdout_tee_tracked(
+                    stdout,
+                    raw_writer,
+                    tx,
+                    tracker.clone(),
+                )
+            } else {
+                crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx)
+            };
 
             // Thread for stderr - write directly to stderr (not to parser or storage)
             let stderr_thread =
@@ -1124,7 +1252,7 @@ impl RunCommand {
                 tee_thread,
                 stderr_thread,
             ));
-            workers.push((worker_id, child, _temp_file));
+            workers.push((worker_id, child, _temp_file, worker_activity));
         }
 
         // Collect results from parse threads and wait for workers to complete
@@ -1181,17 +1309,41 @@ impl RunCommand {
             }
         }
 
-        // Now wait for all worker processes to complete
-        for (worker_id, mut child, _temp_file) in workers {
-            let status = child.wait().map_err(|e| {
+        // Now wait for all worker processes to complete (with optional timeouts)
+        let remaining_timeout = max_duration.map(|d| d.saturating_sub(start_time.elapsed()));
+        for (worker_id, mut child, _temp_file, worker_activity) in workers {
+            let wait_result = wait_with_timeout(
+                &mut child,
+                remaining_timeout,
+                no_output_timeout,
+                worker_activity.as_ref(),
+            )
+            .map_err(|e| {
                 crate::error::Error::CommandExecution(format!(
                     "Failed to wait for worker {}: {}",
                     worker_id, e
                 ))
             })?;
 
-            if !status.success() {
-                any_failed = true;
+            match wait_result {
+                Ok(status) if !status.success() => any_failed = true,
+                Err(TimeoutReason::Timeout) => {
+                    tracing::warn!(
+                        "worker {} killed (max duration exceeded after {:.1}s)",
+                        worker_id,
+                        start_time.elapsed().as_secs_f64()
+                    );
+                    any_failed = true;
+                }
+                Err(TimeoutReason::NoOutput) => {
+                    tracing::warn!(
+                        "worker {} killed (no output for {:?})",
+                        worker_id,
+                        no_output_timeout.unwrap()
+                    );
+                    any_failed = true;
+                }
+                Ok(_) => {}
             }
         }
 
@@ -1233,19 +1385,24 @@ impl RunCommand {
             ui.output("Disposed instances")?;
         }
 
-        // Display summary
+        // Display summary and slow test warnings
         crate::commands::utils::display_test_summary(ui, &run_id_for_display, &combined_run)?;
+        crate::commands::utils::warn_slow_tests(ui, &combined_run, &durations)?;
 
         Ok(exit_code)
     }
 
     /// Run each test in complete isolation (one test per process)
+    #[allow(clippy::too_many_arguments)]
     fn run_isolated(
         &self,
         ui: &mut dyn UI,
         repo: &mut Box<dyn crate::repository::Repository>,
         test_cmd: &TestCommand,
         test_ids: &[crate::repository::TestId],
+        test_timeout: &TimeoutSetting,
+        historical_times: &HashMap<TestId, Duration>,
+        max_duration: Option<Duration>,
     ) -> Result<i32> {
         use std::collections::HashMap;
         use std::process::{Command, Stdio};
@@ -1264,6 +1421,23 @@ impl RunCommand {
         let mut any_failed = false;
 
         for (idx, test_id) in test_ids.iter().enumerate() {
+            // Check max_duration before starting each test
+            if let Some(max_dur) = max_duration {
+                if start_time.elapsed() >= max_dur {
+                    tracing::warn!(
+                        "max duration exceeded after {:.1}s, stopping after {}/{} tests",
+                        start_time.elapsed().as_secs_f64(),
+                        idx,
+                        test_ids.len()
+                    );
+                    any_failed = true;
+                    break;
+                }
+            }
+
+            let per_test_timeout =
+                test_timeout.effective_timeout(historical_times.get(test_id).copied());
+
             ui.output(&format!("  [{}/{}] {}", idx + 1, test_ids.len(), test_id))?;
 
             // Build command for this single test
@@ -1276,13 +1450,14 @@ impl RunCommand {
             )?;
 
             // Spawn process for this test
-            let output = Command::new("sh")
+            let test_start = std::time::Instant::now();
+            let mut child = Command::new("sh")
                 .arg("-c")
                 .arg(&cmd_str)
                 .current_dir(Path::new(self.base_path.as_deref().unwrap_or(".")))
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .output()
+                .spawn()
                 .map_err(|e| {
                     crate::error::Error::CommandExecution(format!(
                         "Failed to execute test {}: {}",
@@ -1290,16 +1465,68 @@ impl RunCommand {
                     ))
                 })?;
 
+            // Drain stdout in a background thread to prevent pipe buffer deadlock
+            let stdout = child.stdout.take().expect("stdout was piped");
+            let stdout_thread = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                let mut stdout = stdout;
+                stdout.read_to_end(&mut buf)?;
+                Ok(buf)
+            });
+
+            let wait_result =
+                wait_with_timeout(&mut child, per_test_timeout, None, None).map_err(|e| {
+                    crate::error::Error::CommandExecution(format!(
+                        "Failed to wait for test {}: {}",
+                        test_id, e
+                    ))
+                })?;
+
             // Explicitly drop temp file now that process has completed
             drop(_temp_file);
 
-            if !output.status.success() {
+            let stdout_bytes = stdout_thread
+                .join()
+                .map_err(|_| {
+                    crate::error::Error::CommandExecution(
+                        "stdout reader thread panicked".to_string(),
+                    )
+                })?
+                .map_err(crate::error::Error::Io)?;
+
+            if let Err(reason) = wait_result {
+                let elapsed = test_start.elapsed();
+                let msg = match reason {
+                    TimeoutReason::Timeout => {
+                        format!("test timed out after {:.1}s", elapsed.as_secs_f64())
+                    }
+                    TimeoutReason::NoOutput => {
+                        format!("test killed: no output for {:?}", per_test_timeout.unwrap())
+                    }
+                };
+                tracing::warn!(
+                    "test {} killed after {:.1}s ({})",
+                    test_id,
+                    elapsed.as_secs_f64(),
+                    msg
+                );
+                all_results.insert(
+                    test_id.clone(),
+                    crate::repository::TestResult::error(test_id.clone(), msg)
+                        .with_duration(elapsed),
+                );
+                any_failed = true;
+                continue;
+            }
+
+            if wait_result.is_ok_and(|s| !s.success()) {
                 any_failed = true;
             }
 
             // Parse test results
             let test_run_id = format!("{}-{}", base_run_id, idx);
-            let test_run = subunit_stream::parse_stream(output.stdout.as_slice(), test_run_id)?;
+            let test_run = subunit_stream::parse_stream(stdout_bytes.as_slice(), test_run_id)?;
 
             // Collect results
             for (test_id, result) in test_run.results {
@@ -1335,8 +1562,9 @@ impl RunCommand {
             Some(exit_code),
         )?;
 
-        // Display summary
+        // Display summary and slow test warnings
         crate::commands::utils::display_test_summary(ui, &run_id_for_display, &combined_run)?;
+        crate::commands::utils::warn_slow_tests(ui, &combined_run, historical_times)?;
 
         Ok(exit_code)
     }
@@ -1361,6 +1589,31 @@ impl Command for RunCommand {
 
         // Load test command configuration
         let test_cmd = TestCommand::from_directory(base)?;
+
+        // Resolve timeout settings: CLI flags take precedence over config file values
+        let test_timeout = if self.test_timeout != TimeoutSetting::Disabled {
+            self.test_timeout.clone()
+        } else {
+            test_cmd.config().parsed_test_timeout()?
+        };
+        let max_duration = if self.max_duration != TimeoutSetting::Disabled {
+            self.max_duration.clone()
+        } else {
+            test_cmd.config().parsed_max_duration()?
+        };
+        let no_output_timeout = self
+            .no_output_timeout
+            .or(test_cmd.config().parsed_no_output_timeout()?);
+
+        if test_timeout != TimeoutSetting::Disabled {
+            tracing::info!("per-test timeout: {:?}", test_timeout);
+        }
+        if max_duration != TimeoutSetting::Disabled {
+            tracing::info!("max run duration: {:?}", max_duration);
+        }
+        if let Some(t) = no_output_timeout {
+            tracing::info!("no-output timeout: {:?}", t);
+        }
 
         // Determine which tests to run
         let mut test_ids = if self.failing_only {
@@ -1462,6 +1715,24 @@ impl Command for RunCommand {
             1
         };
 
+        // Compute effective max_duration and historical times for timeouts/ETA
+        let historical_times: HashMap<TestId, Duration> = repo.get_test_times().unwrap_or_default();
+        let max_duration_value = match &max_duration {
+            TimeoutSetting::Disabled => None,
+            TimeoutSetting::Fixed(d) => Some(*d),
+            TimeoutSetting::Auto => {
+                let total: Duration = historical_times.values().sum();
+                if total.is_zero() {
+                    None
+                } else {
+                    Some(
+                        Duration::from_secs_f64(total.as_secs_f64() * AUTO_TIMEOUT_MULTIPLIER)
+                            .max(AUTO_MAX_DURATION_MINIMUM),
+                    )
+                }
+            }
+        };
+
         // For isolated mode, we need a list of tests
         if self.isolated {
             let all_tests = if let Some(ids) = test_ids {
@@ -1481,7 +1752,15 @@ impl Command for RunCommand {
                 let mut iteration = 1;
                 loop {
                     ui.output(&format!("\n=== Iteration {} ===", iteration))?;
-                    let exit_code = self.run_isolated(ui, &mut repo, &test_cmd, &all_tests)?;
+                    let exit_code = self.run_isolated(
+                        ui,
+                        &mut repo,
+                        &test_cmd,
+                        &all_tests,
+                        &test_timeout,
+                        &historical_times,
+                        max_duration_value,
+                    )?;
 
                     if exit_code != 0 {
                         ui.output(&format!("\nTests failed on iteration {}", iteration))?;
@@ -1491,7 +1770,15 @@ impl Command for RunCommand {
                     iteration += 1;
                 }
             } else {
-                self.run_isolated(ui, &mut repo, &test_cmd, &all_tests)
+                self.run_isolated(
+                    ui,
+                    &mut repo,
+                    &test_cmd,
+                    &all_tests,
+                    &test_timeout,
+                    &historical_times,
+                    max_duration_value,
+                )
             }
         } else if self.until_failure {
             // Run tests in a loop until failure (non-isolated)
@@ -1500,9 +1787,24 @@ impl Command for RunCommand {
                 ui.output(&format!("\n=== Iteration {} ===", iteration))?;
 
                 let exit_code = if concurrency > 1 {
-                    self.run_parallel(ui, &mut repo, &test_cmd, test_ids.as_deref(), concurrency)?
+                    self.run_parallel(
+                        ui,
+                        &mut repo,
+                        &test_cmd,
+                        test_ids.as_deref(),
+                        concurrency,
+                        max_duration_value,
+                        no_output_timeout,
+                    )?
                 } else {
-                    self.run_serial(ui, &mut repo, &test_cmd, test_ids.as_deref())?
+                    self.run_serial(
+                        ui,
+                        &mut repo,
+                        &test_cmd,
+                        test_ids.as_deref(),
+                        max_duration_value,
+                        no_output_timeout,
+                    )?
                 };
 
                 // Stop if tests failed
@@ -1517,10 +1819,25 @@ impl Command for RunCommand {
             // Single run (non-isolated, non-looping)
             if concurrency > 1 {
                 // Parallel execution
-                self.run_parallel(ui, &mut repo, &test_cmd, test_ids.as_deref(), concurrency)
+                self.run_parallel(
+                    ui,
+                    &mut repo,
+                    &test_cmd,
+                    test_ids.as_deref(),
+                    concurrency,
+                    max_duration_value,
+                    no_output_timeout,
+                )
             } else {
                 // Serial execution
-                self.run_serial(ui, &mut repo, &test_cmd, test_ids.as_deref())
+                self.run_serial(
+                    ui,
+                    &mut repo,
+                    &test_cmd,
+                    test_ids.as_deref(),
+                    max_duration_value,
+                    no_output_timeout,
+                )
             }
         }
     }

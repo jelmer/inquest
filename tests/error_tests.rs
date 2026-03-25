@@ -358,6 +358,9 @@ test_command=echo "test1"
         false, // all_output
         None,  // test_filters
         None,  // test_args
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Disabled,
+        None, // no_output_timeout
     );
     let result = cmd.execute(&mut ui);
 

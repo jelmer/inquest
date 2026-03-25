@@ -358,6 +358,9 @@ test_command=python3 -c "import sys; import time; sys.stdout.buffer.write(b'\xb3
         false,   // all_output
         None,    // test_filters
         None,    // test_args
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Disabled,
+        None, // no_output_timeout
     );
 
     // Note: This test will fail to actually run because the command is synthetic
@@ -433,6 +436,9 @@ test_command=echo ""
         false, // all_output
         None,  // test_filters
         None,  // test_args
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Disabled,
+        None, // no_output_timeout
     );
 
     // Verify the command was created successfully
@@ -475,6 +481,9 @@ test_command=echo ""
         false, // all_output
         None,  // test_filters
         None,  // test_args
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Disabled,
+        None, // no_output_timeout
     );
 
     // Verify the command was created successfully

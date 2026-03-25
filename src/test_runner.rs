@@ -5,12 +5,55 @@
 
 use indicatif::ProgressBar;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::Arc;
+
+/// Shared timestamp tracking last I/O activity, stored as epoch milliseconds.
+///
+/// Updated by `TeeWriter` on each write. Can be polled to detect hangs.
+#[derive(Debug, Clone, Default)]
+pub struct ActivityTracker {
+    last_activity_ms: Arc<AtomicU64>,
+}
+
+impl ActivityTracker {
+    /// Create a new tracker with the current time as initial activity.
+    pub fn new() -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        ActivityTracker {
+            last_activity_ms: Arc::new(AtomicU64::new(now)),
+        }
+    }
+
+    /// Record activity at the current time.
+    pub fn touch(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.last_activity_ms.store(now, Ordering::Relaxed);
+    }
+
+    /// Duration since the last recorded activity.
+    pub fn elapsed_since_last(&self) -> std::time::Duration {
+        let last = self.last_activity_ms.load(Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        std::time::Duration::from_millis(now.saturating_sub(last))
+    }
+}
 
 /// A writer that tees output to both a file and a channel
 pub struct TeeWriter<W: Write> {
     writer: W,
     tx: SyncSender<Vec<u8>>,
+    activity: Option<ActivityTracker>,
 }
 
 impl<W: Write> TeeWriter<W> {
@@ -20,7 +63,20 @@ impl<W: Write> TeeWriter<W> {
     /// * `writer` - The underlying writer (typically a file)
     /// * `tx` - Channel sender for broadcasting bytes to parsers
     pub fn new(writer: W, tx: SyncSender<Vec<u8>>) -> Self {
-        TeeWriter { writer, tx }
+        TeeWriter {
+            writer,
+            tx,
+            activity: None,
+        }
+    }
+
+    /// Creates a new TeeWriter with an activity tracker for no-output timeout detection.
+    pub fn with_activity(writer: W, tx: SyncSender<Vec<u8>>, activity: ActivityTracker) -> Self {
+        TeeWriter {
+            writer,
+            tx,
+            activity: Some(activity),
+        }
     }
 }
 
@@ -30,6 +86,10 @@ impl<W: Write> Write for TeeWriter<W> {
         self.writer.write_all(buf)?;
         // Send to parser (ignore if receiver dropped)
         let _ = self.tx.send(buf.to_vec());
+        // Record activity
+        if let Some(ref tracker) = self.activity {
+            tracker.touch();
+        }
         Ok(buf.len())
     }
 
@@ -115,6 +175,21 @@ pub fn spawn_stdout_tee<R: Read + Send + 'static, W: Write + Send + 'static>(
 ) -> std::thread::JoinHandle<std::io::Result<()>> {
     std::thread::spawn(move || -> std::io::Result<()> {
         let mut tee = TeeWriter::new(writer, tx);
+        std::io::copy(&mut stdout, &mut tee)?;
+        tee.flush()?;
+        Ok(())
+    })
+}
+
+/// Spawn a thread to tee stdout with activity tracking for no-output timeout detection
+pub fn spawn_stdout_tee_tracked<R: Read + Send + 'static, W: Write + Send + 'static>(
+    mut stdout: R,
+    writer: W,
+    tx: SyncSender<Vec<u8>>,
+    activity: ActivityTracker,
+) -> std::thread::JoinHandle<std::io::Result<()>> {
+    std::thread::spawn(move || -> std::io::Result<()> {
+        let mut tee = TeeWriter::with_activity(writer, tx, activity);
         std::io::copy(&mut stdout, &mut tee)?;
         tee.flush()?;
         Ok(())
