@@ -3,8 +3,7 @@
 use crate::commands::utils::open_or_init_repository;
 use crate::commands::Command;
 use crate::config::{
-    TimeoutSetting, AUTO_MAX_DURATION_MINIMUM, AUTO_TIMEOUT_MULTIPLIER,
-    MAX_TEST_TIMEOUT_RESTARTS,
+    TimeoutSetting, AUTO_MAX_DURATION_MINIMUM, AUTO_TIMEOUT_MULTIPLIER, MAX_TEST_TIMEOUT_RESTARTS,
 };
 use crate::error::Result;
 use crate::repository::TestId;
@@ -597,7 +596,6 @@ impl RunCommand {
     ) -> Result<i32> {
         use std::io::Write;
 
-
         // Build command with test IDs if provided
         // IMPORTANT: Keep _temp_file alive until after child process completes
         let (cmd_str, _temp_file) =
@@ -612,10 +610,7 @@ impl RunCommand {
             Path::new(self.base_path.as_deref().unwrap_or(".")),
         )
         .map_err(|e| {
-            crate::error::Error::CommandExecution(format!(
-                "Failed to execute test command: {}",
-                e
-            ))
+            crate::error::Error::CommandExecution(format!("Failed to execute test command: {}", e))
         })?;
 
         let mut stdout = child.stdout.take().expect("stdout was piped");
@@ -708,8 +703,6 @@ impl RunCommand {
         no_output_timeout: Option<Duration>,
         test_timeout_fn: Option<&TestTimeoutFn>,
     ) -> Result<i32> {
-
-
         let historical_times: HashMap<TestId, Duration> = if let Some(ids) = test_ids {
             repo.get_test_times_for_ids(ids).unwrap_or_default()
         } else {
@@ -937,16 +930,23 @@ impl RunCommand {
                         .as_ref()
                         .map(|wd| wd.completed_tests())
                         .unwrap_or_default();
-                    let next_remaining: Vec<TestId> = if let Some(ref ids) = remaining_tests {
-                        ids.iter()
-                            .filter(|id| {
-                                !completed.contains(id.as_str()) && id.as_str() != hung_test
-                            })
-                            .cloned()
-                            .collect()
+                    let completed_in_results: std::collections::HashSet<&str> =
+                        all_results.keys().map(|id| id.as_str()).collect();
+                    let all_test_ids = if let Some(ref ids) = remaining_tests {
+                        ids.clone()
                     } else {
-                        break;
+                        // No explicit test list — discover tests now for restart
+                        test_cmd.list_tests()?
                     };
+                    let next_remaining: Vec<TestId> = all_test_ids
+                        .iter()
+                        .filter(|id| {
+                            !completed.contains(id.as_str())
+                                && !completed_in_results.contains(id.as_str())
+                                && id.as_str() != hung_test
+                        })
+                        .cloned()
+                        .collect();
 
                     restarts += 1;
                     if restarts >= MAX_TEST_TIMEOUT_RESTARTS || next_remaining.is_empty() {
@@ -959,10 +959,7 @@ impl RunCommand {
                         break;
                     }
 
-                    tracing::info!(
-                        "restarting with {} remaining tests",
-                        next_remaining.len()
-                    );
+                    tracing::info!("restarting with {} remaining tests", next_remaining.len());
                     remaining_tests = Some(next_remaining);
                     continue;
                 }
@@ -1007,11 +1004,7 @@ impl RunCommand {
             0
         };
 
-        crate::commands::utils::update_repository_failing_tests(
-            repo,
-            &combined_run,
-            self.partial,
-        )?;
+        crate::commands::utils::update_repository_failing_tests(repo, &combined_run, self.partial)?;
         crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
         crate::commands::utils::store_run_metadata(
             repo,
@@ -1028,7 +1021,7 @@ impl RunCommand {
         Ok(exit_code)
     }
 
-    /// Run tests in parallel across multiple workers
+    /// Run tests in parallel across multiple workers, with per-test timeout and restart.
     #[allow(clippy::too_many_arguments)]
     fn run_parallel(
         &self,
@@ -1061,7 +1054,6 @@ impl RunCommand {
         let all_tests = if let Some(ids) = test_ids {
             ids.to_vec()
         } else {
-            // Need to list all tests
             test_cmd.list_tests()?
         };
 
@@ -1076,8 +1068,8 @@ impl RunCommand {
         // Get group_regex from config if present
         let group_regex = test_cmd.config().group_regex.as_deref();
 
-        // Partition tests across workers
-        let partitions = crate::partition::partition_tests_with_grouping(
+        // Initial partition of tests across workers
+        let initial_partitions = crate::partition::partition_tests_with_grouping(
             &all_tests,
             &durations,
             concurrency,
@@ -1086,14 +1078,14 @@ impl RunCommand {
         .map_err(|e| crate::error::Error::Config(format!("Invalid group_regex pattern: {}", e)))?;
 
         // Compute estimated duration per partition from historical times for ETA
-        let partition_estimated_totals: Vec<Duration> = partitions
+        let partition_estimated_totals: Vec<Duration> = initial_partitions
             .iter()
             .map(|partition| partition.iter().filter_map(|id| durations.get(id)).sum())
             .collect();
 
         // Create multi-progress for tracking all workers
         let term_width = console::Term::stdout().size().1 as usize;
-        let fixed_width = 25; // For "[HH:MM:SS] " + " pos/len "
+        let fixed_width = 25;
         let overall_bar_width = term_width.saturating_sub(fixed_width + 30).clamp(20, 60);
 
         let multi_progress = indicatif::MultiProgress::new();
@@ -1123,298 +1115,384 @@ impl RunCommand {
             instance_ids: &instance_ids,
         };
 
-        // Spawn worker processes with progress bars and streaming parsers
-        let mut workers = Vec::new();
-        let mut parse_threads = Vec::new();
-
-        for (worker_id, partition) in partitions.iter().enumerate() {
-            if partition.is_empty() {
-                continue;
-            }
-
-            // Create a progress bar for this worker
-            // Template: "Worker N: [bar] pos/len msg"
-            // Fixed: "Worker N: " (10-12) + " " + "999/999" (7) + " " = ~20 chars
-            let worker_fixed = 22;
-            let worker_bar_width =
-                ((term_width.saturating_sub(worker_fixed + 30)) / concurrency.min(4)).clamp(15, 40);
-            // Calculate max message for worker
-            let worker_max_msg = term_width
-                .saturating_sub(worker_bar_width + worker_fixed)
-                .max(20);
-
-            let worker_bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
-            worker_bar.set_style(
-                ProgressStyle::default_bar()
-                    .template(&format!(
-                        "Worker {}: [{{elapsed_precise}}] [{{bar:{}.green/blue}}] {{pos}}/{{len}} {{msg}}",
-                        worker_id, worker_bar_width
-                    ))
-                    .unwrap()
-                    .progress_chars("█▓▒░  "),
-            );
-
-            // Build command for this partition with instance ID
-            let instance_id = instance_ids.get(worker_id).map(|s| s.as_str());
-            let (cmd_str, _temp_file) = test_cmd.build_command_full(
-                Some(partition),
-                false,
-                instance_id,
-                self.test_args.as_deref(),
-            )?;
-
-            // Spawn the worker process in its own process group
-            let mut child = spawn_in_process_group(
-                &cmd_str,
-                Path::new(self.base_path.as_deref().unwrap_or(".")),
-            )
-            .map_err(|e| {
-                crate::error::Error::CommandExecution(format!(
-                    "Failed to spawn worker {}: {}",
-                    worker_id, e
-                ))
-            })?;
-
-            // Take stdout and stderr for streaming
-            let stdout = child.stdout.take().expect("stdout was piped");
-            let stderr = child.stderr.take().expect("stderr was piped");
-
-            // Get a writer for this worker's raw output
-            let worker_run_id = format!("{}-{}", base_run_id, worker_id);
-            let (_, raw_writer) = repo.begin_test_run_raw()?;
-
-            // Tee the stream: capture raw bytes for storage AND parse for progress display
-            let (tx, rx) = std::sync::mpsc::sync_channel(100);
-
-            // Set up activity tracking for no-output timeout detection
-            let worker_activity =
-                no_output_timeout.map(|_| crate::test_runner::ActivityTracker::new());
-
-            // Thread for stdout (with optional activity tracking)
-            let tee_thread = if let Some(ref tracker) = worker_activity {
-                crate::test_runner::spawn_stdout_tee_tracked(
-                    stdout,
-                    raw_writer,
-                    tx,
-                    tracker.clone(),
-                )
-            } else {
-                crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx)
-            };
-
-            // Thread for stderr - write directly to stderr (not to parser or storage)
-            let stderr_thread =
-                crate::test_runner::spawn_stderr_forwarder(stderr, worker_bar.clone());
-
-            // Create a reader from the channel
-            let channel_reader = crate::test_runner::ChannelReader::new(rx);
-
-            // Set up per-test timeout watchdog for this worker
-            let worker_watchdog = test_timeout_fn.as_ref().map(|_| TestWatchdog::new());
-            let watchdog_for_thread = worker_watchdog.clone();
-            let test_timeout_fn_clone = test_timeout_fn.cloned();
-
-            // Spawn thread to parse output in real-time
-            let worker_bar_clone = worker_bar.clone();
-            let overall_bar_clone = overall_bar.clone();
-            let worker_run_id_clone = worker_run_id.clone();
-            let total_failures_clone = Arc::clone(&total_failures);
-            let worker_durations = durations.clone();
-            let worker_estimated_total = partition_estimated_totals[worker_id];
-
-            let output_filter_clone = output_filter;
-            let worker_start_time = std::time::Instant::now();
-            let parse_thread = std::thread::spawn(move || {
-                let mut failures = 0;
-                let mut completed_duration = Duration::ZERO;
-                let worker_bar_for_bytes = worker_bar_clone.clone();
-                // Parse stdout stream for real-time progress
-                subunit_stream::parse_stream_with_progress(
-                    channel_reader,
-                    worker_run_id_clone,
-                    |test_id, status| {
-                        // Update watchdog on test lifecycle events
-                        if let Some(ref wd) = watchdog_for_thread {
-                            if matches!(status, subunit_stream::ProgressStatus::InProgress) {
-                                let timeout = test_timeout_fn_clone
-                                    .as_ref()
-                                    .and_then(|f| f(test_id));
-                                wd.on_test_start(test_id, timeout);
-                            } else if !status.indicator().is_empty() {
-                                wd.on_test_complete(test_id);
-                            }
-                        }
-
-                        let indicator = status.indicator();
-                        if !indicator.is_empty() {
-                            worker_bar_clone.inc(1);
-                            overall_bar_clone.inc(1);
-
-                            // Track completed historical duration for ETA
-                            if let Some(&dur) = worker_durations.get(&TestId::new(test_id)) {
-                                completed_duration += dur;
-                            }
-
-                            // Track failures
-                            if matches!(
-                                status,
-                                subunit_stream::ProgressStatus::Failed
-                                    | subunit_stream::ProgressStatus::UnexpectedSuccess
-                            ) {
-                                failures += 1;
-                                let total =
-                                    total_failures_clone.fetch_add(1, Ordering::Relaxed) + 1;
-
-                                // Update progress bar color based on failure rate
-                                let completed = overall_bar_clone.position();
-                                update_progress_bar_style(
-                                    &overall_bar_clone,
-                                    overall_bar_width,
-                                    completed,
-                                    total,
-                                );
-
-                                let msg = console::style(format!("failures: {}", total))
-                                    .red()
-                                    .to_string();
-                                overall_bar_clone.set_message(msg);
-                            }
-
-                            let fail_msg = format_failure_msg(failures, true);
-                            let eta_msg = format_eta(
-                                worker_estimated_total,
-                                completed_duration,
-                                worker_start_time.elapsed(),
-                            );
-                            let extra_len = if failures > 0 {
-                                9 + failures.to_string().len()
-                            } else {
-                                0
-                            } + eta_msg.len();
-                            let short_name = truncate_test_name(test_id, worker_max_msg, extra_len);
-
-                            worker_bar_clone.set_message(format!(
-                                "{} {}{}{}",
-                                indicator, short_name, fail_msg, eta_msg
-                            ));
-                        }
-                    },
-                    |bytes| {
-                        write_non_subunit_output(&worker_bar_for_bytes, bytes);
-                    },
-                    output_filter_clone,
-                )
-            });
-
-            parse_threads.push((
-                worker_id,
-                worker_bar,
-                parse_thread,
-                tee_thread,
-                stderr_thread,
-            ));
-            workers.push((worker_id, child, _temp_file, worker_activity, worker_watchdog));
-        }
-
-        // Collect results from parse threads and wait for workers to complete
-        // IMPORTANT: We must collect from parse threads FIRST (while workers are still running)
-        // to avoid deadlock. If we wait for workers first, the pipe buffer can fill up and
-        // the worker process will block trying to write, while we're blocked waiting for it to finish.
-        let mut all_results = HashMap::new();
+        let mut all_results: HashMap<TestId, crate::repository::TestResult> = HashMap::new();
         let mut any_failed = false;
+        let mut restarts = 0;
 
-        // First, collect results from ALL parse threads (this will also consume stdout, preventing deadlock)
-        for (worker_id, worker_bar, parse_thread, tee_thread, stderr_thread) in parse_threads {
-            let worker_run = parse_thread.join().map_err(|_| {
-                crate::error::Error::CommandExecution(format!(
-                    "Parse thread {} panicked",
-                    worker_id
-                ))
-            })??;
+        // pending_partitions: list of (worker_id, test_ids) to run.
+        // On restart, only the timed-out workers' remaining tests are re-partitioned.
+        let mut pending_partitions: Vec<(usize, Vec<TestId>)> = initial_partitions
+            .into_iter()
+            .enumerate()
+            .filter(|(_, p)| !p.is_empty())
+            .collect();
 
-            // Wait for tee threads to finish writing raw bytes
-            tee_thread
-                .join()
-                .map_err(|_| {
+        loop {
+            // Spawn workers, supervisor threads, and parse threads for pending partitions
+            type SupervisorResult = std::result::Result<
+                std::result::Result<std::process::ExitStatus, TimeoutReason>,
+                std::io::Error,
+            >;
+            let mut supervisors: Vec<(usize, std::thread::JoinHandle<SupervisorResult>)> =
+                Vec::new();
+            #[allow(clippy::type_complexity)]
+            let mut parse_threads: Vec<(
+                usize,
+                ProgressBar,
+                std::thread::JoinHandle<Result<crate::repository::TestRun>>,
+                std::thread::JoinHandle<std::result::Result<(), std::io::Error>>,
+                std::thread::JoinHandle<std::result::Result<(), std::io::Error>>,
+                Option<TestWatchdog>,
+            )> = Vec::new();
+            // Keep temp files alive for the duration of this iteration
+            let mut _temp_files = Vec::new();
+
+            for (worker_id, partition) in &pending_partitions {
+                let worker_id = *worker_id;
+
+                let worker_fixed = 22;
+                let worker_bar_width = ((term_width.saturating_sub(worker_fixed + 30))
+                    / concurrency.min(4))
+                .clamp(15, 40);
+                let worker_max_msg = term_width
+                    .saturating_sub(worker_bar_width + worker_fixed)
+                    .max(20);
+
+                let worker_bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
+                worker_bar.set_style(
+                    ProgressStyle::default_bar()
+                        .template(&format!(
+                            "Worker {}: [{{elapsed_precise}}] [{{bar:{}.green/blue}}] {{pos}}/{{len}} {{msg}}",
+                            worker_id, worker_bar_width
+                        ))
+                        .unwrap()
+                        .progress_chars("█▓▒░  "),
+                );
+
+                let instance_id = instance_ids.get(worker_id).map(|s| s.as_str());
+                let (cmd_str, temp_file) = test_cmd.build_command_full(
+                    Some(partition),
+                    false,
+                    instance_id,
+                    self.test_args.as_deref(),
+                )?;
+                _temp_files.push(temp_file);
+
+                let mut child = spawn_in_process_group(
+                    &cmd_str,
+                    Path::new(self.base_path.as_deref().unwrap_or(".")),
+                )
+                .map_err(|e| {
                     crate::error::Error::CommandExecution(format!(
-                        "Tee thread {} panicked",
+                        "Failed to spawn worker {}: {}",
+                        worker_id, e
+                    ))
+                })?;
+
+                let stdout = child.stdout.take().expect("stdout was piped");
+                let stderr = child.stderr.take().expect("stderr was piped");
+
+                let worker_run_id = format!("{}-{}", base_run_id, worker_id);
+                let (_, raw_writer) = repo.begin_test_run_raw()?;
+
+                let (tx, rx) = std::sync::mpsc::sync_channel(100);
+                let worker_activity =
+                    no_output_timeout.map(|_| crate::test_runner::ActivityTracker::new());
+
+                let tee_thread = if let Some(ref tracker) = worker_activity {
+                    crate::test_runner::spawn_stdout_tee_tracked(
+                        stdout,
+                        raw_writer,
+                        tx,
+                        tracker.clone(),
+                    )
+                } else {
+                    crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx)
+                };
+
+                let stderr_thread =
+                    crate::test_runner::spawn_stderr_forwarder(stderr, worker_bar.clone());
+
+                let channel_reader = crate::test_runner::ChannelReader::new(rx);
+
+                let worker_watchdog = test_timeout_fn.as_ref().map(|_| TestWatchdog::new());
+                let watchdog_for_thread = worker_watchdog.clone();
+                let watchdog_for_supervisor = worker_watchdog.clone();
+                let test_timeout_fn_clone = test_timeout_fn.cloned();
+
+                // Supervisor thread: calls wait_with_timeout concurrently so a hung
+                // worker is killed immediately, unblocking the parse/tee threads.
+                let remaining_timeout =
+                    max_duration.map(|d| d.saturating_sub(start_time.elapsed()));
+                let supervisor = std::thread::spawn(move || {
+                    wait_with_timeout(
+                        &mut child,
+                        remaining_timeout,
+                        no_output_timeout,
+                        worker_activity.as_ref(),
+                        watchdog_for_supervisor.as_ref(),
+                    )
+                });
+
+                let worker_bar_clone = worker_bar.clone();
+                let overall_bar_clone = overall_bar.clone();
+                let worker_run_id_clone = worker_run_id.clone();
+                let total_failures_clone = Arc::clone(&total_failures);
+                let worker_durations = durations.clone();
+                let worker_estimated_total = partition_estimated_totals
+                    .get(worker_id)
+                    .copied()
+                    .unwrap_or_default();
+
+                let output_filter_clone = output_filter;
+                let worker_start_time = std::time::Instant::now();
+                let parse_thread = std::thread::spawn(move || {
+                    let mut failures = 0;
+                    let mut completed_duration = Duration::ZERO;
+                    let worker_bar_for_bytes = worker_bar_clone.clone();
+                    subunit_stream::parse_stream_with_progress(
+                        channel_reader,
+                        worker_run_id_clone,
+                        |test_id, status| {
+                            if let Some(ref wd) = watchdog_for_thread {
+                                if matches!(status, subunit_stream::ProgressStatus::InProgress) {
+                                    let timeout =
+                                        test_timeout_fn_clone.as_ref().and_then(|f| f(test_id));
+                                    wd.on_test_start(test_id, timeout);
+                                } else if !status.indicator().is_empty() {
+                                    wd.on_test_complete(test_id);
+                                }
+                            }
+
+                            let indicator = status.indicator();
+                            if !indicator.is_empty() {
+                                worker_bar_clone.inc(1);
+                                overall_bar_clone.inc(1);
+
+                                if let Some(&dur) = worker_durations.get(&TestId::new(test_id)) {
+                                    completed_duration += dur;
+                                }
+
+                                if matches!(
+                                    status,
+                                    subunit_stream::ProgressStatus::Failed
+                                        | subunit_stream::ProgressStatus::UnexpectedSuccess
+                                ) {
+                                    failures += 1;
+                                    let total =
+                                        total_failures_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                                    let completed = overall_bar_clone.position();
+                                    update_progress_bar_style(
+                                        &overall_bar_clone,
+                                        overall_bar_width,
+                                        completed,
+                                        total,
+                                    );
+                                    let msg = console::style(format!("failures: {}", total))
+                                        .red()
+                                        .to_string();
+                                    overall_bar_clone.set_message(msg);
+                                }
+
+                                let fail_msg = format_failure_msg(failures, true);
+                                let eta_msg = format_eta(
+                                    worker_estimated_total,
+                                    completed_duration,
+                                    worker_start_time.elapsed(),
+                                );
+                                let extra_len = if failures > 0 {
+                                    9 + failures.to_string().len()
+                                } else {
+                                    0
+                                } + eta_msg.len();
+                                let short_name =
+                                    truncate_test_name(test_id, worker_max_msg, extra_len);
+
+                                worker_bar_clone.set_message(format!(
+                                    "{} {}{}{}",
+                                    indicator, short_name, fail_msg, eta_msg
+                                ));
+                            }
+                        },
+                        |bytes| {
+                            write_non_subunit_output(&worker_bar_for_bytes, bytes);
+                        },
+                        output_filter_clone,
+                    )
+                });
+
+                supervisors.push((worker_id, supervisor));
+                parse_threads.push((
+                    worker_id,
+                    worker_bar,
+                    parse_thread,
+                    tee_thread,
+                    stderr_thread,
+                    worker_watchdog,
+                ));
+            }
+
+            // Wait for all supervisors first. When a supervisor kills a hung worker,
+            // the stdout pipe closes, unblocking the tee/parse threads for that worker.
+            let mut supervisor_results: HashMap<
+                usize,
+                std::result::Result<std::process::ExitStatus, TimeoutReason>,
+            > = HashMap::new();
+            for (worker_id, supervisor) in supervisors {
+                let result = supervisor
+                    .join()
+                    .map_err(|_| {
+                        crate::error::Error::CommandExecution(format!(
+                            "Supervisor thread {} panicked",
+                            worker_id
+                        ))
+                    })?
+                    .map_err(|e| {
+                        crate::error::Error::CommandExecution(format!(
+                            "Failed to wait for worker {}: {}",
+                            worker_id, e
+                        ))
+                    })?;
+                supervisor_results.insert(worker_id, result);
+            }
+
+            // Now collect from parse threads (safe: all workers have exited or been killed)
+            let mut worker_watchdogs: HashMap<usize, Option<TestWatchdog>> = HashMap::new();
+            for (worker_id, worker_bar, parse_thread, tee_thread, stderr_thread, watchdog) in
+                parse_threads
+            {
+                let worker_run = parse_thread.join().map_err(|_| {
+                    crate::error::Error::CommandExecution(format!(
+                        "Parse thread {} panicked",
                         worker_id
                     ))
-                })?
-                .map_err(crate::error::Error::Io)?;
+                })??;
 
-            stderr_thread
-                .join()
-                .map_err(|_| {
-                    crate::error::Error::CommandExecution(format!(
-                        "Stderr thread {} panicked",
-                        worker_id
-                    ))
-                })?
-                .map_err(crate::error::Error::Io)?;
+                tee_thread
+                    .join()
+                    .map_err(|_| {
+                        crate::error::Error::CommandExecution(format!(
+                            "Tee thread {} panicked",
+                            worker_id
+                        ))
+                    })?
+                    .map_err(crate::error::Error::Io)?;
 
-            worker_bar.finish_with_message("done");
+                stderr_thread
+                    .join()
+                    .map_err(|_| {
+                        crate::error::Error::CommandExecution(format!(
+                            "Stderr thread {} panicked",
+                            worker_id
+                        ))
+                    })?
+                    .map_err(crate::error::Error::Io)?;
 
-            // Add worker tag to all results
-            let worker_tag = format!("worker-{}", worker_id);
-            let mut worker_run = worker_run;
-            for (_, result) in worker_run.results.iter_mut() {
-                if !result.tags.contains(&worker_tag) {
-                    result.tags.push(worker_tag.clone());
+                worker_bar.finish_with_message("done");
+
+                let worker_tag = format!("worker-{}", worker_id);
+                let mut worker_run = worker_run;
+                for (_, result) in worker_run.results.iter_mut() {
+                    if !result.tags.contains(&worker_tag) {
+                        result.tags.push(worker_tag.clone());
+                    }
+                }
+
+                for (test_id, result) in worker_run.results {
+                    all_results.insert(test_id, result);
+                }
+
+                worker_watchdogs.insert(worker_id, watchdog);
+            }
+
+            // Compute restart partitions from timed-out workers
+            let mut restart_partitions: Vec<(usize, Vec<TestId>)> = Vec::new();
+            for (worker_id, result) in &supervisor_results {
+                match result {
+                    Err(TimeoutReason::TestTimeout(hung_test)) => {
+                        tracing::warn!(
+                            "worker {} killed (test {} timed out)",
+                            worker_id,
+                            hung_test
+                        );
+                        let test_id = TestId::new(hung_test);
+                        all_results.insert(
+                            test_id.clone(),
+                            crate::repository::TestResult::error(
+                                test_id,
+                                "test timed out (killed after per-test timeout)",
+                            ),
+                        );
+                        any_failed = true;
+
+                        let completed = worker_watchdogs
+                            .get(worker_id)
+                            .and_then(|wd| wd.as_ref())
+                            .map(|wd| wd.completed_tests())
+                            .unwrap_or_default();
+                        let completed_in_results: std::collections::HashSet<&str> =
+                            all_results.keys().map(|id| id.as_str()).collect();
+
+                        // Find this worker's original partition
+                        let original_partition: &Vec<TestId> = &pending_partitions
+                            .iter()
+                            .find(|(wid, _)| wid == worker_id)
+                            .expect("worker_id must exist in pending_partitions")
+                            .1;
+
+                        let remaining: Vec<TestId> = original_partition
+                            .iter()
+                            .filter(|id| {
+                                !completed.contains(id.as_str())
+                                    && !completed_in_results.contains(id.as_str())
+                                    && id.as_str() != hung_test
+                            })
+                            .cloned()
+                            .collect();
+
+                        if !remaining.is_empty() {
+                            restart_partitions.push((*worker_id, remaining));
+                        }
+                    }
+                    Err(TimeoutReason::Timeout) => {
+                        tracing::warn!(
+                            "worker {} killed (max duration exceeded after {:.1}s)",
+                            worker_id,
+                            start_time.elapsed().as_secs_f64()
+                        );
+                        any_failed = true;
+                    }
+                    Err(TimeoutReason::NoOutput) => {
+                        tracing::warn!(
+                            "worker {} killed (no output for {:?})",
+                            worker_id,
+                            no_output_timeout.unwrap()
+                        );
+                        any_failed = true;
+                    }
+                    Ok(status) if !status.success() => {
+                        any_failed = true;
+                    }
+                    Ok(_) => {}
                 }
             }
 
-            // Collect results
-            for (test_id, result) in worker_run.results {
-                all_results.insert(test_id, result);
+            restarts += 1;
+            if restart_partitions.is_empty() || restarts > MAX_TEST_TIMEOUT_RESTARTS {
+                if restarts > MAX_TEST_TIMEOUT_RESTARTS && !restart_partitions.is_empty() {
+                    tracing::error!(
+                        "exceeded maximum restart limit ({}), stopping",
+                        MAX_TEST_TIMEOUT_RESTARTS
+                    );
+                }
+                break;
             }
-        }
 
-        // Now wait for all worker processes to complete (with optional timeouts)
-        let remaining_timeout = max_duration.map(|d| d.saturating_sub(start_time.elapsed()));
-        for (worker_id, mut child, _temp_file, worker_activity, worker_watchdog) in workers {
-            let wait_result = wait_with_timeout(
-                &mut child,
-                remaining_timeout,
-                no_output_timeout,
-                worker_activity.as_ref(),
-                worker_watchdog.as_ref(),
-            )
-            .map_err(|e| {
-                crate::error::Error::CommandExecution(format!(
-                    "Failed to wait for worker {}: {}",
-                    worker_id, e
-                ))
-            })?;
-
-            match wait_result {
-                Ok(status) if !status.success() => any_failed = true,
-                Err(TimeoutReason::Timeout) => {
-                    tracing::warn!(
-                        "worker {} killed (max duration exceeded after {:.1}s)",
-                        worker_id,
-                        start_time.elapsed().as_secs_f64()
-                    );
-                    any_failed = true;
-                }
-                Err(TimeoutReason::NoOutput) => {
-                    tracing::warn!(
-                        "worker {} killed (no output for {:?})",
-                        worker_id,
-                        no_output_timeout.unwrap()
-                    );
-                    any_failed = true;
-                }
-                Err(TimeoutReason::TestTimeout(ref test_id)) => {
-                    tracing::warn!(
-                        "worker {} killed (test {} timed out)",
-                        worker_id,
-                        test_id
-                    );
-                    any_failed = true;
-                }
-                Ok(_) => {}
-            }
+            tracing::info!(
+                "restarting {} workers with remaining tests",
+                restart_partitions.len()
+            );
+            pending_partitions = restart_partitions;
         }
 
         // Finish progress bars
@@ -1475,7 +1553,6 @@ impl RunCommand {
         max_duration: Option<Duration>,
     ) -> Result<i32> {
         use std::collections::HashMap;
-
 
         let start_time = std::time::Instant::now();
 
@@ -1542,8 +1619,8 @@ impl RunCommand {
                 Ok(buf)
             });
 
-            let wait_result =
-                wait_with_timeout(&mut child, per_test_timeout, None, None, None).map_err(|e| {
+            let wait_result = wait_with_timeout(&mut child, per_test_timeout, None, None, None)
+                .map_err(|e| {
                     crate::error::Error::CommandExecution(format!(
                         "Failed to wait for test {}: {}",
                         test_id, e
