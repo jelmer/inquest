@@ -959,7 +959,10 @@ impl RunCommand {
                         break;
                     }
 
-                    tracing::info!("restarting with {} remaining tests", next_remaining.len());
+                    tracing::warn!(
+                        "restarting test runner with {} remaining tests",
+                        next_remaining.len()
+                    );
                     remaining_tests = Some(next_remaining);
                     continue;
                 }
@@ -1488,7 +1491,7 @@ impl RunCommand {
                 break;
             }
 
-            tracing::info!(
+            tracing::warn!(
                 "restarting {} workers with remaining tests",
                 restart_partitions.len()
             );
