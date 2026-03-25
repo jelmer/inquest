@@ -88,5 +88,6 @@ pub mod test_runner;
 pub mod testcommand;
 pub mod testlist;
 pub mod ui;
+pub mod watchdog;
 
 pub use error::{Error, Result};
