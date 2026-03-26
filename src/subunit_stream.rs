@@ -350,10 +350,10 @@ where
 
                     // Calculate duration from start/stop timestamps
                     let duration = if let (Some(start_time), Some(end_time)) =
-                        (start_times.get(test_id_str), event.timestamp)
+                        (start_times.remove(test_id_str), event.timestamp)
                     {
                         let end_time_chrono = convert_timestamp(end_time, "end event")?;
-                        let duration_secs = (end_time_chrono - *start_time).num_milliseconds();
+                        let duration_secs = (end_time_chrono - start_time).num_milliseconds();
                         if duration_secs >= 0 {
                             Some(std::time::Duration::from_millis(duration_secs as u64))
                         } else {
@@ -374,6 +374,13 @@ where
                 }
             }
         }
+    }
+
+    for test_id in pending_attachments.keys() {
+        tracing::warn!(
+            "test {} started but never completed, discarding buffered attachments",
+            test_id
+        );
     }
 
     Ok(test_run)
@@ -460,10 +467,10 @@ pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
 
                     // Calculate duration from start/stop timestamps
                     let duration = if let (Some(start_time), Some(end_time)) =
-                        (start_times.get(test_id_str), event.timestamp)
+                        (start_times.remove(test_id_str), event.timestamp)
                     {
                         let end_time_chrono = convert_timestamp(end_time, "end event")?;
-                        let duration_secs = (end_time_chrono - *start_time).num_milliseconds();
+                        let duration_secs = (end_time_chrono - start_time).num_milliseconds();
                         if duration_secs >= 0 {
                             Some(std::time::Duration::from_millis(duration_secs as u64))
                         } else {
