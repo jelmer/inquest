@@ -271,9 +271,15 @@ impl TestCommand {
         Ok(test_ids)
     }
 
-    /// Execute tests and return the subunit output
-    pub fn run_tests(&self, test_ids: Option<&[TestId]>) -> Result<std::process::Child> {
-        let (cmd, _temp_file) = self.build_command(test_ids, false)?;
+    /// Execute tests and return the child process and temp file handle.
+    ///
+    /// The caller must keep the returned `Option<NamedTempFile>` alive until
+    /// the child process has finished reading from it (i.e. until after `wait()`).
+    pub fn run_tests(
+        &self,
+        test_ids: Option<&[TestId]>,
+    ) -> Result<(std::process::Child, Option<NamedTempFile>)> {
+        let (cmd, temp_file) = self.build_command(test_ids, false)?;
 
         // Spawn the test process
         let child = Command::new("sh")
@@ -285,10 +291,7 @@ impl TestCommand {
             .spawn()
             .map_err(|e| Error::CommandExecution(format!("Failed to spawn test command: {}", e)))?;
 
-        // Note: _temp_file will be kept alive for the duration of the command
-        // We need to handle this more carefully in a real implementation
-
-        Ok(child)
+        Ok((child, temp_file))
     }
 
     /// Provision test instances for parallel execution
