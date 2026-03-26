@@ -25,7 +25,22 @@ fn kill_process_tree(child: &mut Child) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn kill_process_tree(child: &mut Child) -> std::io::Result<()> {
+    let pid = child.id();
+    // taskkill /T kills the entire process tree; /F forces termination.
+    let status = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        _ => child.kill(),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn kill_process_tree(child: &mut Child) -> std::io::Result<()> {
     child.kill()
 }
