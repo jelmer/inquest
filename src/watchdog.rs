@@ -19,7 +19,7 @@ fn kill_process_tree(child: &mut Child) -> std::io::Result<()> {
     // Try to kill the process group (negative PID)
     let ret = unsafe { libc::kill(-pid, libc::SIGKILL) };
     if ret != 0 {
-        // Fall back to killing just the child
+        // Process group kill failed — fall back to killing just the child
         child.kill()?;
     }
     Ok(())
@@ -126,6 +126,12 @@ pub fn wait_with_timeout(
         return child.wait().map(Ok);
     }
 
+    let kill_and_reap = |child: &mut Child| -> std::io::Result<()> {
+        kill_process_tree(child)?;
+        let _ = child.wait();
+        Ok(())
+    };
+
     let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
@@ -133,22 +139,19 @@ pub fn wait_with_timeout(
         }
         if let Some(t) = timeout {
             if start.elapsed() >= t {
-                kill_process_tree(child)?;
-                let _ = child.wait();
+                kill_and_reap(child)?;
                 return Ok(Err(TimeoutReason::Timeout));
             }
         }
         if let (Some(no_out), Some(tracker)) = (no_output_timeout, activity) {
             if tracker.elapsed_since_last() >= no_out {
-                kill_process_tree(child)?;
-                let _ = child.wait();
+                kill_and_reap(child)?;
                 return Ok(Err(TimeoutReason::NoOutput));
             }
         }
         if let Some(wd) = watchdog {
             if let Some(hung_test) = wd.check_timeout() {
-                kill_process_tree(child)?;
-                let _ = child.wait();
+                kill_and_reap(child)?;
                 return Ok(Err(TimeoutReason::TestTimeout(hung_test)));
             }
         }
