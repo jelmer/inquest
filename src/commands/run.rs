@@ -12,7 +12,7 @@ use crate::testcommand::TestCommand;
 use crate::ui::UI;
 use crate::watchdog::{wait_with_timeout, TestWatchdog, TimeoutReason};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -264,6 +264,145 @@ fn update_progress_bar_style(
             .unwrap()
             .progress_chars("█▓▒░  "),
     );
+}
+
+/// Computed progress bar layout dimensions for a terminal.
+struct ProgressLayout {
+    bar_width: usize,
+    max_msg_len: usize,
+}
+
+/// Compute progress bar layout from terminal width.
+fn compute_progress_layout(term_width: usize) -> ProgressLayout {
+    let fixed_width = 25;
+    let bar_width = term_width.saturating_sub(fixed_width + 30).clamp(20, 60);
+    let max_msg_len = term_width.saturating_sub(bar_width + fixed_width).max(30);
+    ProgressLayout {
+        bar_width,
+        max_msg_len,
+    }
+}
+
+/// Create a progress bar with the standard style.
+fn create_progress_bar(total: u64, bar_width: usize) -> ProgressBar {
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(&format!(
+                "[{{elapsed_precise}}] {{bar:{}.cyan/blue}} {{pos}}/{{len}} {{msg}}",
+                bar_width
+            ))
+            .unwrap()
+            .progress_chars("█▓▒░  "),
+    );
+    pb
+}
+
+/// Create a timeout error result for a test that was killed.
+fn timeout_error_result(test_id: TestId) -> crate::repository::TestResult {
+    crate::repository::TestResult::error(test_id, "test timed out (killed after per-test timeout)")
+}
+
+/// Filter out tests that have already completed or timed out, returning the remaining tests.
+fn compute_remaining_tests(
+    all_test_ids: &[TestId],
+    completed_from_watchdog: &HashSet<String>,
+    completed_from_results: &HashSet<&str>,
+    hung_test: &str,
+) -> Vec<TestId> {
+    all_test_ids
+        .iter()
+        .filter(|id| {
+            !completed_from_watchdog.contains(id.as_str())
+                && !completed_from_results.contains(id.as_str())
+                && id.as_str() != hung_test
+        })
+        .cloned()
+        .collect()
+}
+
+/// Update the progress bar message after a test completes.
+///
+/// Tracks failures and completed duration for ETA calculation,
+/// updates the progress bar style and message.
+struct ProgressTracker {
+    failures: usize,
+    completed_duration: Duration,
+    bar_width: usize,
+    max_msg_len: usize,
+    estimated_total: Duration,
+    start_time: std::time::Instant,
+    short_fail_label: bool,
+}
+
+impl ProgressTracker {
+    fn new(
+        bar_width: usize,
+        max_msg_len: usize,
+        estimated_total: Duration,
+        start_time: std::time::Instant,
+        short_fail_label: bool,
+    ) -> Self {
+        ProgressTracker {
+            failures: 0,
+            completed_duration: Duration::ZERO,
+            bar_width,
+            max_msg_len,
+            estimated_total,
+            start_time,
+            short_fail_label,
+        }
+    }
+
+    /// Record a completed test and update the progress bar message.
+    fn on_test_complete(
+        &mut self,
+        progress_bar: &ProgressBar,
+        test_id: &str,
+        status: subunit_stream::ProgressStatus,
+        historical_times: &HashMap<TestId, Duration>,
+    ) {
+        progress_bar.inc(1);
+
+        if let Some(&dur) = historical_times.get(&TestId::new(test_id)) {
+            self.completed_duration += dur;
+        }
+        if matches!(
+            status,
+            subunit_stream::ProgressStatus::Failed
+                | subunit_stream::ProgressStatus::UnexpectedSuccess
+        ) {
+            self.failures += 1;
+        }
+
+        let completed = progress_bar.position();
+        update_progress_bar_style(progress_bar, self.bar_width, completed, self.failures);
+
+        let fail_msg = format_failure_msg(self.failures, self.short_fail_label);
+        let eta_msg = format_eta(
+            self.estimated_total,
+            self.completed_duration,
+            self.start_time.elapsed(),
+        );
+        let extra_len = if self.failures > 0 {
+            let label = if self.short_fail_label {
+                "fail"
+            } else {
+                "failures"
+            };
+            // " [<label>: <N>]"
+            3 + label.len() + self.failures.to_string().len()
+        } else {
+            0
+        } + eta_msg.len();
+        let short_name = truncate_test_name(test_id, self.max_msg_len, extra_len);
+
+        let indicator = status.indicator();
+        progress_bar.set_message(format!(
+            "{} {}{}{}",
+            indicator, short_name, fail_msg, eta_msg
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -830,20 +969,11 @@ impl RunCommand {
         let mut next_raw_writer: Option<Box<dyn std::io::Write + Send>> = Some(initial_raw_writer);
 
         let term_width = console::Term::stdout().size().1 as usize;
-        let fixed_width = 25;
-        let bar_width = term_width.saturating_sub(fixed_width + 30).clamp(20, 60);
-        let max_msg_len = term_width.saturating_sub(bar_width + fixed_width).max(30);
+        let layout = compute_progress_layout(term_width);
+        let bar_width = layout.bar_width;
+        let max_msg_len = layout.max_msg_len;
 
-        let progress_bar = ProgressBar::new(total_test_count as u64);
-        progress_bar.set_style(
-            ProgressStyle::default_bar()
-                .template(&format!(
-                    "[{{elapsed_precise}}] {{bar:{}.cyan/blue}} {{pos}}/{{len}} {{msg}}",
-                    bar_width
-                ))
-                .unwrap()
-                .progress_chars("█▓▒░  "),
-        );
+        let progress_bar = create_progress_bar(total_test_count as u64, bar_width);
         progress_bar.set_position(all_results.len() as u64);
 
         let output_filter = if self.all_output {
@@ -899,10 +1029,14 @@ impl RunCommand {
 
             let parse_thread = std::thread::spawn(move || {
                 let historical_times = historical_times_for_thread;
-                let mut failures = 0;
-                let mut completed_duration = Duration::ZERO;
                 let progress_bar_for_bytes = progress_bar_clone.clone();
-                let progress_bar_for_style = progress_bar_clone.clone();
+                let mut tracker = ProgressTracker::new(
+                    bar_width,
+                    max_msg_len,
+                    estimated_total,
+                    start_time,
+                    false,
+                );
 
                 subunit_stream::parse_stream_with_progress(
                     channel_reader,
@@ -915,46 +1049,13 @@ impl RunCommand {
                             status,
                         );
 
-                        let indicator = status.indicator();
-                        if !indicator.is_empty() {
-                            progress_bar_clone.inc(1);
-
-                            if let Some(&dur) = historical_times.get(&TestId::new(test_id)) {
-                                completed_duration += dur;
-                            }
-                            if matches!(
+                        if !status.indicator().is_empty() {
+                            tracker.on_test_complete(
+                                &progress_bar_clone,
+                                test_id,
                                 status,
-                                subunit_stream::ProgressStatus::Failed
-                                    | subunit_stream::ProgressStatus::UnexpectedSuccess
-                            ) {
-                                failures += 1;
-                            }
-
-                            let completed = progress_bar_clone.position();
-                            update_progress_bar_style(
-                                &progress_bar_for_style,
-                                bar_width,
-                                completed,
-                                failures,
+                                &historical_times,
                             );
-
-                            let fail_msg = format_failure_msg(failures, false);
-                            let eta_msg = format_eta(
-                                estimated_total,
-                                completed_duration,
-                                start_time.elapsed(),
-                            );
-                            let extra_len = if failures > 0 {
-                                12 + failures.to_string().len()
-                            } else {
-                                0
-                            } + eta_msg.len();
-                            let short_name = truncate_test_name(test_id, max_msg_len, extra_len);
-
-                            progress_bar_clone.set_message(format!(
-                                "{} {}{}{}",
-                                indicator, short_name, fail_msg, eta_msg
-                            ));
                         }
                     },
                     |bytes| {
@@ -999,13 +1100,7 @@ impl RunCommand {
                         hung_test
                     );
                     let test_id = TestId::new(hung_test);
-                    all_results.insert(
-                        test_id.clone(),
-                        crate::repository::TestResult::error(
-                            test_id,
-                            "test timed out (killed after per-test timeout)",
-                        ),
-                    );
+                    all_results.insert(test_id.clone(), timeout_error_result(test_id));
                     any_command_failed = true;
 
                     if !test_cmd.supports_test_filtering() {
@@ -1016,29 +1111,25 @@ impl RunCommand {
                         break;
                     }
 
-                    let completed = watchdog
+                    let completed_from_watchdog = watchdog
                         .as_ref()
                         .map(|wd| wd.completed_tests())
                         .unwrap_or_default();
-                    let completed_in_results: std::collections::HashSet<&str> =
+                    let completed_in_results: HashSet<&str> =
                         all_results.keys().map(|id| id.as_str()).collect();
                     let discovered_tests;
                     let all_test_ids: &[TestId] = if let Some(ref ids) = remaining_tests {
                         ids
                     } else {
-                        // No explicit test list — discover tests now for restart
                         discovered_tests = test_cmd.list_tests()?;
                         &discovered_tests
                     };
-                    let next_remaining: Vec<TestId> = all_test_ids
-                        .iter()
-                        .filter(|id| {
-                            !completed.contains(id.as_str())
-                                && !completed_in_results.contains(id.as_str())
-                                && id.as_str() != hung_test
-                        })
-                        .cloned()
-                        .collect();
+                    let next_remaining = compute_remaining_tests(
+                        all_test_ids,
+                        &completed_from_watchdog,
+                        &completed_in_results,
+                        hung_test,
+                    );
 
                     restarts += 1;
                     if restarts >= MAX_TEST_TIMEOUT_RESTARTS || next_remaining.is_empty() {
@@ -1113,10 +1204,7 @@ impl RunCommand {
         no_output_timeout: Option<Duration>,
         test_timeout_fn: Option<&TestTimeoutFn>,
     ) -> Result<i32> {
-        use std::collections::HashMap;
-
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
 
         let output_filter = if self.all_output {
             subunit_stream::OutputFilter::All
@@ -1164,20 +1252,14 @@ impl RunCommand {
 
         // Create multi-progress for tracking all workers
         let term_width = console::Term::stdout().size().1 as usize;
-        let fixed_width = 25;
-        let overall_bar_width = term_width.saturating_sub(fixed_width + 30).clamp(20, 60);
+        let overall_layout = compute_progress_layout(term_width);
+        let overall_bar_width = overall_layout.bar_width;
 
         let multi_progress = indicatif::MultiProgress::new();
-        let overall_bar = multi_progress.add(ProgressBar::new(all_tests.len() as u64));
-        overall_bar.set_style(
-            ProgressStyle::default_bar()
-                .template(&format!(
-                    "[{{elapsed_precise}}] {{bar:{}.cyan/blue}} {{pos}}/{{len}} {{msg}}",
-                    overall_bar_width
-                ))
-                .unwrap()
-                .progress_chars("█▓▒░  "),
-        );
+        let overall_bar = multi_progress.add(create_progress_bar(
+            all_tests.len() as u64,
+            overall_bar_width,
+        ));
 
         // Shared failure counter across all workers
         let total_failures = Arc::new(AtomicUsize::new(0));
@@ -1208,22 +1290,9 @@ impl RunCommand {
             .collect();
 
         loop {
-            // Spawn workers, supervisor threads, and parse threads for pending partitions
-            type SupervisorResult = std::result::Result<
-                std::result::Result<std::process::ExitStatus, TimeoutReason>,
-                std::io::Error,
-            >;
             let mut supervisors: Vec<(usize, std::thread::JoinHandle<SupervisorResult>)> =
                 Vec::new();
-            struct WorkerThreads {
-                worker_id: usize,
-                bar: ProgressBar,
-                parse: std::thread::JoinHandle<Result<crate::repository::TestRun>>,
-                io: IoThreads,
-                watchdog: Option<TestWatchdog>,
-            }
             let mut worker_threads: Vec<WorkerThreads> = Vec::new();
-            // Keep temp files alive for the duration of this iteration
             let mut _temp_files = Vec::new();
 
             for (worker_id, partition) in &pending_partitions {
@@ -1272,7 +1341,6 @@ impl RunCommand {
                 let stderr = child.stderr.take().expect("stderr was piped");
 
                 let worker_run_id = format!("{}-{}", base_run_id, worker_id);
-                // Use real raw_writer for first iteration, sink for restarts
                 let raw_writer: Box<dyn std::io::Write + Send> = if is_first_iteration {
                     let (_, w) = repo.begin_test_run_raw()?;
                     w
@@ -1300,8 +1368,6 @@ impl RunCommand {
                 let watchdog_for_supervisor = worker_watchdog.clone();
                 let test_timeout_fn_clone = test_timeout_fn.cloned();
 
-                // Supervisor thread: calls wait_with_timeout concurrently so a hung
-                // worker is killed immediately, unblocking the parse/tee threads.
                 let remaining_timeout =
                     max_duration.map(|d| d.saturating_sub(start_time.elapsed()));
                 let supervisor = std::thread::spawn(move || {
@@ -1327,9 +1393,15 @@ impl RunCommand {
                 let output_filter_clone = output_filter;
                 let worker_start_time = std::time::Instant::now();
                 let parse_thread = std::thread::spawn(move || {
-                    let mut failures = 0;
-                    let mut completed_duration = Duration::ZERO;
                     let worker_bar_for_bytes = worker_bar_clone.clone();
+                    let mut tracker = ProgressTracker::new(
+                        worker_bar_width,
+                        worker_max_msg,
+                        worker_estimated_total,
+                        worker_start_time,
+                        true,
+                    );
+
                     subunit_stream::parse_stream_with_progress(
                         channel_reader,
                         worker_run_id_clone,
@@ -1341,21 +1413,13 @@ impl RunCommand {
                                 status,
                             );
 
-                            let indicator = status.indicator();
-                            if !indicator.is_empty() {
-                                worker_bar_clone.inc(1);
+                            if !status.indicator().is_empty() {
                                 overall_bar_clone.inc(1);
-
-                                if let Some(&dur) = worker_durations.get(&TestId::new(test_id)) {
-                                    completed_duration += dur;
-                                }
-
                                 if matches!(
                                     status,
                                     subunit_stream::ProgressStatus::Failed
                                         | subunit_stream::ProgressStatus::UnexpectedSuccess
                                 ) {
-                                    failures += 1;
                                     let total =
                                         total_failures_clone.fetch_add(1, Ordering::Relaxed) + 1;
                                     let completed = overall_bar_clone.position();
@@ -1371,24 +1435,12 @@ impl RunCommand {
                                     overall_bar_clone.set_message(msg);
                                 }
 
-                                let fail_msg = format_failure_msg(failures, true);
-                                let eta_msg = format_eta(
-                                    worker_estimated_total,
-                                    completed_duration,
-                                    worker_start_time.elapsed(),
+                                tracker.on_test_complete(
+                                    &worker_bar_clone,
+                                    test_id,
+                                    status,
+                                    &worker_durations,
                                 );
-                                let extra_len = if failures > 0 {
-                                    9 + failures.to_string().len()
-                                } else {
-                                    0
-                                } + eta_msg.len();
-                                let short_name =
-                                    truncate_test_name(test_id, worker_max_msg, extra_len);
-
-                                worker_bar_clone.set_message(format!(
-                                    "{} {}{}{}",
-                                    indicator, short_name, fail_msg, eta_msg
-                                ));
                             }
                         },
                         |bytes| {
@@ -1408,129 +1460,21 @@ impl RunCommand {
                 });
             }
 
-            // Wait for all supervisors first. When a supervisor kills a hung worker,
-            // the stdout pipe closes, unblocking the tee/parse threads for that worker.
-            let mut supervisor_results: HashMap<
-                usize,
-                std::result::Result<std::process::ExitStatus, TimeoutReason>,
-            > = HashMap::new();
-            for (worker_id, supervisor) in supervisors {
-                let result = supervisor
-                    .join()
-                    .map_err(|_| {
-                        crate::error::Error::CommandExecution(format!(
-                            "Supervisor thread {} panicked",
-                            worker_id
-                        ))
-                    })?
-                    .map_err(|e| {
-                        crate::error::Error::CommandExecution(format!(
-                            "Failed to wait for worker {}: {}",
-                            worker_id, e
-                        ))
-                    })?;
-                supervisor_results.insert(worker_id, result);
-            }
+            // Wait for all supervisors, then collect parse results
+            let supervisor_results = join_supervisors(supervisors)?;
+            let worker_watchdogs =
+                collect_worker_results(worker_threads, &mut all_results)?;
 
-            // Now collect from parse threads (safe: all workers have exited or been killed)
-            let mut worker_watchdogs: HashMap<usize, Option<TestWatchdog>> = HashMap::new();
-            for wt in worker_threads {
-                let worker_run = wt.parse.join().map_err(|_| {
-                    crate::error::Error::CommandExecution(format!(
-                        "Parse thread {} panicked",
-                        wt.worker_id
-                    ))
-                })??;
-
-                wt.io.join(&format!("worker-{}", wt.worker_id))?;
-                wt.bar.finish_with_message("done");
-
-                let worker_tag = format!("worker-{}", wt.worker_id);
-                let mut worker_run = worker_run;
-                for (_, result) in worker_run.results.iter_mut() {
-                    if !result.tags.contains(&worker_tag) {
-                        result.tags.push(worker_tag.clone());
-                    }
-                }
-
-                for (test_id, result) in worker_run.results {
-                    all_results.insert(test_id, result);
-                }
-
-                worker_watchdogs.insert(wt.worker_id, wt.watchdog);
-            }
-
-            // Compute restart partitions from timed-out workers
-            let mut restart_partitions: Vec<(usize, Vec<TestId>)> = Vec::new();
-            for (worker_id, result) in &supervisor_results {
-                match result {
-                    Err(TimeoutReason::TestTimeout(hung_test)) => {
-                        tracing::warn!(
-                            "worker {} killed (test {} timed out)",
-                            worker_id,
-                            hung_test
-                        );
-                        let test_id = TestId::new(hung_test);
-                        all_results.insert(
-                            test_id.clone(),
-                            crate::repository::TestResult::error(
-                                test_id,
-                                "test timed out (killed after per-test timeout)",
-                            ),
-                        );
-                        any_failed = true;
-
-                        let completed = worker_watchdogs
-                            .get(worker_id)
-                            .and_then(|wd| wd.as_ref())
-                            .map(|wd| wd.completed_tests())
-                            .unwrap_or_default();
-                        let completed_in_results: std::collections::HashSet<&str> =
-                            all_results.keys().map(|id| id.as_str()).collect();
-
-                        // Find this worker's original partition
-                        let original_partition: &[TestId] = &pending_partitions
-                            .iter()
-                            .find(|(wid, _)| wid == worker_id)
-                            .expect("worker_id must exist in pending_partitions")
-                            .1;
-
-                        let remaining: Vec<TestId> = original_partition
-                            .iter()
-                            .filter(|id| {
-                                !completed.contains(id.as_str())
-                                    && !completed_in_results.contains(id.as_str())
-                                    && id.as_str() != hung_test
-                            })
-                            .cloned()
-                            .collect();
-
-                        if !remaining.is_empty() {
-                            restart_partitions.push((*worker_id, remaining));
-                        }
-                    }
-                    Err(TimeoutReason::Timeout) => {
-                        tracing::warn!(
-                            "worker {} killed (max duration exceeded after {:.1}s)",
-                            worker_id,
-                            start_time.elapsed().as_secs_f64()
-                        );
-                        any_failed = true;
-                    }
-                    Err(TimeoutReason::NoOutput) => {
-                        tracing::warn!(
-                            "worker {} killed (no output for {:?})",
-                            worker_id,
-                            no_output_timeout.unwrap()
-                        );
-                        any_failed = true;
-                    }
-                    Ok(status) if !status.success() => {
-                        any_failed = true;
-                    }
-                    Ok(_) => {}
-                }
-            }
+            // Determine which workers need to be restarted
+            let restart_partitions = compute_restart_partitions(
+                &supervisor_results,
+                &worker_watchdogs,
+                &pending_partitions,
+                &mut all_results,
+                &mut any_failed,
+                start_time,
+                no_output_timeout,
+            );
 
             is_first_iteration = false;
 
@@ -1597,8 +1541,6 @@ impl RunCommand {
         historical_times: &HashMap<TestId, Duration>,
         max_duration: Option<Duration>,
     ) -> Result<i32> {
-        use std::collections::HashMap;
-
         let start_time = std::time::Instant::now();
 
         // Get the base run ID - each isolated test will write to its own file
@@ -2059,6 +2001,158 @@ impl Command for RunCommand {
 ///
 /// This struct ensures that test instances are properly cleaned up even if
 /// an error occurs or panic happens during test execution.
+/// Handles for a single parallel worker's background threads.
+struct WorkerThreads {
+    worker_id: usize,
+    bar: ProgressBar,
+    parse: std::thread::JoinHandle<Result<crate::repository::TestRun>>,
+    io: IoThreads,
+    watchdog: Option<TestWatchdog>,
+}
+
+type SupervisorResult = std::result::Result<
+    std::result::Result<std::process::ExitStatus, TimeoutReason>,
+    std::io::Error,
+>;
+
+/// Wait for all supervisor threads and collect their results.
+fn join_supervisors(
+    supervisors: Vec<(usize, std::thread::JoinHandle<SupervisorResult>)>,
+) -> Result<HashMap<usize, std::result::Result<std::process::ExitStatus, TimeoutReason>>> {
+    let mut results = HashMap::new();
+    for (worker_id, supervisor) in supervisors {
+        let result = supervisor
+            .join()
+            .map_err(|_| {
+                crate::error::Error::CommandExecution(format!(
+                    "Supervisor thread {} panicked",
+                    worker_id
+                ))
+            })?
+            .map_err(|e| {
+                crate::error::Error::CommandExecution(format!(
+                    "Failed to wait for worker {}: {}",
+                    worker_id, e
+                ))
+            })?;
+        results.insert(worker_id, result);
+    }
+    Ok(results)
+}
+
+/// Join parse and I/O threads for each worker, tag results, and merge into all_results.
+///
+/// Returns a map of worker_id to its watchdog (for computing remaining tests on restart).
+fn collect_worker_results(
+    worker_threads: Vec<WorkerThreads>,
+    all_results: &mut HashMap<TestId, crate::repository::TestResult>,
+) -> Result<HashMap<usize, Option<TestWatchdog>>> {
+    let mut worker_watchdogs = HashMap::new();
+    for wt in worker_threads {
+        let mut worker_run = wt.parse.join().map_err(|_| {
+            crate::error::Error::CommandExecution(format!(
+                "Parse thread {} panicked",
+                wt.worker_id
+            ))
+        })??;
+
+        wt.io.join(&format!("worker-{}", wt.worker_id))?;
+        wt.bar.finish_with_message("done");
+
+        let worker_tag = format!("worker-{}", wt.worker_id);
+        for (_, result) in worker_run.results.iter_mut() {
+            if !result.tags.contains(&worker_tag) {
+                result.tags.push(worker_tag.clone());
+            }
+        }
+
+        for (test_id, result) in worker_run.results {
+            all_results.insert(test_id, result);
+        }
+
+        worker_watchdogs.insert(wt.worker_id, wt.watchdog);
+    }
+    Ok(worker_watchdogs)
+}
+
+/// Examine supervisor results to determine which workers timed out and need restarting.
+///
+/// Records timeout errors in `all_results` and sets `any_failed` as needed.
+/// Returns the list of (worker_id, remaining_tests) partitions to restart.
+#[allow(clippy::too_many_arguments)]
+fn compute_restart_partitions(
+    supervisor_results: &HashMap<usize, std::result::Result<std::process::ExitStatus, TimeoutReason>>,
+    worker_watchdogs: &HashMap<usize, Option<TestWatchdog>>,
+    pending_partitions: &[(usize, Vec<TestId>)],
+    all_results: &mut HashMap<TestId, crate::repository::TestResult>,
+    any_failed: &mut bool,
+    start_time: std::time::Instant,
+    no_output_timeout: Option<Duration>,
+) -> Vec<(usize, Vec<TestId>)> {
+    let mut restart_partitions = Vec::new();
+    for (worker_id, result) in supervisor_results {
+        match result {
+            Err(TimeoutReason::TestTimeout(hung_test)) => {
+                tracing::warn!(
+                    "worker {} killed (test {} timed out)",
+                    worker_id,
+                    hung_test
+                );
+                let test_id = TestId::new(hung_test);
+                all_results.insert(test_id.clone(), timeout_error_result(test_id));
+                *any_failed = true;
+
+                let completed_from_watchdog = worker_watchdogs
+                    .get(worker_id)
+                    .and_then(|wd| wd.as_ref())
+                    .map(|wd| wd.completed_tests())
+                    .unwrap_or_default();
+                let completed_in_results: HashSet<&str> =
+                    all_results.keys().map(|id| id.as_str()).collect();
+
+                let original_partition: &[TestId] = &pending_partitions
+                    .iter()
+                    .find(|(wid, _)| wid == worker_id)
+                    .expect("worker_id must exist in pending_partitions")
+                    .1;
+
+                let remaining = compute_remaining_tests(
+                    original_partition,
+                    &completed_from_watchdog,
+                    &completed_in_results,
+                    hung_test,
+                );
+
+                if !remaining.is_empty() {
+                    restart_partitions.push((*worker_id, remaining));
+                }
+            }
+            Err(TimeoutReason::Timeout) => {
+                tracing::warn!(
+                    "worker {} killed (max duration exceeded after {:.1}s)",
+                    worker_id,
+                    start_time.elapsed().as_secs_f64()
+                );
+                *any_failed = true;
+            }
+            Err(TimeoutReason::NoOutput) => {
+                tracing::warn!(
+                    "worker {} killed (no output for {:?})",
+                    worker_id,
+                    no_output_timeout.unwrap()
+                );
+                *any_failed = true;
+            }
+            Ok(status) if !status.success() => {
+                *any_failed = true;
+            }
+            Ok(_) => {}
+        }
+    }
+    restart_partitions
+}
+
+/// RAII guard to ensure test instances are disposed
 struct InstanceDisposeGuard<'a> {
     test_cmd: &'a TestCommand,
     instance_ids: &'a [String],
