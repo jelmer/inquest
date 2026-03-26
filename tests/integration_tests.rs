@@ -732,6 +732,20 @@ fn subunit_success(test_id: &str) -> Vec<u8> {
     bytes
 }
 
+/// Generate subunit v2 binary bytes for a Failed event.
+fn subunit_failure(test_id: &str) -> Vec<u8> {
+    use subunit::serialize::Serializable;
+    use subunit::types::event::Event;
+    use subunit::types::teststatus::TestStatus as SubunitTestStatus;
+    let mut bytes = Vec::new();
+    Event::new(SubunitTestStatus::Failed)
+        .test_id(test_id)
+        .build()
+        .serialize(&mut bytes)
+        .unwrap();
+    bytes
+}
+
 /// Generate subunit v2 binary bytes for an Enumeration event (used by --list).
 fn subunit_enumerate(test_id: &str) -> Vec<u8> {
     use subunit::serialize::Serializable;
@@ -1082,4 +1096,235 @@ fi
     assert!(result.is_ok(), "execute failed: {:?}", result);
     // Exit code 1 because test_hangs timed out on first attempt
     assert_eq!(result.unwrap(), 1);
+}
+
+#[test]
+fn test_stream_interruption_partial_results() {
+    // Parse a stream that starts valid but ends with garbage — partial results should be returned
+    let mut stream = Vec::new();
+    stream.extend(subunit_inprogress("test_ok"));
+    stream.extend(subunit_success("test_ok"));
+    stream.extend(subunit_inprogress("test_incomplete"));
+    // Append garbage to simulate a truncated/corrupted stream
+    stream.extend(b"\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8");
+    stream.extend(b"\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8");
+
+    let run = inquest::subunit_stream::parse_stream(std::io::Cursor::new(stream), "0".into());
+    let run = run.unwrap();
+
+    // test_ok should have been fully parsed
+    assert_eq!(run.results.len(), 1);
+    let (id, result) = run.results.iter().next().unwrap();
+    assert_eq!(id.as_str(), "test_ok");
+    assert_eq!(
+        result.status,
+        inquest::repository::TestStatus::Success
+    );
+
+    // test_incomplete started but never finished, so it shouldn't be in results
+    assert!(!run.results.contains_key(&inquest::repository::TestId::new("test_incomplete")));
+}
+
+#[test]
+fn test_parallel_execution_verifies_results() {
+    use inquest::commands::RunCommand;
+    use inquest::repository::inquest::InquestRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    // Create subunit data for two partitions
+    let mut pass_a = subunit_inprogress("test_a");
+    pass_a.extend(subunit_success("test_a"));
+    write_bin(temp.path(), "pass_a.bin", &pass_a);
+
+    let mut fail_b = subunit_inprogress("test_b");
+    fail_b.extend(subunit_failure("test_b"));
+    write_bin(temp.path(), "fail_b.bin", &fail_b);
+
+    let mut list_bytes = subunit_enumerate("test_a");
+    list_bytes.extend(subunit_enumerate("test_b"));
+    write_bin(temp.path(), "list.bin", &list_bytes);
+
+    // Script: emit test results based on which test IDs are requested.
+    // With 2 workers each gets one test.
+    let dir = temp.path().to_string_lossy();
+    let script = format!(
+        r#"#!/bin/sh
+DIR="{dir}"
+if [ "$1" = "--list" ]; then
+    cat "$DIR/list.bin"
+    exit 0
+fi
+# $1 is --load-list, $2 is the ID file path
+if [ -n "$2" ]; then
+    IDFILE="$2"
+    if grep -q test_a "$IDFILE" 2>/dev/null; then
+        cat "$DIR/pass_a.bin"
+    fi
+    if grep -q test_b "$IDFILE" 2>/dev/null; then
+        cat "$DIR/fail_b.bin"
+    fi
+else
+    # No ID file — run both
+    cat "$DIR/pass_a.bin"
+    cat "$DIR/fail_b.bin"
+fi
+"#,
+    );
+    let script_path = temp.path().join("run.sh");
+    fs::write(&script_path, &script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut config = toml::map::Map::new();
+    config.insert(
+        "test_command".into(),
+        toml::Value::String(format!(
+            "sh {} $LISTOPT $IDOPTION",
+            script_path.display()
+        )),
+    );
+    config.insert(
+        "test_list_option".into(),
+        toml::Value::String("--list".into()),
+    );
+    config.insert(
+        "test_id_option".into(),
+        toml::Value::String("--load-list $IDFILE".into()),
+    );
+    fs::write(
+        temp.path().join("inquest.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    let mut ui = TestUI::new();
+    let cmd = RunCommand::with_all_options(
+        Some(base_path.clone()),
+        false,
+        false,
+        false,
+        false,
+        None,
+        Some(2), // 2 workers
+        false,
+        false,
+        false,
+        false,
+        None,
+        None,
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Disabled,
+        None,
+    );
+
+    let result = cmd.execute(&mut ui);
+    assert!(result.is_ok(), "execute failed: {:?}", result);
+    // Exit code 1 because test_b failed
+    assert_eq!(result.unwrap(), 1);
+
+    // Verify the repository now has a run with correct results
+    let repo = factory.open(temp.path()).unwrap();
+    let failing = repo.get_failing_tests().unwrap();
+    assert_eq!(failing.len(), 1);
+    assert_eq!(failing[0].as_str(), "test_b");
+}
+
+#[test]
+fn test_partial_mode_preserves_untested_failures_via_run() {
+    use inquest::commands::RunCommand;
+    use inquest::repository::inquest::InquestRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    let mut repo = factory.initialise(temp.path()).unwrap();
+
+    // Seed two failing tests
+    let mut run = TestRun::new("0".to_string());
+    run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+    run.add_result(TestResult::failure("test_a", "Error"));
+    run.add_result(TestResult::failure("test_b", "Error"));
+    repo.insert_test_run_partial(run, false).unwrap();
+    drop(repo);
+
+    // Create subunit data that only re-runs test_a (now passes)
+    let mut pass_a = subunit_inprogress("test_a");
+    pass_a.extend(subunit_success("test_a"));
+    write_bin(temp.path(), "pass_a.bin", &pass_a);
+
+    let list_bytes = subunit_enumerate("test_a");
+    write_bin(temp.path(), "list.bin", &list_bytes);
+
+    let dir = temp.path().to_string_lossy();
+    let script = format!(
+        r#"#!/bin/sh
+DIR="{dir}"
+if [ "$1" = "--list" ]; then
+    cat "$DIR/list.bin"
+    exit 0
+fi
+cat "$DIR/pass_a.bin"
+"#,
+    );
+    let script_path = temp.path().join("run.sh");
+    fs::write(&script_path, &script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut config = toml::map::Map::new();
+    config.insert(
+        "test_command".into(),
+        toml::Value::String(format!("sh {} $LISTOPT", script_path.display())),
+    );
+    config.insert(
+        "test_list_option".into(),
+        toml::Value::String("--list".into()),
+    );
+    fs::write(
+        temp.path().join("inquest.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    // Run in partial mode — only test_a runs, test_b should remain failing
+    let mut ui = TestUI::new();
+    let cmd = RunCommand::with_all_options(
+        Some(base_path),
+        true, // partial
+        false,
+        false,
+        false,
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+        None,
+        None,
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Disabled,
+        None,
+    );
+
+    let result = cmd.execute(&mut ui);
+    assert!(result.is_ok(), "execute failed: {:?}", result);
+
+    // test_b should still be failing (was not re-run in partial mode)
+    let repo = factory.open(temp.path()).unwrap();
+    let failing = repo.get_failing_tests().unwrap();
+    assert_eq!(failing.len(), 1);
+    assert_eq!(failing[0].as_str(), "test_b");
 }
