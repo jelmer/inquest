@@ -1024,6 +1024,7 @@ fn test_stream_interruption_partial_results() {
 }
 
 #[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
 fn test_parallel_execution_verifies_results() {
     use inquest::commands::RunCommand;
     use inquest::repository::inquest::InquestRepositoryFactory;
@@ -1120,6 +1121,7 @@ fi
 }
 
 #[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
 fn test_partial_mode_preserves_untested_failures_via_run() {
     use inquest::commands::RunCommand;
     use inquest::repository::inquest::InquestRepositoryFactory;
