@@ -814,11 +814,27 @@ fi
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    let config = format!(
-        "test_command = \"sh {} $LISTOPT $IDOPTION $IDFILE\"\ntest_list_option = \"--list\"\ntest_id_option = \"--load-list\"\n",
-        script_path.display()
+    let mut config = toml::map::Map::new();
+    config.insert(
+        "test_command".into(),
+        toml::Value::String(format!(
+            "sh {} $LISTOPT $IDOPTION $IDFILE",
+            script_path.display()
+        )),
     );
-    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+    config.insert(
+        "test_list_option".into(),
+        toml::Value::String("--list".into()),
+    );
+    config.insert(
+        "test_id_option".into(),
+        toml::Value::String("--load-list".into()),
+    );
+    fs::write(
+        temp.path().join("inquest.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
 
     let mut ui = TestUI::new();
     let cmd = RunCommand::with_all_options(
@@ -903,11 +919,20 @@ fi
 
     // No test_id_option — the runner does not pass IDs to the command.
     // On restart, list_tests() is called to discover remaining tests.
-    let config = format!(
-        "test_command = \"sh {} $LISTOPT\"\ntest_list_option = \"--list\"\n",
-        script_path.display()
+    let mut config = toml::map::Map::new();
+    config.insert(
+        "test_command".into(),
+        toml::Value::String(format!("sh {} $LISTOPT", script_path.display())),
     );
-    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+    config.insert(
+        "test_list_option".into(),
+        toml::Value::String("--list".into()),
+    );
+    fs::write(
+        temp.path().join("inquest.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
 
     let mut ui = TestUI::new();
     // No load-list: test_ids will be None
@@ -1008,11 +1033,27 @@ fi
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    let config = format!(
-        "test_command = \"sh {} $LISTOPT $IDOPTION $IDFILE\"\ntest_list_option = \"--list\"\ntest_id_option = \"--load-list\"\n",
-        script_path.display()
+    let mut config = toml::map::Map::new();
+    config.insert(
+        "test_command".into(),
+        toml::Value::String(format!(
+            "sh {} $LISTOPT $IDOPTION $IDFILE",
+            script_path.display()
+        )),
     );
-    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+    config.insert(
+        "test_list_option".into(),
+        toml::Value::String("--list".into()),
+    );
+    config.insert(
+        "test_id_option".into(),
+        toml::Value::String("--load-list".into()),
+    );
+    fs::write(
+        temp.path().join("inquest.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
 
     let mut ui = TestUI::new();
     let cmd = RunCommand::with_all_options(
