@@ -42,6 +42,27 @@ impl Drop for LockingWriter {
     }
 }
 
+/// Check whether a process with the given PID is still running.
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+/// Check whether a process with the given PID is still running.
+#[cfg(not(unix))]
+fn is_process_alive(pid: u32) -> bool {
+    // On non-Unix platforms, try tasklist to check if the PID exists.
+    // Falls back to assuming alive if tasklist is unavailable.
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+        .output()
+        .map(|o| {
+            let output = String::from_utf8_lossy(&o.stdout);
+            output.contains(&pid.to_string())
+        })
+        .unwrap_or(true)
+}
+
 const FORMAT_VERSION: &str = "1";
 const SCHEMA_VERSION: i64 = 1;
 const REPO_DIR: &str = ".inquest";
@@ -548,7 +569,7 @@ impl Repository for InquestRepository {
                 return Ok(false);
             }
         };
-        let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
+        let alive = is_process_alive(pid);
         if !alive {
             let _ = fs::remove_file(&lock_path);
         }
