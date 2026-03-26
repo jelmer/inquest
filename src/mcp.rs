@@ -304,24 +304,15 @@ impl InquestMcpService {
         let partial = failing_only;
         let test_filters = params.0.test_filters.filter(|f| !f.is_empty());
 
-        let cmd = crate::commands::RunCommand::with_all_options(
-            Some(base.to_string_lossy().to_string()),
+        let cmd = crate::commands::RunCommand {
+            base_path: Some(base.to_string_lossy().to_string()),
             partial,
             failing_only,
-            true,  // force_init
-            false, // auto
-            None,  // load_list
-            params.0.concurrency,
-            false, // until_failure
-            false, // isolated
-            false, // subunit
-            false, // all_output
+            force_init: true,
+            concurrency: params.0.concurrency,
             test_filters,
-            None, // test_args
-            crate::config::TimeoutSetting::Disabled,
-            crate::config::TimeoutSetting::Disabled,
-            None, // no_output_timeout
-        );
+            ..Default::default()
+        };
 
         use crate::commands::Command;
         let exit_code = cmd.execute(&mut ui).map_err(|e| {

@@ -213,26 +213,88 @@ impl TestCommand {
     ///
     /// Parses the subunit stream to extract test IDs from enumeration events,
     /// matching the Python testrepository's parse_enumeration() behavior.
+    ///
+    /// Times out after 5 minutes to avoid hanging indefinitely.
     pub fn list_tests(&self) -> Result<Vec<TestId>> {
+        use std::time::Duration;
+
+        const LIST_TIMEOUT: Duration = Duration::from_secs(300);
+
         let (cmd, _temp_file) = self.build_command(None, true)?;
 
-        let output = Command::new("sh")
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg(&cmd)
             .current_dir(&self.base_dir)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| {
                 Error::CommandExecution(format!("Failed to execute test command: {}", e))
             })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::CommandExecution(format!(
-                "Test listing command failed with exit code: {}\nCommand: {}\nStderr:\n{}",
-                output.status, cmd, stderr
-            )));
-        }
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr_handle = child.stderr.take().expect("stderr was piped");
 
+        // Read stdout and stderr in background threads to avoid deadlock
+        let stdout_thread = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut { stdout }, &mut buf)?;
+            Ok(buf)
+        });
+        let stderr_thread = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut { stderr_handle }, &mut buf)?;
+            Ok(buf)
+        });
+
+        // Wait with timeout
+        let deadline = std::time::Instant::now() + LIST_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let stdout_bytes = stdout_thread
+                        .join()
+                        .map_err(|_| Error::CommandExecution("stdout reader panicked".into()))?
+                        .map_err(Error::Io)?;
+
+                    if !status.success() {
+                        let stderr_bytes = stderr_thread
+                            .join()
+                            .map_err(|_| Error::CommandExecution("stderr reader panicked".into()))?
+                            .map_err(Error::Io)?;
+                        let stderr = String::from_utf8_lossy(&stderr_bytes);
+                        return Err(Error::CommandExecution(format!(
+                            "Test listing command failed with exit code: {}\nCommand: {}\nStderr:\n{}",
+                            status, cmd, stderr
+                        )));
+                    }
+
+                    return Self::parse_test_list(&stdout_bytes);
+                }
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(Error::CommandExecution(format!(
+                            "Test listing command timed out after {}s\nCommand: {}",
+                            LIST_TIMEOUT.as_secs(),
+                            cmd
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => {
+                    return Err(Error::CommandExecution(format!(
+                        "Failed to wait for test command: {}",
+                        e
+                    )));
+                }
+            }
+        }
+    }
+
+    fn parse_test_list(output: &[u8]) -> Result<Vec<TestId>> {
         // Parse subunit stream to extract test IDs from enumeration events
         // (matching Python's parse_enumeration which looks for 'exists' status)
         use subunit::io::sync::iter_stream;
@@ -241,7 +303,7 @@ impl TestCommand {
 
         let mut test_ids = Vec::new();
 
-        for item in iter_stream(&output.stdout[..]) {
+        for item in iter_stream(output) {
             match item {
                 Ok(ScannedItem::Event(event)) => {
                     // Enumeration events indicate test existence
@@ -271,9 +333,15 @@ impl TestCommand {
         Ok(test_ids)
     }
 
-    /// Execute tests and return the subunit output
-    pub fn run_tests(&self, test_ids: Option<&[TestId]>) -> Result<std::process::Child> {
-        let (cmd, _temp_file) = self.build_command(test_ids, false)?;
+    /// Execute tests and return the child process and temp file handle.
+    ///
+    /// The caller must keep the returned `Option<NamedTempFile>` alive until
+    /// the child process has finished reading from it (i.e. until after `wait()`).
+    pub fn run_tests(
+        &self,
+        test_ids: Option<&[TestId]>,
+    ) -> Result<(std::process::Child, Option<NamedTempFile>)> {
+        let (cmd, temp_file) = self.build_command(test_ids, false)?;
 
         // Spawn the test process
         let child = Command::new("sh")
@@ -285,10 +353,7 @@ impl TestCommand {
             .spawn()
             .map_err(|e| Error::CommandExecution(format!("Failed to spawn test command: {}", e)))?;
 
-        // Note: _temp_file will be kept alive for the duration of the command
-        // We need to handle this more carefully in a real implementation
-
-        Ok(child)
+        Ok((child, temp_file))
     }
 
     /// Provision test instances for parallel execution
