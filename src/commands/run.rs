@@ -944,11 +944,13 @@ impl RunCommand {
                         .unwrap_or_default();
                     let completed_in_results: std::collections::HashSet<&str> =
                         all_results.keys().map(|id| id.as_str()).collect();
-                    let all_test_ids = if let Some(ref ids) = remaining_tests {
-                        ids.clone()
+                    let discovered_tests;
+                    let all_test_ids: &[TestId] = if let Some(ref ids) = remaining_tests {
+                        ids
                     } else {
                         // No explicit test list — discover tests now for restart
-                        test_cmd.list_tests()?
+                        discovered_tests = test_cmd.list_tests()?;
+                        &discovered_tests
                     };
                     let next_remaining: Vec<TestId> = all_test_ids
                         .iter()
@@ -1456,7 +1458,7 @@ impl RunCommand {
                             all_results.keys().map(|id| id.as_str()).collect();
 
                         // Find this worker's original partition
-                        let original_partition: &Vec<TestId> = &pending_partitions
+                        let original_partition: &[TestId] = &pending_partitions
                             .iter()
                             .find(|(wid, _)| wid == worker_id)
                             .expect("worker_id must exist in pending_partitions")
@@ -1510,8 +1512,8 @@ impl RunCommand {
             }
 
             restarts += 1;
-            if restart_partitions.is_empty() || restarts > MAX_TEST_TIMEOUT_RESTARTS {
-                if restarts > MAX_TEST_TIMEOUT_RESTARTS && !restart_partitions.is_empty() {
+            if restart_partitions.is_empty() || restarts >= MAX_TEST_TIMEOUT_RESTARTS {
+                if restarts >= MAX_TEST_TIMEOUT_RESTARTS && !restart_partitions.is_empty() {
                     tracing::error!(
                         "exceeded maximum restart limit ({}), stopping",
                         MAX_TEST_TIMEOUT_RESTARTS

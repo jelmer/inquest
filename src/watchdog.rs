@@ -64,10 +64,7 @@ impl TestWatchdog {
     /// Create a new watchdog with no tests tracked.
     pub fn new() -> Self {
         TestWatchdog {
-            inner: Arc::new(Mutex::new(WatchdogState {
-                in_progress: HashMap::new(),
-                completed: HashSet::new(),
-            })),
+            inner: Arc::new(Mutex::new(WatchdogState::default())),
         }
     }
 
