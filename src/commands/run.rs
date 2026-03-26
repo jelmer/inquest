@@ -930,6 +930,14 @@ impl RunCommand {
                     );
                     any_command_failed = true;
 
+                    if !test_cmd.supports_test_filtering() {
+                        tracing::warn!(
+                            "cannot restart: test command does not support \
+                             filtering by test ID ($IDOPTION/$IDFILE/$IDLIST)"
+                        );
+                        break;
+                    }
+
                     let completed = watchdog
                         .as_ref()
                         .map(|wd| wd.completed_tests())
@@ -1492,6 +1500,15 @@ impl RunCommand {
             }
 
             is_first_iteration = false;
+
+            if !restart_partitions.is_empty() && !test_cmd.supports_test_filtering() {
+                tracing::warn!(
+                    "cannot restart: test command does not support \
+                     filtering by test ID ($IDOPTION/$IDFILE/$IDLIST)"
+                );
+                break;
+            }
+
             restarts += 1;
             if restart_partitions.is_empty() || restarts > MAX_TEST_TIMEOUT_RESTARTS {
                 if restarts > MAX_TEST_TIMEOUT_RESTARTS && !restart_partitions.is_empty() {
