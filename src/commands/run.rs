@@ -20,6 +20,110 @@ use std::time::Duration;
 /// Type alias for the per-test timeout lookup function.
 type TestTimeoutFn = Arc<dyn Fn(&str) -> Option<Duration> + Send + Sync>;
 
+/// Handles for the background I/O threads spawned for each test process.
+struct IoThreads {
+    tee: std::thread::JoinHandle<std::result::Result<(), std::io::Error>>,
+    stderr: std::thread::JoinHandle<std::result::Result<(), std::io::Error>>,
+}
+
+impl IoThreads {
+    /// Spawn tee (stdout capture) and stderr forwarding threads for a child process.
+    fn spawn(
+        stdout: std::process::ChildStdout,
+        stderr: std::process::ChildStderr,
+        raw_writer: Box<dyn std::io::Write + Send>,
+        tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+        activity_tracker: Option<&crate::test_runner::ActivityTracker>,
+        progress_bar: ProgressBar,
+    ) -> Self {
+        let tee = if let Some(tracker) = activity_tracker {
+            crate::test_runner::spawn_stdout_tee_tracked(stdout, raw_writer, tx, tracker.clone())
+        } else {
+            crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx)
+        };
+        let stderr = crate::test_runner::spawn_stderr_forwarder(stderr, progress_bar);
+        IoThreads { tee, stderr }
+    }
+
+    /// Join both threads, converting panics and I/O errors into our error type.
+    fn join(self, context: &str) -> Result<()> {
+        self.tee
+            .join()
+            .map_err(|_| {
+                crate::error::Error::CommandExecution(format!("Tee thread {} panicked", context))
+            })?
+            .map_err(crate::error::Error::Io)?;
+        self.stderr
+            .join()
+            .map_err(|_| {
+                crate::error::Error::CommandExecution(format!("Stderr thread {} panicked", context))
+            })?
+            .map_err(crate::error::Error::Io)?;
+        Ok(())
+    }
+}
+
+/// Update watchdog state when a subunit progress event is received.
+fn update_watchdog(
+    watchdog: Option<&TestWatchdog>,
+    test_timeout_fn: Option<&TestTimeoutFn>,
+    test_id: &str,
+    status: subunit_stream::ProgressStatus,
+) {
+    if let Some(wd) = watchdog {
+        if matches!(status, subunit_stream::ProgressStatus::InProgress) {
+            let timeout = test_timeout_fn.and_then(|f| f(test_id));
+            wd.on_test_start(test_id, timeout);
+        } else if !status.indicator().is_empty() {
+            wd.on_test_complete(test_id);
+        }
+    }
+}
+
+/// Build a combined TestRun from collected results, persist to repository,
+/// and display the summary.
+#[allow(clippy::too_many_arguments)]
+fn finalize_run(
+    ui: &mut dyn UI,
+    repo: &mut Box<dyn crate::repository::Repository>,
+    run_id: &str,
+    results: HashMap<TestId, crate::repository::TestResult>,
+    any_failed: bool,
+    partial: bool,
+    test_command: &str,
+    concurrency: u32,
+    duration: Duration,
+    historical_times: &HashMap<TestId, Duration>,
+) -> Result<i32> {
+    let mut combined_run = crate::repository::TestRun::new(run_id.to_string());
+    combined_run.timestamp = chrono::Utc::now();
+    for (_, result) in results {
+        combined_run.add_result(result);
+    }
+
+    let exit_code = if combined_run.count_failures() > 0 || any_failed {
+        1
+    } else {
+        0
+    };
+
+    crate::commands::utils::update_repository_failing_tests(repo, &combined_run, partial)?;
+    crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
+    crate::commands::utils::store_run_metadata(
+        repo,
+        run_id,
+        Some(test_command),
+        Some(concurrency),
+        Some(duration),
+        Some(exit_code),
+    )?;
+
+    crate::commands::utils::display_test_summary(ui, run_id, &combined_run)?;
+    crate::commands::utils::warn_slow_tests(ui, &combined_run, historical_times)?;
+
+    Ok(exit_code)
+}
+
 /// Spawn a shell command in its own process group so the entire tree can be killed on timeout.
 fn spawn_in_process_group(
     cmd_str: &str,
@@ -775,18 +879,14 @@ impl RunCommand {
             let (tx, rx) = std::sync::mpsc::sync_channel(100);
             let activity_tracker =
                 no_output_timeout.map(|_| crate::test_runner::ActivityTracker::new());
-            let tee_thread = if let Some(ref tracker) = activity_tracker {
-                crate::test_runner::spawn_stdout_tee_tracked(
-                    stdout,
-                    raw_writer,
-                    tx,
-                    tracker.clone(),
-                )
-            } else {
-                crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx)
-            };
-            let stderr_thread =
-                crate::test_runner::spawn_stderr_forwarder(stderr, progress_bar.clone());
+            let io_threads = IoThreads::spawn(
+                stdout,
+                stderr,
+                raw_writer,
+                tx,
+                activity_tracker.as_ref(),
+                progress_bar.clone(),
+            );
 
             let watchdog = test_timeout_fn.as_ref().map(|_| TestWatchdog::new());
             let watchdog_for_thread = watchdog.clone();
@@ -808,15 +908,12 @@ impl RunCommand {
                     channel_reader,
                     run_id_clone,
                     |test_id, status| {
-                        if let Some(ref wd) = watchdog_for_thread {
-                            if matches!(status, subunit_stream::ProgressStatus::InProgress) {
-                                let timeout =
-                                    test_timeout_fn_clone.as_ref().and_then(|f| f(test_id));
-                                wd.on_test_start(test_id, timeout);
-                            } else if !status.indicator().is_empty() {
-                                wd.on_test_complete(test_id);
-                            }
-                        }
+                        update_watchdog(
+                            watchdog_for_thread.as_ref(),
+                            test_timeout_fn_clone.as_ref(),
+                            test_id,
+                            status,
+                        );
 
                         let indicator = status.indicator();
                         if !indicator.is_empty() {
@@ -889,26 +986,7 @@ impl RunCommand {
                 crate::error::Error::CommandExecution("Parse thread panicked".to_string())
             })??;
 
-            tee_thread
-                .join()
-                .map_err(|_| {
-                    progress_bar.finish_and_clear();
-                    crate::error::Error::CommandExecution("Tee thread panicked".to_string())
-                })?
-                .map_err(|e| {
-                    progress_bar.finish_and_clear();
-                    crate::error::Error::Io(e)
-                })?;
-            stderr_thread
-                .join()
-                .map_err(|_| {
-                    progress_bar.finish_and_clear();
-                    crate::error::Error::CommandExecution("Stderr thread panicked".to_string())
-                })?
-                .map_err(|e| {
-                    progress_bar.finish_and_clear();
-                    crate::error::Error::Io(e)
-                })?;
+            io_threads.join("serial")?;
 
             for (id, result) in partial_run.results {
                 all_results.insert(id, result);
@@ -1008,34 +1086,18 @@ impl RunCommand {
 
         progress_bar.finish_and_clear();
 
-        let mut combined_run = crate::repository::TestRun::new(run_id.clone());
-        combined_run.timestamp = chrono::Utc::now();
-        for (_, result) in all_results {
-            combined_run.add_result(result);
-        }
-
-        let duration = start_time.elapsed();
-        let exit_code = if combined_run.count_failures() > 0 || any_command_failed {
-            1
-        } else {
-            0
-        };
-
-        crate::commands::utils::update_repository_failing_tests(repo, &combined_run, self.partial)?;
-        crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
-        crate::commands::utils::store_run_metadata(
+        finalize_run(
+            ui,
             repo,
             &run_id,
-            Some(&test_cmd.config().test_command),
-            Some(1),
-            Some(duration),
-            Some(exit_code),
-        )?;
-
-        crate::commands::utils::display_test_summary(ui, &run_id, &combined_run)?;
-        crate::commands::utils::warn_slow_tests(ui, &combined_run, &historical_times)?;
-
-        Ok(exit_code)
+            all_results,
+            any_command_failed,
+            self.partial,
+            &test_cmd.config().test_command,
+            1,
+            start_time.elapsed(),
+            &historical_times,
+        )
     }
 
     /// Run tests in parallel across multiple workers, with per-test timeout and restart.
@@ -1153,15 +1215,14 @@ impl RunCommand {
             >;
             let mut supervisors: Vec<(usize, std::thread::JoinHandle<SupervisorResult>)> =
                 Vec::new();
-            #[allow(clippy::type_complexity)]
-            let mut parse_threads: Vec<(
-                usize,
-                ProgressBar,
-                std::thread::JoinHandle<Result<crate::repository::TestRun>>,
-                std::thread::JoinHandle<std::result::Result<(), std::io::Error>>,
-                std::thread::JoinHandle<std::result::Result<(), std::io::Error>>,
-                Option<TestWatchdog>,
-            )> = Vec::new();
+            struct WorkerThreads {
+                worker_id: usize,
+                bar: ProgressBar,
+                parse: std::thread::JoinHandle<Result<crate::repository::TestRun>>,
+                io: IoThreads,
+                watchdog: Option<TestWatchdog>,
+            }
+            let mut worker_threads: Vec<WorkerThreads> = Vec::new();
             // Keep temp files alive for the duration of this iteration
             let mut _temp_files = Vec::new();
 
@@ -1223,19 +1284,14 @@ impl RunCommand {
                 let worker_activity =
                     no_output_timeout.map(|_| crate::test_runner::ActivityTracker::new());
 
-                let tee_thread = if let Some(ref tracker) = worker_activity {
-                    crate::test_runner::spawn_stdout_tee_tracked(
-                        stdout,
-                        raw_writer,
-                        tx,
-                        tracker.clone(),
-                    )
-                } else {
-                    crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx)
-                };
-
-                let stderr_thread =
-                    crate::test_runner::spawn_stderr_forwarder(stderr, worker_bar.clone());
+                let io_threads = IoThreads::spawn(
+                    stdout,
+                    stderr,
+                    raw_writer,
+                    tx,
+                    worker_activity.as_ref(),
+                    worker_bar.clone(),
+                );
 
                 let channel_reader = crate::test_runner::ChannelReader::new(rx);
 
@@ -1278,15 +1334,12 @@ impl RunCommand {
                         channel_reader,
                         worker_run_id_clone,
                         |test_id, status| {
-                            if let Some(ref wd) = watchdog_for_thread {
-                                if matches!(status, subunit_stream::ProgressStatus::InProgress) {
-                                    let timeout =
-                                        test_timeout_fn_clone.as_ref().and_then(|f| f(test_id));
-                                    wd.on_test_start(test_id, timeout);
-                                } else if !status.indicator().is_empty() {
-                                    wd.on_test_complete(test_id);
-                                }
-                            }
+                            update_watchdog(
+                                watchdog_for_thread.as_ref(),
+                                test_timeout_fn_clone.as_ref(),
+                                test_id,
+                                status,
+                            );
 
                             let indicator = status.indicator();
                             if !indicator.is_empty() {
@@ -1346,14 +1399,13 @@ impl RunCommand {
                 });
 
                 supervisors.push((worker_id, supervisor));
-                parse_threads.push((
+                worker_threads.push(WorkerThreads {
                     worker_id,
-                    worker_bar,
-                    parse_thread,
-                    tee_thread,
-                    stderr_thread,
-                    worker_watchdog,
-                ));
+                    bar: worker_bar,
+                    parse: parse_thread,
+                    io: io_threads,
+                    watchdog: worker_watchdog,
+                });
             }
 
             // Wait for all supervisors first. When a supervisor kills a hung worker,
@@ -1382,39 +1434,18 @@ impl RunCommand {
 
             // Now collect from parse threads (safe: all workers have exited or been killed)
             let mut worker_watchdogs: HashMap<usize, Option<TestWatchdog>> = HashMap::new();
-            for (worker_id, worker_bar, parse_thread, tee_thread, stderr_thread, watchdog) in
-                parse_threads
-            {
-                let worker_run = parse_thread.join().map_err(|_| {
+            for wt in worker_threads {
+                let worker_run = wt.parse.join().map_err(|_| {
                     crate::error::Error::CommandExecution(format!(
                         "Parse thread {} panicked",
-                        worker_id
+                        wt.worker_id
                     ))
                 })??;
 
-                tee_thread
-                    .join()
-                    .map_err(|_| {
-                        crate::error::Error::CommandExecution(format!(
-                            "Tee thread {} panicked",
-                            worker_id
-                        ))
-                    })?
-                    .map_err(crate::error::Error::Io)?;
+                wt.io.join(&format!("worker-{}", wt.worker_id))?;
+                wt.bar.finish_with_message("done");
 
-                stderr_thread
-                    .join()
-                    .map_err(|_| {
-                        crate::error::Error::CommandExecution(format!(
-                            "Stderr thread {} panicked",
-                            worker_id
-                        ))
-                    })?
-                    .map_err(crate::error::Error::Io)?;
-
-                worker_bar.finish_with_message("done");
-
-                let worker_tag = format!("worker-{}", worker_id);
+                let worker_tag = format!("worker-{}", wt.worker_id);
                 let mut worker_run = worker_run;
                 for (_, result) in worker_run.results.iter_mut() {
                     if !result.tags.contains(&worker_tag) {
@@ -1426,7 +1457,7 @@ impl RunCommand {
                     all_results.insert(test_id, result);
                 }
 
-                worker_watchdogs.insert(worker_id, watchdog);
+                worker_watchdogs.insert(wt.worker_id, wt.watchdog);
             }
 
             // Compute restart partitions from timed-out workers
@@ -1532,46 +1563,26 @@ impl RunCommand {
         // Finish progress bars
         overall_bar.finish_and_clear();
 
-        // Create combined test run
-        let run_id_for_display = base_run_id.to_string();
-        let mut combined_run = crate::repository::TestRun::new(run_id_for_display.clone());
-        combined_run.timestamp = chrono::Utc::now();
-
-        for (_, result) in all_results {
-            combined_run.add_result(result);
-        }
-
-        let duration = start_time.elapsed();
-        let exit_code = if combined_run.count_failures() > 0 || any_failed {
-            1
-        } else {
-            0
-        };
-
-        // Update failing tests and test times
-        crate::commands::utils::update_repository_failing_tests(repo, &combined_run, self.partial)?;
-        crate::commands::utils::update_test_times_from_run(repo, &combined_run)?;
-        crate::commands::utils::store_run_metadata(
-            repo,
-            &run_id_for_display,
-            Some(&test_cmd.config().test_command),
-            Some(concurrency as u32),
-            Some(duration),
-            Some(exit_code),
-        )?;
-
-        // Dispose instances (done explicitly before drop to handle errors)
+        // Dispose instances before finalizing
         drop(dispose_guard);
         test_cmd.dispose_instances(&instance_ids)?;
         if test_cmd.config().instance_provision.is_some() {
             ui.output("Disposed instances")?;
         }
 
-        // Display summary and slow test warnings
-        crate::commands::utils::display_test_summary(ui, &run_id_for_display, &combined_run)?;
-        crate::commands::utils::warn_slow_tests(ui, &combined_run, &durations)?;
-
-        Ok(exit_code)
+        let run_id_for_display = base_run_id.to_string();
+        finalize_run(
+            ui,
+            repo,
+            &run_id_for_display,
+            all_results,
+            any_failed,
+            self.partial,
+            &test_cmd.config().test_command,
+            concurrency as u32,
+            start_time.elapsed(),
+            &durations,
+        )
     }
 
     /// Run each test in complete isolation (one test per process)
