@@ -82,6 +82,7 @@ impl Command for LastCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
         let repo = open_repository(self.base_path.as_deref())?;
         let run_id = resolve_run_id(&*repo, self.run_id.as_deref())?;
+        let in_progress = repo.is_run_in_progress(&run_id)?;
         let test_run = repo.get_test_run(&run_id)?;
 
         if self.subunit {
@@ -93,6 +94,9 @@ impl Command for LastCommand {
         }
 
         ui.output(&format!("Test run: {}", test_run.id))?;
+        if in_progress {
+            ui.output("Status: in progress")?;
+        }
         ui.output(&format!("Timestamp: {}", test_run.timestamp))?;
         ui.output(&format!("Total tests: {}", test_run.total_tests()))?;
         ui.output(&format!("Passed: {}", test_run.count_successes()))?;
