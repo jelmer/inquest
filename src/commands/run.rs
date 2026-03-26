@@ -657,196 +657,63 @@ mod helper_tests {
 ///
 /// Executes tests using the configured test command, displays progress,
 /// and stores the results in the repository.
+///
+/// All fields default to false/None/Disabled, so callers only need to set
+/// the fields they care about.
+#[derive(Default)]
 pub struct RunCommand {
-    base_path: Option<String>,
-    failing_only: bool,
-    force_init: bool,
-    partial: bool,
-    auto: bool,
-    load_list: Option<String>,
-    concurrency: Option<usize>,
-    until_failure: bool,
-    max_iterations: Option<usize>,
-    isolated: bool,
-    subunit: bool,
-    all_output: bool,
-    test_filters: Option<Vec<String>>,
-    test_args: Option<Vec<String>>,
-    test_timeout: TimeoutSetting,
-    max_duration: TimeoutSetting,
-    no_output_timeout: Option<Duration>,
+    /// Repository path (defaults to current directory)
+    pub base_path: Option<String>,
+    /// Only run previously failing tests
+    pub failing_only: bool,
+    /// Initialize the repository if it doesn't exist
+    pub force_init: bool,
+    /// Add/update failing tests without clearing previous failures
+    pub partial: bool,
+    /// Auto-detect and generate config if missing
+    pub auto: bool,
+    /// Path to a file containing test IDs to run
+    pub load_list: Option<String>,
+    /// Number of parallel test workers
+    pub concurrency: Option<usize>,
+    /// Run tests repeatedly until they fail
+    pub until_failure: bool,
+    /// Maximum number of iterations for until_failure mode
+    pub max_iterations: Option<usize>,
+    /// Run each test in a separate process
+    pub isolated: bool,
+    /// Output in subunit format instead of showing progress
+    pub subunit: bool,
+    /// Show all test output instead of just failures
+    pub all_output: bool,
+    /// Test patterns to filter
+    pub test_filters: Option<Vec<String>>,
+    /// Additional arguments to pass to the test command
+    pub test_args: Option<Vec<String>>,
+    /// Per-test timeout setting
+    pub test_timeout: TimeoutSetting,
+    /// Overall run timeout setting
+    pub max_duration: TimeoutSetting,
+    /// Kill test if no output for this duration
+    pub no_output_timeout: Option<Duration>,
 }
 
 impl RunCommand {
     /// Creates a new run command with default settings.
-    ///
-    /// # Arguments
-    /// * `base_path` - Optional base directory path for the repository
     pub fn new(base_path: Option<String>) -> Self {
         RunCommand {
             base_path,
-            failing_only: false,
-            force_init: false,
-            partial: false,
-            auto: false,
-            load_list: None,
-            concurrency: None,
-            until_failure: false,
-            max_iterations: None,
-            isolated: false,
-            subunit: false,
-            all_output: false,
-            test_filters: None,
-            test_args: None,
-            test_timeout: TimeoutSetting::Disabled,
-            max_duration: TimeoutSetting::Disabled,
-            no_output_timeout: None,
+            ..Default::default()
         }
     }
 
     /// Creates a run command that only runs previously failing tests.
-    ///
-    /// # Arguments
-    /// * `base_path` - Optional base directory path for the repository
     pub fn with_failing_only(base_path: Option<String>) -> Self {
         RunCommand {
             base_path,
             failing_only: true,
-            force_init: false,
             partial: true, // --failing implies partial mode
-            auto: false,
-            load_list: None,
-            concurrency: None,
-            until_failure: false,
-            max_iterations: None,
-            isolated: false,
-            subunit: false,
-            all_output: false,
-            test_filters: None,
-            test_args: None,
-            test_timeout: TimeoutSetting::Disabled,
-            max_duration: TimeoutSetting::Disabled,
-            no_output_timeout: None,
-        }
-    }
-
-    /// Creates a run command that will initialize the repository if needed.
-    ///
-    /// # Arguments
-    /// * `base_path` - Optional base directory path for the repository
-    /// * `failing_only` - Whether to only run previously failing tests
-    pub fn with_force_init(base_path: Option<String>, failing_only: bool) -> Self {
-        RunCommand {
-            base_path,
-            failing_only,
-            force_init: true,
-            partial: failing_only, // --failing implies partial mode
-            auto: false,
-            load_list: None,
-            concurrency: None,
-            until_failure: false,
-            max_iterations: None,
-            isolated: false,
-            subunit: false,
-            all_output: false,
-            test_filters: None,
-            test_args: None,
-            test_timeout: TimeoutSetting::Disabled,
-            max_duration: TimeoutSetting::Disabled,
-            no_output_timeout: None,
-        }
-    }
-
-    /// Creates a run command with control over partial loading mode.
-    ///
-    /// # Arguments
-    /// * `base_path` - Optional base directory path for the repository
-    /// * `partial` - If true, add/update failing tests without clearing previous failures
-    /// * `failing_only` - Whether to only run previously failing tests
-    /// * `force_init` - If true, initialize the repository if it doesn't exist
-    pub fn with_partial(
-        base_path: Option<String>,
-        partial: bool,
-        failing_only: bool,
-        force_init: bool,
-    ) -> Self {
-        RunCommand {
-            base_path,
-            failing_only,
-            force_init,
-            partial,
-            auto: false,
-            load_list: None,
-            concurrency: None,
-            until_failure: false,
-            max_iterations: None,
-            isolated: false,
-            subunit: false,
-            all_output: false,
-            test_filters: None,
-            test_args: None,
-            test_timeout: TimeoutSetting::Disabled,
-            max_duration: TimeoutSetting::Disabled,
-            no_output_timeout: None,
-        }
-    }
-
-    /// Creates a run command with full control over all options.
-    ///
-    /// # Arguments
-    /// * `base_path` - Optional base directory path for the repository
-    /// * `partial` - If true, add/update failing tests without clearing previous failures
-    /// * `failing_only` - Whether to only run previously failing tests
-    /// * `force_init` - If true, initialize the repository if it doesn't exist
-    /// * `load_list` - Optional path to a file containing test IDs to run
-    /// * `concurrency` - Optional number of parallel test workers
-    /// * `until_failure` - If true, stop running tests after the first failure
-    /// * `isolated` - If true, run each test in isolation
-    /// * `subunit` - If true, output in subunit format instead of showing progress
-    /// * `all_output` - If true, show all test output instead of just failures
-    /// * `test_filters` - Optional list of test patterns to filter
-    /// * `test_args` - Optional additional arguments to pass to the test command
-    /// * `test_timeout` - Per-test timeout setting
-    /// * `max_duration` - Overall run timeout setting
-    /// * `no_output_timeout` - Kill test if no output for this duration
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_all_options(
-        base_path: Option<String>,
-        partial: bool,
-        failing_only: bool,
-        force_init: bool,
-        auto: bool,
-        load_list: Option<String>,
-        concurrency: Option<usize>,
-        until_failure: bool,
-        max_iterations: Option<usize>,
-        isolated: bool,
-        subunit: bool,
-        all_output: bool,
-        test_filters: Option<Vec<String>>,
-        test_args: Option<Vec<String>>,
-        test_timeout: TimeoutSetting,
-        max_duration: TimeoutSetting,
-        no_output_timeout: Option<Duration>,
-    ) -> Self {
-        RunCommand {
-            base_path,
-            failing_only,
-            force_init,
-            partial,
-            auto,
-            load_list,
-            concurrency,
-            until_failure,
-            max_iterations,
-            isolated,
-            subunit,
-            all_output,
-            test_filters,
-            test_args,
-            test_timeout,
-            max_duration,
-            no_output_timeout,
+            ..Default::default()
         }
     }
 

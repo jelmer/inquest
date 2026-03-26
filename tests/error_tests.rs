@@ -344,25 +344,11 @@ test_command=echo "test1"
     fs::write(temp.path().join(".testr.conf"), config).unwrap();
 
     let mut ui = TestUI::new();
-    let cmd = RunCommand::with_all_options(
-        Some(temp.path().to_string_lossy().to_string()),
-        false,
-        false,
-        false,
-        false, // auto
-        Some("/nonexistent/list.txt".to_string()),
-        None,
-        false, // until_failure
-        None, // max_iterations
-        false, // isolated
-        false, // subunit
-        false, // all_output
-        None,  // test_filters
-        None,  // test_args
-        inquest::config::TimeoutSetting::Disabled,
-        inquest::config::TimeoutSetting::Disabled,
-        None, // no_output_timeout
-    );
+    let cmd = RunCommand {
+        base_path: Some(temp.path().to_string_lossy().to_string()),
+        load_list: Some("/nonexistent/list.txt".to_string()),
+        ..Default::default()
+    };
     let result = cmd.execute(&mut ui);
 
     // Should fail because load-list file doesn't exist

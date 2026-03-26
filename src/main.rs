@@ -412,25 +412,25 @@ fn main() {
                 None => None,
             };
 
-            let cmd = RunCommand::with_all_options(
-                cli.directory,
-                partial || failing, // --failing implies partial mode
-                failing,
+            let cmd = RunCommand {
+                base_path: cli.directory,
+                partial: partial || failing, // --failing implies partial mode
+                failing_only: failing,
                 force_init,
                 auto,
                 load_list,
-                parallel,
+                concurrency: parallel,
                 until_failure,
                 max_iterations,
                 isolated,
                 subunit,
                 all_output,
-                if testfilters.is_empty() {
+                test_filters: if testfilters.is_empty() {
                     None
                 } else {
                     Some(testfilters)
                 },
-                if testargs.is_empty() {
+                test_args: if testargs.is_empty() {
                     None
                 } else {
                     Some(testargs)
@@ -438,7 +438,7 @@ fn main() {
                 test_timeout,
                 max_duration,
                 no_output_timeout,
-            );
+            };
             cmd.execute(&mut ui)
         }
     };
