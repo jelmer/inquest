@@ -353,6 +353,7 @@ test_command=echo "test1"
         Some("/nonexistent/list.txt".to_string()),
         None,
         false, // until_failure
+        None, // max_iterations
         false, // isolated
         false, // subunit
         false, // all_output

@@ -313,6 +313,7 @@ impl InquestMcpService {
             None,  // load_list
             params.0.concurrency,
             false, // until_failure
+            None, // max_iterations
             false, // isolated
             false, // subunit
             false, // all_output

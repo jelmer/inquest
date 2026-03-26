@@ -353,6 +353,7 @@ test_command=python3 -c "import sys; import time; sys.stdout.buffer.write(b'\xb3
         None,    // load_list
         Some(2), // concurrency
         false,   // until_failure
+        None, // max_iterations
         false,   // isolated
         false,   // subunit
         false,   // all_output
@@ -431,6 +432,7 @@ test_command=echo ""
         None,  // load_list
         None,  // concurrency
         true,  // until_failure
+        None, // max_iterations
         false, // isolated
         false, // subunit
         false, // all_output
@@ -476,6 +478,7 @@ test_command=echo ""
         None,  // load_list
         None,  // concurrency
         false, // until_failure
+        None, // max_iterations
         true,  // isolated
         false, // subunit
         false, // all_output
@@ -646,6 +649,7 @@ fn test_serial_run_with_max_duration_kills_hanging_process() {
         Some(load_list_path.to_string_lossy().to_string()),
         None,
         false,
+        None,
         false,
         false,
         false,
@@ -696,6 +700,7 @@ fn test_serial_run_with_no_output_timeout_kills_silent_process() {
         Some(load_list_path.to_string_lossy().to_string()),
         None,
         false,
+        None,
         false,
         false,
         false,
@@ -876,6 +881,7 @@ fi
         None,
         None,
         false,
+        None,
         false,
         false,
         false,
@@ -976,6 +982,7 @@ fi
         None,
         None,
         false,
+        None,
         false,
         false,
         false,
@@ -1097,6 +1104,7 @@ fi
         None,
         Some(2), // 2 workers
         false,
+        None,
         false,
         false,
         false,
@@ -1230,6 +1238,7 @@ fi
         None,
         Some(2), // 2 workers
         false,
+        None,
         false,
         false,
         false,
@@ -1324,6 +1333,7 @@ cat "$DIR/pass_a.bin"
         None,
         None,
         false,
+        None,
         false,
         false,
         false,

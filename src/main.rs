@@ -167,6 +167,10 @@ enum Commands {
         #[arg(long)]
         until_failure: bool,
 
+        /// Maximum number of iterations for --until-failure
+        #[arg(long, requires = "until_failure")]
+        max_iterations: Option<usize>,
+
         /// Run each test in a separate process (completely isolated)
         #[arg(long)]
         isolated: bool,
@@ -234,6 +238,18 @@ fn main() {
         .init();
 
     let cli = Cli::parse();
+
+    if let Some(ref dir) = cli.directory {
+        let path = std::path::Path::new(dir);
+        if !path.exists() {
+            eprintln!("Error: directory does not exist: {}", dir);
+            std::process::exit(1);
+        }
+        if !path.is_dir() {
+            eprintln!("Error: not a directory: {}", dir);
+            std::process::exit(1);
+        }
+    }
 
     let mut ui = CliUI;
 
@@ -353,6 +369,7 @@ fn main() {
             load_list,
             parallel,
             until_failure,
+            max_iterations,
             isolated,
             subunit,
             all_output,
@@ -404,6 +421,7 @@ fn main() {
                 load_list,
                 parallel,
                 until_failure,
+                max_iterations,
                 isolated,
                 subunit,
                 all_output,
