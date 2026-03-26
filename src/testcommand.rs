@@ -261,9 +261,7 @@ impl TestCommand {
                     if !status.success() {
                         let stderr_bytes = stderr_thread
                             .join()
-                            .map_err(|_| {
-                                Error::CommandExecution("stderr reader panicked".into())
-                            })?
+                            .map_err(|_| Error::CommandExecution("stderr reader panicked".into()))?
                             .map_err(Error::Io)?;
                         let stderr = String::from_utf8_lossy(&stderr_bytes);
                         return Err(Error::CommandExecution(format!(
@@ -297,7 +295,6 @@ impl TestCommand {
     }
 
     fn parse_test_list(output: &[u8]) -> Result<Vec<TestId>> {
-
         // Parse subunit stream to extract test IDs from enumeration events
         // (matching Python's parse_enumeration which looks for 'exists' status)
         use subunit::io::sync::iter_stream;

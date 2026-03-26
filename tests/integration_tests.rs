@@ -1030,13 +1030,12 @@ fn test_stream_interruption_partial_results() {
     assert_eq!(run.results.len(), 1);
     let (id, result) = run.results.iter().next().unwrap();
     assert_eq!(id.as_str(), "test_ok");
-    assert_eq!(
-        result.status,
-        inquest::repository::TestStatus::Success
-    );
+    assert_eq!(result.status, inquest::repository::TestStatus::Success);
 
     // test_incomplete started but never finished, so it shouldn't be in results
-    assert!(!run.results.contains_key(&inquest::repository::TestId::new("test_incomplete")));
+    assert!(!run
+        .results
+        .contains_key(&inquest::repository::TestId::new("test_incomplete")));
 }
 
 #[test]
@@ -1100,10 +1099,7 @@ fi
     let mut config = toml::map::Map::new();
     config.insert(
         "test_command".into(),
-        toml::Value::String(format!(
-            "sh {} $LISTOPT $IDOPTION",
-            script_path.display()
-        )),
+        toml::Value::String(format!("sh {} $LISTOPT $IDOPTION", script_path.display())),
     );
     config.insert(
         "test_list_option".into(),
