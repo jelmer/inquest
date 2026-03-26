@@ -162,6 +162,16 @@ pub trait Repository {
     /// Get the number of test runs in the repository
     fn count(&self) -> Result<usize>;
 
+    /// Check whether a test run is currently in progress.
+    fn is_run_in_progress(&self, _run_id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// List all currently in-progress run IDs.
+    fn get_running_run_ids(&self) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
     /// Set metadata for a test run (git commit, command, concurrency, etc.)
     ///
     /// The default implementation is a no-op for backends that don't support

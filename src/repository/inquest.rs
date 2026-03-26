@@ -16,8 +16,52 @@ use crate::subunit_stream;
 use rusqlite::params;
 use std::collections::HashMap;
 use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// A writer that removes a lock file when dropped.
+struct LockingWriter {
+    inner: File,
+    lock_path: PathBuf,
+}
+
+impl Write for LockingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Drop for LockingWriter {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.lock_path);
+    }
+}
+
+/// Check whether a process with the given PID is still running.
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+/// Check whether a process with the given PID is still running.
+#[cfg(not(unix))]
+fn is_process_alive(pid: u32) -> bool {
+    // On non-Unix platforms, try tasklist to check if the PID exists.
+    // Falls back to assuming alive if tasklist is unavailable.
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+        .output()
+        .map(|o| {
+            let output = String::from_utf8_lossy(&o.stdout);
+            output.contains(&pid.to_string())
+        })
+        .unwrap_or(true)
+}
 
 const FORMAT_VERSION: &str = "1";
 const SCHEMA_VERSION: i64 = 1;
@@ -192,6 +236,10 @@ impl InquestRepository {
     fn run_file_path(&self, run_id: &str) -> PathBuf {
         self.runs_path().join(run_id)
     }
+
+    fn run_lock_path(&self, run_id: &str) -> PathBuf {
+        self.runs_path().join(format!("{}.lock", run_id))
+    }
 }
 
 fn status_to_str(status: TestStatus) -> &'static str {
@@ -245,10 +293,19 @@ impl Repository for InquestRepository {
         )?;
         let run_id_str = next_id.to_string();
 
+        let lock_path = self.run_lock_path(&run_id_str);
+        fs::write(&lock_path, std::process::id().to_string())?;
+
         let path = self.run_file_path(&run_id_str);
         let file = File::create(&path)?;
 
-        Ok((run_id_str, Box::new(file)))
+        Ok((
+            run_id_str,
+            Box::new(LockingWriter {
+                inner: file,
+                lock_path,
+            }),
+        ))
     }
 
     fn get_latest_run(&self) -> Result<TestRun> {
@@ -496,6 +553,48 @@ impl Repository for InquestRepository {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(RunMetadata::default()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn is_run_in_progress(&self, run_id: &str) -> Result<bool> {
+        let lock_path = self.run_lock_path(run_id);
+        let contents = match fs::read_to_string(&lock_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        let pid: u32 = match contents.trim().parse() {
+            Ok(p) => p,
+            Err(_) => {
+                let _ = fs::remove_file(&lock_path);
+                return Ok(false);
+            }
+        };
+        let alive = is_process_alive(pid);
+        if !alive {
+            let _ = fs::remove_file(&lock_path);
+        }
+        Ok(alive)
+    }
+
+    fn get_running_run_ids(&self) -> Result<Vec<String>> {
+        let runs_dir = self.runs_path();
+        let mut result = Vec::new();
+        let entries = match fs::read_dir(&runs_dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(result),
+            Err(e) => return Err(e.into()),
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "lock") {
+                let run_id = path.file_stem().unwrap().to_string_lossy().to_string();
+                if self.is_run_in_progress(&run_id)? {
+                    result.push(run_id);
+                }
+            }
+        }
+        result.sort();
+        Ok(result)
     }
 
     fn set_run_metadata(&mut self, run_id: &str, metadata: RunMetadata) -> Result<()> {
@@ -911,6 +1010,52 @@ mod tests {
         assert_eq!(concurrency, Some(4));
         assert_eq!(duration_secs, Some(12.5));
         assert_eq!(exit_code, Some(1));
+    }
+
+    #[test]
+    fn test_lock_file_created_and_removed() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let (run_id, writer) = repo.begin_test_run_raw().unwrap();
+        let lock_path = temp
+            .path()
+            .join(REPO_DIR)
+            .join("runs")
+            .join(format!("{}.lock", run_id));
+
+        assert!(lock_path.exists());
+        let contents = fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(contents, std::process::id().to_string());
+
+        // While writer is alive, run is in progress
+        assert!(repo.is_run_in_progress(&run_id).unwrap());
+
+        drop(writer);
+        assert!(!lock_path.exists());
+        assert!(!repo.is_run_in_progress(&run_id).unwrap());
+    }
+
+    #[test]
+    fn test_stale_lock_file_cleaned_up() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let run = TestRun::new("0".to_string());
+        let run_id = repo.insert_test_run(run).unwrap();
+
+        // Create a stale lock file with a PID that doesn't exist
+        let lock_path = temp
+            .path()
+            .join(REPO_DIR)
+            .join("runs")
+            .join(format!("{}.lock", run_id));
+        fs::write(&lock_path, "999999999").unwrap();
+
+        assert!(!repo.is_run_in_progress(&run_id).unwrap());
+        assert!(!lock_path.exists());
     }
 
     #[test]
