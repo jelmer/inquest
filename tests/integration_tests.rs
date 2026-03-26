@@ -618,6 +618,7 @@ test_run_concurrency = "echo 2"
 }
 
 #[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
 fn test_serial_run_with_max_duration_kills_hanging_process() {
     use inquest::commands::RunCommand;
     use inquest::repository::inquest::InquestRepositoryFactory;
@@ -655,8 +656,15 @@ fn test_serial_run_with_max_duration_kills_hanging_process() {
         None,
     );
 
+    let start = std::time::Instant::now();
     let result = cmd.execute(&mut ui);
+    let elapsed = start.elapsed();
     // Should complete (not hang) — max_duration kills the process
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "Test took {:?} — process was not killed promptly by max_duration",
+        elapsed
+    );
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), 1);
 }
@@ -698,8 +706,15 @@ fn test_serial_run_with_no_output_timeout_kills_silent_process() {
         Some(std::time::Duration::from_secs(2)),
     );
 
+    let start = std::time::Instant::now();
     let result = cmd.execute(&mut ui);
+    let elapsed = start.elapsed();
     // Should complete (not hang) — no_output_timeout kills the process
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "Test took {:?} — process was not killed promptly by no_output_timeout",
+        elapsed
+    );
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), 1);
 }
