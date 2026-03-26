@@ -318,6 +318,9 @@ impl InquestMcpService {
             false, // all_output
             test_filters,
             None, // test_args
+            crate::config::TimeoutSetting::Disabled,
+            crate::config::TimeoutSetting::Disabled,
+            None, // no_output_timeout
         );
 
         use crate::commands::Command;

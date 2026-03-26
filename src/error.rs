@@ -54,6 +54,26 @@ pub enum Error {
     #[error("Subunit protocol error: {0}")]
     Subunit(String),
 
+    /// A test exceeded its timeout.
+    #[error("Test timed out: {test_id} (ran for {elapsed:.1}s, limit was {limit:.1}s)")]
+    TestTimeout {
+        /// The test that timed out
+        test_id: String,
+        /// How long the test ran before being killed
+        elapsed: f64,
+        /// The timeout limit in seconds
+        limit: f64,
+    },
+
+    /// The overall test run exceeded its maximum duration.
+    #[error("Run exceeded maximum duration of {limit:.0}s (ran for {elapsed:.1}s)")]
+    RunTimeout {
+        /// How long the run went before being killed
+        elapsed: f64,
+        /// The max duration limit in seconds
+        limit: f64,
+    },
+
     /// Other error with custom message.
     #[error("{0}")]
     Other(String),

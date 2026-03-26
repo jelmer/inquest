@@ -198,6 +198,17 @@ impl TestCommand {
         Ok((cmd, temp_file))
     }
 
+    /// Check whether the test command supports filtering by test ID.
+    ///
+    /// Returns true if the command contains `$IDOPTION`, `$IDFILE`, or `$IDLIST`,
+    /// or if `test_id_option` is configured.
+    pub fn supports_test_filtering(&self) -> bool {
+        self.config.test_id_option.is_some()
+            || self.config.test_command.contains("$IDOPTION")
+            || self.config.test_command.contains("$IDFILE")
+            || self.config.test_command.contains("$IDLIST")
+    }
+
     /// List all available tests
     ///
     /// Parses the subunit stream to extract test IDs from enumeration events,
@@ -355,9 +366,10 @@ impl TestCommand {
 
             if !output.status.success() {
                 // Log warning but continue disposing other instances
-                eprintln!(
-                    "Warning: instance_dispose failed for {} with status: {}",
-                    instance_id, output.status
+                tracing::warn!(
+                    "instance_dispose failed for {} with status: {}",
+                    instance_id,
+                    output.status
                 );
             }
         }

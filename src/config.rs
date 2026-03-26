@@ -9,6 +9,137 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
+
+/// Multiplier applied to historical test duration when computing auto timeouts.
+/// A test that historically takes 10s gets a timeout of 10s * 10 = 100s.
+pub const AUTO_TIMEOUT_MULTIPLIER: f64 = 10.0;
+
+/// Minimum auto timeout to avoid killing tests that are just slightly slow.
+pub const AUTO_TIMEOUT_MINIMUM: Duration = Duration::from_secs(30);
+
+/// Minimum auto max-duration for the overall run.
+pub const AUTO_MAX_DURATION_MINIMUM: Duration = Duration::from_secs(60);
+
+/// Interval between polls when waiting for a child process with a timeout.
+pub const TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Maximum number of times a test process can be restarted due to per-test
+/// timeouts before giving up. Prevents infinite restart loops when many tests hang.
+pub const MAX_TEST_TIMEOUT_RESTARTS: usize = 10;
+
+/// Multiplier for slow test warnings: warn if a test takes longer than this
+/// multiple of its historical average duration.
+pub const SLOW_TEST_WARNING_MULTIPLIER: f64 = 3.0;
+
+/// Timeout configuration that supports "disabled", "auto", or an explicit duration.
+///
+/// Used for both per-test timeouts and overall run timeouts.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum TimeoutSetting {
+    /// No timeout - tests can run indefinitely
+    #[default]
+    Disabled,
+    /// Explicit timeout duration for all tests
+    Fixed(Duration),
+    /// Automatically determine timeout from historical test durations.
+    /// Uses a multiplier of the historical average (default 10x, minimum 30s).
+    Auto,
+}
+
+impl TimeoutSetting {
+    /// Parse a timeout string value.
+    ///
+    /// Accepts:
+    /// - "disabled" or "" - no timeout
+    /// - "auto" - automatic from history
+    /// - Duration string like "5m", "300s", "1h", "1h30m"
+    pub fn parse(s: &str) -> Result<Self> {
+        let s = s.trim();
+        if s.is_empty() || s.eq_ignore_ascii_case("disabled") {
+            return Ok(TimeoutSetting::Disabled);
+        }
+        if s.eq_ignore_ascii_case("auto") {
+            return Ok(TimeoutSetting::Auto);
+        }
+        let duration = parse_duration_string(s)?;
+        Ok(TimeoutSetting::Fixed(duration))
+    }
+
+    /// Compute the effective timeout for a specific test, given its historical duration.
+    ///
+    /// Returns `None` if there should be no timeout.
+    pub fn effective_timeout(&self, historical: Option<Duration>) -> Option<Duration> {
+        match self {
+            TimeoutSetting::Disabled => None,
+            TimeoutSetting::Fixed(d) => Some(*d),
+            TimeoutSetting::Auto => {
+                let base = historical
+                    .map(|h| {
+                        let computed =
+                            Duration::from_secs_f64(h.as_secs_f64() * AUTO_TIMEOUT_MULTIPLIER);
+                        computed.max(AUTO_TIMEOUT_MINIMUM)
+                    })
+                    .unwrap_or(AUTO_TIMEOUT_MINIMUM);
+                Some(base)
+            }
+        }
+    }
+}
+
+/// Parse a human-readable duration string like "5m", "300s", "1h", "1h30m", "90".
+///
+/// Supported suffixes: s (seconds), m (minutes), h (hours).
+/// Plain numbers are treated as seconds.
+pub fn parse_duration_string(s: &str) -> Result<Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(Error::Config("empty duration string".to_string()));
+    }
+
+    let mut total_secs: f64 = 0.0;
+    let mut current_num = String::new();
+
+    for c in s.chars() {
+        if c.is_ascii_digit() || c == '.' {
+            current_num.push(c);
+        } else {
+            if current_num.is_empty() {
+                return Err(Error::Config(format!("invalid duration string: '{}'", s)));
+            }
+            let num: f64 = current_num.parse().map_err(|_| {
+                Error::Config(format!("invalid number in duration string: '{}'", s))
+            })?;
+            current_num.clear();
+
+            match c {
+                's' => total_secs += num,
+                'm' => total_secs += num * 60.0,
+                'h' => total_secs += num * 3600.0,
+                _ => {
+                    return Err(Error::Config(format!(
+                        "invalid duration suffix '{}' in '{}'",
+                        c, s
+                    )))
+                }
+            }
+        }
+    }
+
+    // If there's a trailing number with no suffix, treat as seconds
+    if !current_num.is_empty() {
+        let num: f64 = current_num
+            .parse()
+            .map_err(|_| Error::Config(format!("invalid number in duration string: '{}'", s)))?;
+        total_secs += num;
+    }
+
+    if total_secs <= 0.0 {
+        return Err(Error::Config(format!("duration must be positive: '{}'", s)));
+    }
+
+    Ok(Duration::from_secs_f64(total_secs))
+}
 
 /// The configuration file names to search for, in order of priority
 pub const CONFIG_FILE_NAMES: &[&str] = &["inquest.toml", ".inquest.toml", ".testr.conf"];
@@ -37,6 +168,15 @@ pub struct TestrConfig {
 
     /// If set, group tests by the matched section of the test id
     pub group_regex: Option<String>,
+
+    /// Per-test timeout (e.g. "5m", "auto", "disabled")
+    pub test_timeout: Option<String>,
+
+    /// Overall run timeout (e.g. "30m", "1h", "auto", "disabled")
+    pub max_duration: Option<String>,
+
+    /// No-output timeout - kill test if no output for this duration (e.g. "60s")
+    pub no_output_timeout: Option<String>,
 
     /// Provision one or more test run environments
     pub instance_provision: Option<String>,
@@ -114,6 +254,9 @@ impl TestrConfig {
             test_run_concurrency: default.get("test_run_concurrency").cloned(),
             filter_tags: default.get("filter_tags").cloned(),
             group_regex: default.get("group_regex").cloned(),
+            test_timeout: default.get("test_timeout").cloned(),
+            max_duration: default.get("max_duration").cloned(),
+            no_output_timeout: default.get("no_output_timeout").cloned(),
             instance_provision: default.get("instance_provision").cloned(),
             instance_execute: default.get("instance_execute").cloned(),
             instance_dispose: default.get("instance_dispose").cloned(),
@@ -151,6 +294,37 @@ impl TestrConfig {
         }
 
         Ok(config)
+    }
+
+    /// Parse the test_timeout config value into a TimeoutSetting.
+    pub fn parsed_test_timeout(&self) -> Result<TimeoutSetting> {
+        match &self.test_timeout {
+            None => Ok(TimeoutSetting::Disabled),
+            Some(s) => TimeoutSetting::parse(s),
+        }
+    }
+
+    /// Parse the max_duration config value into a TimeoutSetting.
+    pub fn parsed_max_duration(&self) -> Result<TimeoutSetting> {
+        match &self.max_duration {
+            None => Ok(TimeoutSetting::Disabled),
+            Some(s) => TimeoutSetting::parse(s),
+        }
+    }
+
+    /// Parse the no_output_timeout config value into a Duration.
+    pub fn parsed_no_output_timeout(&self) -> Result<Option<Duration>> {
+        match &self.no_output_timeout {
+            None => Ok(None),
+            Some(s) => {
+                let s = s.trim();
+                if s.is_empty() || s.eq_ignore_ascii_case("disabled") {
+                    Ok(None)
+                } else {
+                    Ok(Some(parse_duration_string(s)?))
+                }
+            }
+        }
     }
 
     /// Substitute variables in a command string
@@ -406,5 +580,174 @@ test_command = "python -m test $IDOPTION"
         let err = result.unwrap_err().to_string();
         assert!(err.contains("inquest.toml"));
         assert!(err.contains(".testr.conf"));
+    }
+
+    #[test]
+    fn test_parse_duration_string_seconds() {
+        assert_eq!(
+            parse_duration_string("30s").unwrap(),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_duration_string("300").unwrap(),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_string_minutes() {
+        assert_eq!(
+            parse_duration_string("5m").unwrap(),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_string_hours() {
+        assert_eq!(
+            parse_duration_string("1h").unwrap(),
+            Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_string_combined() {
+        assert_eq!(
+            parse_duration_string("1h30m").unwrap(),
+            Duration::from_secs(5400)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_string_invalid() {
+        assert!(parse_duration_string("").is_err());
+        assert!(parse_duration_string("abc").is_err());
+        assert!(parse_duration_string("5x").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_string_fractional() {
+        assert_eq!(
+            parse_duration_string("1.5m").unwrap(),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            parse_duration_string("0.5h").unwrap(),
+            Duration::from_secs(1800)
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_string_zero_is_error() {
+        assert!(parse_duration_string("0").is_err());
+        assert!(parse_duration_string("0s").is_err());
+    }
+
+    #[test]
+    fn test_timeout_setting_parse_disabled() {
+        assert_eq!(
+            TimeoutSetting::parse("disabled").unwrap(),
+            TimeoutSetting::Disabled
+        );
+        assert_eq!(TimeoutSetting::parse("").unwrap(), TimeoutSetting::Disabled);
+        assert_eq!(
+            TimeoutSetting::parse("DISABLED").unwrap(),
+            TimeoutSetting::Disabled
+        );
+    }
+
+    #[test]
+    fn test_timeout_setting_parse_auto() {
+        assert_eq!(TimeoutSetting::parse("auto").unwrap(), TimeoutSetting::Auto);
+        assert_eq!(TimeoutSetting::parse("AUTO").unwrap(), TimeoutSetting::Auto);
+    }
+
+    #[test]
+    fn test_timeout_setting_parse_fixed() {
+        assert_eq!(
+            TimeoutSetting::parse("5m").unwrap(),
+            TimeoutSetting::Fixed(Duration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn test_timeout_setting_effective_disabled() {
+        let t = TimeoutSetting::Disabled;
+        assert_eq!(t.effective_timeout(None), None);
+        assert_eq!(t.effective_timeout(Some(Duration::from_secs(10))), None);
+    }
+
+    #[test]
+    fn test_timeout_setting_effective_fixed() {
+        let t = TimeoutSetting::Fixed(Duration::from_secs(300));
+        assert_eq!(t.effective_timeout(None), Some(Duration::from_secs(300)));
+        assert_eq!(
+            t.effective_timeout(Some(Duration::from_secs(10))),
+            Some(Duration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn test_timeout_setting_effective_auto_with_history() {
+        let t = TimeoutSetting::Auto;
+        // 10s * 10x = 100s, but minimum is 30s so 100s wins
+        assert_eq!(
+            t.effective_timeout(Some(Duration::from_secs(10))),
+            Some(Duration::from_secs(100))
+        );
+    }
+
+    #[test]
+    fn test_timeout_setting_effective_auto_with_small_history() {
+        let t = TimeoutSetting::Auto;
+        // 1s * 10x = 10s, below minimum of 30s
+        assert_eq!(
+            t.effective_timeout(Some(Duration::from_secs(1))),
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn test_timeout_setting_effective_auto_no_history() {
+        let t = TimeoutSetting::Auto;
+        // No history, uses minimum of 30s
+        assert_eq!(t.effective_timeout(None), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn test_config_parsed_timeout_fields() {
+        let config_str = r#"
+test_command = "python -m test"
+test_timeout = "5m"
+max_duration = "auto"
+no_output_timeout = "60s"
+"#;
+        let config = TestrConfig::parse_toml(config_str).unwrap();
+        assert_eq!(
+            config.parsed_test_timeout().unwrap(),
+            TimeoutSetting::Fixed(Duration::from_secs(300))
+        );
+        assert_eq!(config.parsed_max_duration().unwrap(), TimeoutSetting::Auto);
+        assert_eq!(
+            config.parsed_no_output_timeout().unwrap(),
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn test_config_parsed_timeout_fields_defaults() {
+        let config_str = r#"
+test_command = "python -m test"
+"#;
+        let config = TestrConfig::parse_toml(config_str).unwrap();
+        assert_eq!(
+            config.parsed_test_timeout().unwrap(),
+            TimeoutSetting::Disabled
+        );
+        assert_eq!(
+            config.parsed_max_duration().unwrap(),
+            TimeoutSetting::Disabled
+        );
+        assert_eq!(config.parsed_no_output_timeout().unwrap(), None);
     }
 }

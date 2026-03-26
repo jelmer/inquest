@@ -163,7 +163,7 @@ fn add_column_if_missing(conn: &rusqlite::Connection, table: &str, column: &str,
     match conn.execute_batch(&sql) {
         Ok(()) => {}
         Err(e) if e.to_string().contains("duplicate column name") => {}
-        Err(e) => eprintln!("Warning: failed to add column {}.{}: {}", table, column, e),
+        Err(e) => tracing::warn!("failed to add column {}.{}: {}", table, column, e),
     }
 }
 

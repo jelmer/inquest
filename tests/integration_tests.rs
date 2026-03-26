@@ -358,6 +358,9 @@ test_command=python3 -c "import sys; import time; sys.stdout.buffer.write(b'\xb3
         false,   // all_output
         None,    // test_filters
         None,    // test_args
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Disabled,
+        None, // no_output_timeout
     );
 
     // Note: This test will fail to actually run because the command is synthetic
@@ -433,6 +436,9 @@ test_command=echo ""
         false, // all_output
         None,  // test_filters
         None,  // test_args
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Disabled,
+        None, // no_output_timeout
     );
 
     // Verify the command was created successfully
@@ -475,6 +481,9 @@ test_command=echo ""
         false, // all_output
         None,  // test_filters
         None,  // test_args
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Disabled,
+        None, // no_output_timeout
     );
 
     // Verify the command was created successfully
@@ -606,4 +615,471 @@ test_run_concurrency = "echo 2"
     let test_cmd = TestCommand::from_directory(temp.path()).unwrap();
     let concurrency = test_cmd.get_concurrency().unwrap();
     assert_eq!(concurrency, Some(2));
+}
+
+#[test]
+fn test_serial_run_with_max_duration_kills_hanging_process() {
+    use inquest::commands::RunCommand;
+    use inquest::repository::inquest::InquestRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    let config = "test_command = \"sleep 300\"\n";
+    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+    // Write a load-list file so list_tests() is never called (which would hang)
+    let load_list_path = temp.path().join("test_ids.txt");
+    fs::write(&load_list_path, "fake_test\n").unwrap();
+
+    let mut ui = TestUI::new();
+    let cmd = RunCommand::with_all_options(
+        Some(base_path),
+        false,
+        false,
+        false,
+        false,
+        Some(load_list_path.to_string_lossy().to_string()),
+        None,
+        false,
+        false,
+        false,
+        false,
+        None,
+        None,
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
+        None,
+    );
+
+    let result = cmd.execute(&mut ui);
+    // Should complete (not hang) — max_duration kills the process
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), 1);
+}
+
+#[test]
+fn test_serial_run_with_no_output_timeout_kills_silent_process() {
+    use inquest::commands::RunCommand;
+    use inquest::repository::inquest::InquestRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    let config = "test_command = \"sleep 300\"\n";
+    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+    let load_list_path = temp.path().join("test_ids.txt");
+    fs::write(&load_list_path, "fake_test\n").unwrap();
+
+    let mut ui = TestUI::new();
+    let cmd = RunCommand::with_all_options(
+        Some(base_path),
+        false,
+        false,
+        false,
+        false,
+        Some(load_list_path.to_string_lossy().to_string()),
+        None,
+        false,
+        false,
+        false,
+        false,
+        None,
+        None,
+        inquest::config::TimeoutSetting::Disabled,
+        inquest::config::TimeoutSetting::Disabled,
+        Some(std::time::Duration::from_secs(2)),
+    );
+
+    let result = cmd.execute(&mut ui);
+    // Should complete (not hang) — no_output_timeout kills the process
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), 1);
+}
+
+/// Generate subunit v2 binary bytes for an InProgress event.
+fn subunit_inprogress(test_id: &str) -> Vec<u8> {
+    use subunit::serialize::Serializable;
+    use subunit::types::event::Event;
+    use subunit::types::teststatus::TestStatus as SubunitTestStatus;
+    let mut bytes = Vec::new();
+    Event::new(SubunitTestStatus::InProgress)
+        .test_id(test_id)
+        .build()
+        .serialize(&mut bytes)
+        .unwrap();
+    bytes
+}
+
+/// Generate subunit v2 binary bytes for a Success event.
+fn subunit_success(test_id: &str) -> Vec<u8> {
+    use subunit::serialize::Serializable;
+    use subunit::types::event::Event;
+    use subunit::types::teststatus::TestStatus as SubunitTestStatus;
+    let mut bytes = Vec::new();
+    Event::new(SubunitTestStatus::Success)
+        .test_id(test_id)
+        .build()
+        .serialize(&mut bytes)
+        .unwrap();
+    bytes
+}
+
+/// Generate subunit v2 binary bytes for an Enumeration event (used by --list).
+fn subunit_enumerate(test_id: &str) -> Vec<u8> {
+    use subunit::serialize::Serializable;
+    use subunit::types::event::Event;
+    use subunit::types::teststatus::TestStatus as SubunitTestStatus;
+    let mut bytes = Vec::new();
+    Event::new(SubunitTestStatus::Enumeration)
+        .test_id(test_id)
+        .build()
+        .serialize(&mut bytes)
+        .unwrap();
+    bytes
+}
+
+/// Write binary data to a file and return the path as a string.
+fn write_bin(dir: &std::path::Path, name: &str, data: &[u8]) -> String {
+    let path = dir.join(name);
+    fs::write(&path, data).unwrap();
+    path.to_string_lossy().to_string()
+}
+
+#[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
+fn test_serial_restart_on_per_test_timeout() {
+    use inquest::commands::RunCommand;
+    use inquest::repository::inquest::InquestRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    // Generate subunit binary files:
+    // - test_a: inprogress + success (completes normally)
+    // - test_hangs: inprogress only (simulates hang)
+    // - test_b: inprogress + success (should run on restart)
+    let mut pass_a = subunit_inprogress("test_a");
+    pass_a.extend(subunit_success("test_a"));
+    write_bin(temp.path(), "pass_a.bin", &pass_a);
+
+    let hang = subunit_inprogress("test_hangs");
+    write_bin(temp.path(), "hang.bin", &hang);
+
+    let mut pass_b = subunit_inprogress("test_b");
+    pass_b.extend(subunit_success("test_b"));
+    write_bin(temp.path(), "pass_b.bin", &pass_b);
+
+    // Listing: emit all three test IDs
+    let mut list_bytes = subunit_enumerate("test_a");
+    list_bytes.extend(subunit_enumerate("test_hangs"));
+    list_bytes.extend(subunit_enumerate("test_b"));
+    write_bin(temp.path(), "list.bin", &list_bytes);
+
+    // Script: first invocation runs test_a then hangs on test_hangs.
+    // Second invocation (restart) runs test_b and test_hangs (now succeeds).
+    let dir = temp.path().to_string_lossy();
+    let script = format!(
+        r#"#!/bin/sh
+DIR="{dir}"
+if [ "$1" = "--list" ]; then
+    cat "$DIR/list.bin"
+    exit 0
+fi
+MARKER="$DIR/marker"
+if [ ! -f "$MARKER" ]; then
+    touch "$MARKER"
+    cat "$DIR/pass_a.bin"
+    cat "$DIR/hang.bin"
+    sleep 300
+else
+    cat "$DIR/pass_b.bin"
+fi
+"#,
+    );
+    let script_path = temp.path().join("run.sh");
+    fs::write(&script_path, &script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut config = toml::map::Map::new();
+    config.insert(
+        "test_command".into(),
+        toml::Value::String(format!(
+            "sh {} $LISTOPT $IDOPTION $IDFILE",
+            script_path.display()
+        )),
+    );
+    config.insert(
+        "test_list_option".into(),
+        toml::Value::String("--list".into()),
+    );
+    config.insert(
+        "test_id_option".into(),
+        toml::Value::String("--load-list".into()),
+    );
+    fs::write(
+        temp.path().join("inquest.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    let mut ui = TestUI::new();
+    let cmd = RunCommand::with_all_options(
+        Some(base_path),
+        false,
+        false,
+        false,
+        false,
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+        None,
+        None,
+        inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
+        inquest::config::TimeoutSetting::Disabled,
+        None,
+    );
+
+    let result = cmd.execute(&mut ui);
+    assert!(result.is_ok(), "execute failed: {:?}", result);
+    // Exit code 1 because test_hangs timed out
+    assert_eq!(result.unwrap(), 1);
+}
+
+#[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
+fn test_serial_restart_no_explicit_test_list() {
+    use inquest::commands::RunCommand;
+    use inquest::repository::inquest::InquestRepositoryFactory;
+
+    // Same as above, but without load-list — test_cmd.list_tests() is called on restart
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    let mut pass_a = subunit_inprogress("test_a");
+    pass_a.extend(subunit_success("test_a"));
+    write_bin(temp.path(), "pass_a.bin", &pass_a);
+
+    let hang = subunit_inprogress("test_hangs");
+    write_bin(temp.path(), "hang.bin", &hang);
+
+    let mut pass_b = subunit_inprogress("test_b");
+    pass_b.extend(subunit_success("test_b"));
+    write_bin(temp.path(), "pass_b.bin", &pass_b);
+
+    let mut list_bytes = subunit_enumerate("test_a");
+    list_bytes.extend(subunit_enumerate("test_hangs"));
+    list_bytes.extend(subunit_enumerate("test_b"));
+    write_bin(temp.path(), "list.bin", &list_bytes);
+
+    let dir = temp.path().to_string_lossy();
+    let script = format!(
+        r#"#!/bin/sh
+DIR="{dir}"
+if [ "$1" = "--list" ]; then
+    cat "$DIR/list.bin"
+    exit 0
+fi
+MARKER="$DIR/marker"
+if [ ! -f "$MARKER" ]; then
+    touch "$MARKER"
+    cat "$DIR/pass_a.bin"
+    cat "$DIR/hang.bin"
+    sleep 300
+else
+    cat "$DIR/pass_b.bin"
+fi
+"#,
+    );
+    let script_path = temp.path().join("run.sh");
+    fs::write(&script_path, &script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // No test_id_option — the runner does not pass IDs to the command.
+    // On restart, list_tests() is called to discover remaining tests.
+    let mut config = toml::map::Map::new();
+    config.insert(
+        "test_command".into(),
+        toml::Value::String(format!("sh {} $LISTOPT", script_path.display())),
+    );
+    config.insert(
+        "test_list_option".into(),
+        toml::Value::String("--list".into()),
+    );
+    fs::write(
+        temp.path().join("inquest.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    let mut ui = TestUI::new();
+    // No load-list: test_ids will be None
+    let cmd = RunCommand::with_all_options(
+        Some(base_path),
+        false,
+        false,
+        false,
+        false,
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+        None,
+        None,
+        inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
+        inquest::config::TimeoutSetting::Disabled,
+        None,
+    );
+
+    let result = cmd.execute(&mut ui);
+    assert!(result.is_ok(), "execute failed: {:?}", result);
+    assert_eq!(result.unwrap(), 1);
+}
+
+#[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
+fn test_parallel_restart_on_per_test_timeout() {
+    use inquest::commands::RunCommand;
+    use inquest::repository::inquest::InquestRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    let mut pass_a = subunit_inprogress("test_a");
+    pass_a.extend(subunit_success("test_a"));
+    write_bin(temp.path(), "pass_a.bin", &pass_a);
+
+    let hang = subunit_inprogress("test_hangs");
+    write_bin(temp.path(), "hang.bin", &hang);
+
+    let mut pass_b = subunit_inprogress("test_b");
+    pass_b.extend(subunit_success("test_b"));
+    write_bin(temp.path(), "pass_b.bin", &pass_b);
+
+    let mut list_bytes = subunit_enumerate("test_a");
+    list_bytes.extend(subunit_enumerate("test_hangs"));
+    list_bytes.extend(subunit_enumerate("test_b"));
+    write_bin(temp.path(), "list.bin", &list_bytes);
+
+    let dir = temp.path().to_string_lossy();
+    // Script reads $IDFILE to decide which tests to run.
+    // If test_hangs is in the list AND no marker exists, it hangs.
+    // Otherwise it completes all requested tests normally.
+    let script = format!(
+        r#"#!/bin/sh
+DIR="{dir}"
+if [ "$1" = "--list" ]; then
+    cat "$DIR/list.bin"
+    exit 0
+fi
+# Read test IDs from IDFILE (passed as $2, after --load-list)
+IDFILE="$2"
+MARKER="$DIR/marker"
+if [ -n "$IDFILE" ] && [ -f "$IDFILE" ]; then
+    while IFS= read -r test_id; do
+        case "$test_id" in
+            test_a) cat "$DIR/pass_a.bin" ;;
+            test_b) cat "$DIR/pass_b.bin" ;;
+            test_hangs)
+                if [ ! -f "$MARKER" ]; then
+                    touch "$MARKER"
+                    cat "$DIR/hang.bin"
+                    sleep 300
+                    exit 1
+                else
+                    cat "$DIR/pass_b.bin"
+                fi
+                ;;
+        esac
+    done < "$IDFILE"
+else
+    cat "$DIR/pass_a.bin"
+    cat "$DIR/hang.bin"
+    sleep 300
+fi
+"#,
+    );
+    let script_path = temp.path().join("run.sh");
+    fs::write(&script_path, &script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut config = toml::map::Map::new();
+    config.insert(
+        "test_command".into(),
+        toml::Value::String(format!(
+            "sh {} $LISTOPT $IDOPTION $IDFILE",
+            script_path.display()
+        )),
+    );
+    config.insert(
+        "test_list_option".into(),
+        toml::Value::String("--list".into()),
+    );
+    config.insert(
+        "test_id_option".into(),
+        toml::Value::String("--load-list".into()),
+    );
+    fs::write(
+        temp.path().join("inquest.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    let mut ui = TestUI::new();
+    let cmd = RunCommand::with_all_options(
+        Some(base_path),
+        false,
+        false,
+        false,
+        false,
+        None,
+        Some(2), // 2 workers
+        false,
+        false,
+        false,
+        false,
+        None,
+        None,
+        inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
+        inquest::config::TimeoutSetting::Disabled,
+        None,
+    );
+
+    let result = cmd.execute(&mut ui);
+    assert!(result.is_ok(), "execute failed: {:?}", result);
+    // Exit code 1 because test_hangs timed out on first attempt
+    assert_eq!(result.unwrap(), 1);
 }
