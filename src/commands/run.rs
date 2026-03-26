@@ -722,7 +722,8 @@ impl RunCommand {
         };
 
         let start_time = std::time::Instant::now();
-        let (run_id, _) = repo.begin_test_run_raw()?;
+        let (run_id, initial_raw_writer) = repo.begin_test_run_raw()?;
+        let mut next_raw_writer: Option<Box<dyn std::io::Write + Send>> = Some(initial_raw_writer);
 
         let term_width = console::Term::stdout().size().1 as usize;
         let fixed_width = 25;
@@ -751,7 +752,10 @@ impl RunCommand {
             let current_ids = remaining_tests.as_deref();
             let (cmd_str, _temp_file) =
                 test_cmd.build_command_full(current_ids, false, None, self.test_args.as_deref())?;
-            let (_, raw_writer) = repo.begin_test_run_raw()?;
+            // Use the real raw_writer for the first iteration, sink for restarts
+            let raw_writer: Box<dyn std::io::Write + Send> = next_raw_writer
+                .take()
+                .unwrap_or_else(|| Box::new(std::io::sink()));
 
             let mut child = spawn_in_process_group(
                 &cmd_str,
@@ -1121,6 +1125,7 @@ impl RunCommand {
         let mut all_results: HashMap<TestId, crate::repository::TestResult> = HashMap::new();
         let mut any_failed = false;
         let mut restarts = 0;
+        let mut is_first_iteration = true;
 
         // pending_partitions: list of (worker_id, test_ids) to run.
         // On restart, only the timed-out workers' remaining tests are re-partitioned.
@@ -1196,7 +1201,13 @@ impl RunCommand {
                 let stderr = child.stderr.take().expect("stderr was piped");
 
                 let worker_run_id = format!("{}-{}", base_run_id, worker_id);
-                let (_, raw_writer) = repo.begin_test_run_raw()?;
+                // Use real raw_writer for first iteration, sink for restarts
+                let raw_writer: Box<dyn std::io::Write + Send> = if is_first_iteration {
+                    let (_, w) = repo.begin_test_run_raw()?;
+                    w
+                } else {
+                    Box::new(std::io::sink())
+                };
 
                 let (tx, rx) = std::sync::mpsc::sync_channel(100);
                 let worker_activity =
@@ -1480,6 +1491,7 @@ impl RunCommand {
                 }
             }
 
+            is_first_iteration = false;
             restarts += 1;
             if restart_partitions.is_empty() || restarts > MAX_TEST_TIMEOUT_RESTARTS {
                 if restarts > MAX_TEST_TIMEOUT_RESTARTS && !restart_partitions.is_empty() {
