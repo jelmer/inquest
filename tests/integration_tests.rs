@@ -754,6 +754,7 @@ fn write_bin(dir: &std::path::Path, name: &str, data: &[u8]) -> String {
 }
 
 #[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
 fn test_serial_restart_on_per_test_timeout() {
     use inquest::commands::RunCommand;
     use inquest::repository::inquest::InquestRepositoryFactory;
@@ -863,6 +864,7 @@ fi
 }
 
 #[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
 fn test_serial_restart_no_explicit_test_list() {
     use inquest::commands::RunCommand;
     use inquest::repository::inquest::InquestRepositoryFactory;
@@ -961,6 +963,7 @@ fi
 }
 
 #[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
 fn test_parallel_restart_on_per_test_timeout() {
     use inquest::commands::RunCommand;
     use inquest::repository::inquest::InquestRepositoryFactory;
