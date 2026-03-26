@@ -34,3 +34,27 @@ test_list_option = "--list"
     test_id_option=--load-list $IDFILE
     test_list_option=--list
 ```
+
+## Configuration reference
+
+### Core settings
+
+| Field | Description |
+|---|---|
+| `test_command` | Command to run tests. Supports `$LISTOPT`, `$IDOPTION`, `$IDFILE`, `$IDLIST` variables. |
+| `test_list_option` | Argument to append when listing tests (replaces `$LISTOPT`). |
+| `test_id_option` | Argument template for passing test IDs (replaces `$IDOPTION`). |
+| `test_run_concurrency` | Shell command whose output sets the number of parallel workers. |
+| `group_regex` | Regex for grouping tests onto the same worker (see [Grouping tests](./grouping-tests.md)). |
+
+### Timeout settings
+
+| Field | Description |
+|---|---|
+| `test_timeout` | Per-test timeout. `"disabled"` (default), `"auto"` (3x historical average), or a duration like `"5m"`. |
+| `max_duration` | Overall run timeout. Same format as `test_timeout`. |
+| `no_output_timeout` | Kill the runner if no output for this duration, e.g. `"120s"`. |
+
+Durations are specified as a number with an optional unit suffix:
+`s` (seconds, default), `m` (minutes), `h` (hours). Fractional values
+like `"1.5m"` are supported.

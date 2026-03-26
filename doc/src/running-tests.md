@@ -71,3 +71,60 @@ until the error is pinpointed.
 `inq run --until-failure`` will run your test suite again and again and
 again stopping only when interrupted or a failure occurs. This is useful
 for repeating timing-related test failures.
+
+## Timeouts
+
+inq supports several timeout mechanisms to deal with hanging tests:
+
+### Per-test timeout (`--test-timeout`)
+
+Kills the test runner if an individual test exceeds its timeout. The timeout
+can be a fixed duration or computed automatically from historical test times:
+
+```sh
+  # Fixed 5 minute timeout per test
+  $ inq run --test-timeout 5m
+  # Auto-compute from historical times (3x the average)
+  $ inq run --test-timeout auto
+```
+
+When a per-test timeout fires, inq kills the test runner process and
+records the hung test as a timeout error. If the test command supports
+filtering by test ID (`$IDOPTION`/`$IDFILE`/`$IDLIST` in the command),
+inq restarts the runner with the remaining tests. Otherwise the run
+stops.
+
+### Overall run timeout (`--max-duration`)
+
+Kills the entire test run if it exceeds the given duration:
+
+```sh
+  $ inq run --max-duration 30m
+  $ inq run --max-duration auto
+```
+
+### No-output timeout (`--no-output-timeout`)
+
+Kills the test runner if no output is produced for the given duration.
+This catches tests that hang silently without producing any subunit events:
+
+```sh
+  $ inq run --no-output-timeout 60s
+```
+
+### Duration format
+
+Durations are specified as a number with an optional unit suffix:
+`30s`, `5m`, `1.5h`, `300` (seconds by default).
+
+### Configuration file
+
+All timeout settings can also be set in the configuration file:
+
+```toml
+test_timeout = "auto"
+max_duration = "30m"
+no_output_timeout = "120s"
+```
+
+CLI flags take precedence over configuration file values.
