@@ -17,6 +17,18 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Buffer size for the channel between I/O threads and the parse thread.
+const STREAM_BUFFER_SIZE: usize = 100;
+
+/// Fixed-width portion of the progress bar (elapsed time, counters, spacing).
+const PROGRESS_FIXED_WIDTH: usize = 25;
+
+/// Extra padding subtracted when computing bar width.
+const PROGRESS_PADDING: usize = 30;
+
+/// Maximum number of workers whose individual bars are scaled to fit the terminal.
+const MAX_DISPLAY_WORKERS: usize = 4;
+
 /// Type alias for the per-test timeout lookup function.
 type TestTimeoutFn = Arc<dyn Fn(&str) -> Option<Duration> + Send + Sync>;
 
@@ -274,9 +286,12 @@ struct ProgressLayout {
 
 /// Compute progress bar layout from terminal width.
 fn compute_progress_layout(term_width: usize) -> ProgressLayout {
-    let fixed_width = 25;
-    let bar_width = term_width.saturating_sub(fixed_width + 30).clamp(20, 60);
-    let max_msg_len = term_width.saturating_sub(bar_width + fixed_width).max(30);
+    let bar_width = term_width
+        .saturating_sub(PROGRESS_FIXED_WIDTH + PROGRESS_PADDING)
+        .clamp(20, 60);
+    let max_msg_len = term_width
+        .saturating_sub(bar_width + PROGRESS_FIXED_WIDTH)
+        .max(30);
     ProgressLayout {
         bar_width,
         max_msg_len,
@@ -651,6 +666,7 @@ pub struct RunCommand {
     load_list: Option<String>,
     concurrency: Option<usize>,
     until_failure: bool,
+    max_iterations: Option<usize>,
     isolated: bool,
     subunit: bool,
     all_output: bool,
@@ -676,6 +692,7 @@ impl RunCommand {
             load_list: None,
             concurrency: None,
             until_failure: false,
+            max_iterations: None,
             isolated: false,
             subunit: false,
             all_output: false,
@@ -701,6 +718,7 @@ impl RunCommand {
             load_list: None,
             concurrency: None,
             until_failure: false,
+            max_iterations: None,
             isolated: false,
             subunit: false,
             all_output: false,
@@ -727,6 +745,7 @@ impl RunCommand {
             load_list: None,
             concurrency: None,
             until_failure: false,
+            max_iterations: None,
             isolated: false,
             subunit: false,
             all_output: false,
@@ -760,6 +779,7 @@ impl RunCommand {
             load_list: None,
             concurrency: None,
             until_failure: false,
+            max_iterations: None,
             isolated: false,
             subunit: false,
             all_output: false,
@@ -799,6 +819,7 @@ impl RunCommand {
         load_list: Option<String>,
         concurrency: Option<usize>,
         until_failure: bool,
+        max_iterations: Option<usize>,
         isolated: bool,
         subunit: bool,
         all_output: bool,
@@ -817,6 +838,7 @@ impl RunCommand {
             load_list,
             concurrency,
             until_failure,
+            max_iterations,
             isolated,
             subunit,
             all_output,
@@ -1006,7 +1028,7 @@ impl RunCommand {
             let stdout = child.stdout.take().expect("stdout was piped");
             let stderr = child.stderr.take().expect("stderr was piped");
 
-            let (tx, rx) = std::sync::mpsc::sync_channel(100);
+            let (tx, rx) = std::sync::mpsc::sync_channel(STREAM_BUFFER_SIZE);
             let activity_tracker =
                 no_output_timeout.map(|_| crate::test_runner::ActivityTracker::new());
             let io_threads = IoThreads::spawn(
@@ -1298,12 +1320,12 @@ impl RunCommand {
             for (worker_id, partition) in &pending_partitions {
                 let worker_id = *worker_id;
 
-                let worker_fixed = 22;
-                let worker_bar_width = ((term_width.saturating_sub(worker_fixed + 30))
-                    / concurrency.min(4))
-                .clamp(15, 40);
+                let worker_bar_width =
+                    ((term_width.saturating_sub(PROGRESS_FIXED_WIDTH + PROGRESS_PADDING))
+                        / concurrency.min(MAX_DISPLAY_WORKERS))
+                    .clamp(15, 40);
                 let worker_max_msg = term_width
-                    .saturating_sub(worker_bar_width + worker_fixed)
+                    .saturating_sub(worker_bar_width + PROGRESS_FIXED_WIDTH)
                     .max(20);
 
                 let worker_bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
@@ -1348,7 +1370,7 @@ impl RunCommand {
                     Box::new(std::io::sink())
                 };
 
-                let (tx, rx) = std::sync::mpsc::sync_channel(100);
+                let (tx, rx) = std::sync::mpsc::sync_channel(STREAM_BUFFER_SIZE);
                 let worker_activity =
                     no_output_timeout.map(|_| crate::test_runner::ActivityTracker::new());
 
@@ -1893,6 +1915,16 @@ impl Command for RunCommand {
             if self.until_failure {
                 let mut iteration = 1;
                 loop {
+                    if self
+                        .max_iterations
+                        .is_some_and(|max| iteration > max)
+                    {
+                        ui.output(&format!(
+                            "\nReached maximum iteration limit ({}), stopping",
+                            self.max_iterations.unwrap()
+                        ))?;
+                        return Ok(0);
+                    }
                     ui.output(&format!("\n=== Iteration {} ===", iteration))?;
                     let exit_code = self.run_isolated(
                         ui,
@@ -1926,6 +1958,16 @@ impl Command for RunCommand {
             // Run tests in a loop until failure (non-isolated)
             let mut iteration = 1;
             loop {
+                if self
+                    .max_iterations
+                    .is_some_and(|max| iteration > max)
+                {
+                    ui.output(&format!(
+                        "\nReached maximum iteration limit ({}), stopping",
+                        self.max_iterations.unwrap()
+                    ))?;
+                    return Ok(0);
+                }
                 ui.output(&format!("\n=== Iteration {} ===", iteration))?;
 
                 let exit_code = if concurrency > 1 {

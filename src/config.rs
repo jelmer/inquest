@@ -118,7 +118,7 @@ pub fn parse_duration_string(s: &str) -> Result<Duration> {
                 'h' => total_secs += num * 3600.0,
                 _ => {
                     return Err(Error::Config(format!(
-                        "invalid duration suffix '{}' in '{}'",
+                        "invalid duration suffix '{}' in '{}' (use 's', 'm', or 'h', e.g. '30s', '5m', '1h')",
                         c, s
                     )))
                 }
@@ -291,6 +291,13 @@ impl TestrConfig {
             return Err(Error::Config(
                 "test_command uses $LISTOPT but test_list_option is not configured".to_string(),
             ));
+        }
+
+        // Validate group_regex is a valid regex pattern
+        if let Some(ref pattern) = config.group_regex {
+            regex::Regex::new(pattern).map_err(|e| {
+                Error::Config(format!("invalid group_regex pattern '{}': {}", pattern, e))
+            })?;
         }
 
         Ok(config)
