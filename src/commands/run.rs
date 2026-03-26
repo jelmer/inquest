@@ -1187,10 +1187,10 @@ impl RunCommand {
             for (worker_id, partition) in &pending_partitions {
                 let worker_id = *worker_id;
 
-                let worker_bar_width =
-                    ((term_width.saturating_sub(PROGRESS_FIXED_WIDTH + PROGRESS_PADDING))
-                        / concurrency.min(MAX_DISPLAY_WORKERS))
-                    .clamp(15, 40);
+                let worker_bar_width = ((term_width
+                    .saturating_sub(PROGRESS_FIXED_WIDTH + PROGRESS_PADDING))
+                    / concurrency.min(MAX_DISPLAY_WORKERS))
+                .clamp(15, 40);
                 let worker_max_msg = term_width
                     .saturating_sub(worker_bar_width + PROGRESS_FIXED_WIDTH)
                     .max(20);
@@ -1351,8 +1351,7 @@ impl RunCommand {
 
             // Wait for all supervisors, then collect parse results
             let supervisor_results = join_supervisors(supervisors)?;
-            let worker_watchdogs =
-                collect_worker_results(worker_threads, &mut all_results)?;
+            let worker_watchdogs = collect_worker_results(worker_threads, &mut all_results)?;
 
             // Determine which workers need to be restarted
             let restart_partitions = compute_restart_partitions(
@@ -1782,10 +1781,7 @@ impl Command for RunCommand {
             if self.until_failure {
                 let mut iteration = 1;
                 loop {
-                    if self
-                        .max_iterations
-                        .is_some_and(|max| iteration > max)
-                    {
+                    if self.max_iterations.is_some_and(|max| iteration > max) {
                         ui.output(&format!(
                             "\nReached maximum iteration limit ({}), stopping",
                             self.max_iterations.unwrap()
@@ -1825,10 +1821,7 @@ impl Command for RunCommand {
             // Run tests in a loop until failure (non-isolated)
             let mut iteration = 1;
             loop {
-                if self
-                    .max_iterations
-                    .is_some_and(|max| iteration > max)
-                {
+                if self.max_iterations.is_some_and(|max| iteration > max) {
                     ui.output(&format!(
                         "\nReached maximum iteration limit ({}), stopping",
                         self.max_iterations.unwrap()
@@ -1959,10 +1952,7 @@ fn collect_worker_results(
     let mut worker_watchdogs = HashMap::new();
     for wt in worker_threads {
         let mut worker_run = wt.parse.join().map_err(|_| {
-            crate::error::Error::CommandExecution(format!(
-                "Parse thread {} panicked",
-                wt.worker_id
-            ))
+            crate::error::Error::CommandExecution(format!("Parse thread {} panicked", wt.worker_id))
         })??;
 
         wt.io.join(&format!("worker-{}", wt.worker_id))?;
@@ -1990,7 +1980,10 @@ fn collect_worker_results(
 /// Returns the list of (worker_id, remaining_tests) partitions to restart.
 #[allow(clippy::too_many_arguments)]
 fn compute_restart_partitions(
-    supervisor_results: &HashMap<usize, std::result::Result<std::process::ExitStatus, TimeoutReason>>,
+    supervisor_results: &HashMap<
+        usize,
+        std::result::Result<std::process::ExitStatus, TimeoutReason>,
+    >,
     worker_watchdogs: &HashMap<usize, Option<TestWatchdog>>,
     pending_partitions: &[(usize, Vec<TestId>)],
     all_results: &mut HashMap<TestId, crate::repository::TestResult>,
@@ -2002,11 +1995,7 @@ fn compute_restart_partitions(
     for (worker_id, result) in supervisor_results {
         match result {
             Err(TimeoutReason::TestTimeout(hung_test)) => {
-                tracing::warn!(
-                    "worker {} killed (test {} timed out)",
-                    worker_id,
-                    hung_test
-                );
+                tracing::warn!("worker {} killed (test {} timed out)", worker_id, hung_test);
                 let test_id = TestId::new(hung_test);
                 all_results.insert(test_id.clone(), timeout_error_result(test_id));
                 *any_failed = true;
