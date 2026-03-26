@@ -344,25 +344,11 @@ test_command=python3 -c "import sys; import time; sys.stdout.buffer.write(b'\xb3
 
     // Run with parallel execution
     let mut ui = TestUI::new();
-    let cmd = RunCommand::with_all_options(
-        Some(base_path.clone()),
-        false,   // partial
-        false,   // failing
-        false,   // force_init
-        false,   // auto
-        None,    // load_list
-        Some(2), // concurrency
-        false,   // until_failure
-        None, // max_iterations
-        false,   // isolated
-        false,   // subunit
-        false,   // all_output
-        None,    // test_filters
-        None,    // test_args
-        inquest::config::TimeoutSetting::Disabled,
-        inquest::config::TimeoutSetting::Disabled,
-        None, // no_output_timeout
-    );
+    let cmd = RunCommand {
+        base_path: Some(base_path.clone()),
+        concurrency: Some(2),
+        ..Default::default()
+    };
 
     // Note: This test will fail to actually run because the command is synthetic
     // But it tests that the parallel code path is exercised
@@ -423,25 +409,11 @@ test_command=echo ""
     // Create command with until_failure set to true
     // The test will succeed but we can verify the flag was accepted
     // by checking that the command can be created
-    let cmd = RunCommand::with_all_options(
-        Some(base_path.clone()),
-        false, // partial
-        false, // failing
-        false, // force_init
-        false, // auto
-        None,  // load_list
-        None,  // concurrency
-        true,  // until_failure
-        None, // max_iterations
-        false, // isolated
-        false, // subunit
-        false, // all_output
-        None,  // test_filters
-        None,  // test_args
-        inquest::config::TimeoutSetting::Disabled,
-        inquest::config::TimeoutSetting::Disabled,
-        None, // no_output_timeout
-    );
+    let cmd = RunCommand {
+        base_path: Some(base_path.clone()),
+        until_failure: true,
+        ..Default::default()
+    };
 
     // Verify the command was created successfully
     // (The actual looping behavior would run infinitely with always-passing tests,
@@ -469,25 +441,11 @@ test_command=echo ""
     fs::write(temp.path().join(".testr.conf"), config).unwrap();
 
     // Create command with isolated set to true
-    let cmd = RunCommand::with_all_options(
-        Some(base_path.clone()),
-        false, // partial
-        false, // failing
-        false, // force_init
-        false, // auto
-        None,  // load_list
-        None,  // concurrency
-        false, // until_failure
-        None, // max_iterations
-        true,  // isolated
-        false, // subunit
-        false, // all_output
-        None,  // test_filters
-        None,  // test_args
-        inquest::config::TimeoutSetting::Disabled,
-        inquest::config::TimeoutSetting::Disabled,
-        None, // no_output_timeout
-    );
+    let cmd = RunCommand {
+        base_path: Some(base_path.clone()),
+        isolated: true,
+        ..Default::default()
+    };
 
     // Verify the command was created successfully
     assert_eq!(cmd.name(), "run");
@@ -640,25 +598,12 @@ fn test_serial_run_with_max_duration_kills_hanging_process() {
     fs::write(&load_list_path, "fake_test\n").unwrap();
 
     let mut ui = TestUI::new();
-    let cmd = RunCommand::with_all_options(
-        Some(base_path),
-        false,
-        false,
-        false,
-        false,
-        Some(load_list_path.to_string_lossy().to_string()),
-        None,
-        false,
-        None,
-        false,
-        false,
-        false,
-        None,
-        None,
-        inquest::config::TimeoutSetting::Disabled,
-        inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
-        None,
-    );
+    let cmd = RunCommand {
+        base_path: Some(base_path),
+        load_list: Some(load_list_path.to_string_lossy().to_string()),
+        max_duration: inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
+        ..Default::default()
+    };
 
     let start = std::time::Instant::now();
     let result = cmd.execute(&mut ui);
@@ -691,25 +636,12 @@ fn test_serial_run_with_no_output_timeout_kills_silent_process() {
     fs::write(&load_list_path, "fake_test\n").unwrap();
 
     let mut ui = TestUI::new();
-    let cmd = RunCommand::with_all_options(
-        Some(base_path),
-        false,
-        false,
-        false,
-        false,
-        Some(load_list_path.to_string_lossy().to_string()),
-        None,
-        false,
-        None,
-        false,
-        false,
-        false,
-        None,
-        None,
-        inquest::config::TimeoutSetting::Disabled,
-        inquest::config::TimeoutSetting::Disabled,
-        Some(std::time::Duration::from_secs(2)),
-    );
+    let cmd = RunCommand {
+        base_path: Some(base_path),
+        load_list: Some(load_list_path.to_string_lossy().to_string()),
+        no_output_timeout: Some(std::time::Duration::from_secs(2)),
+        ..Default::default()
+    };
 
     let start = std::time::Instant::now();
     let result = cmd.execute(&mut ui);
@@ -872,25 +804,11 @@ fi
     .unwrap();
 
     let mut ui = TestUI::new();
-    let cmd = RunCommand::with_all_options(
-        Some(base_path),
-        false,
-        false,
-        false,
-        false,
-        None,
-        None,
-        false,
-        None,
-        false,
-        false,
-        false,
-        None,
-        None,
-        inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
-        inquest::config::TimeoutSetting::Disabled,
-        None,
-    );
+    let cmd = RunCommand {
+        base_path: Some(base_path),
+        test_timeout: inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
+        ..Default::default()
+    };
 
     let result = cmd.execute(&mut ui);
     assert!(result.is_ok(), "execute failed: {:?}", result);
@@ -973,25 +891,11 @@ fi
 
     let mut ui = TestUI::new();
     // No load-list: test_ids will be None
-    let cmd = RunCommand::with_all_options(
-        Some(base_path),
-        false,
-        false,
-        false,
-        false,
-        None,
-        None,
-        false,
-        None,
-        false,
-        false,
-        false,
-        None,
-        None,
-        inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
-        inquest::config::TimeoutSetting::Disabled,
-        None,
-    );
+    let cmd = RunCommand {
+        base_path: Some(base_path),
+        test_timeout: inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
+        ..Default::default()
+    };
 
     let result = cmd.execute(&mut ui);
     assert!(result.is_ok(), "execute failed: {:?}", result);
@@ -1095,25 +999,12 @@ fi
     .unwrap();
 
     let mut ui = TestUI::new();
-    let cmd = RunCommand::with_all_options(
-        Some(base_path),
-        false,
-        false,
-        false,
-        false,
-        None,
-        Some(2), // 2 workers
-        false,
-        None,
-        false,
-        false,
-        false,
-        None,
-        None,
-        inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
-        inquest::config::TimeoutSetting::Disabled,
-        None,
-    );
+    let cmd = RunCommand {
+        base_path: Some(base_path),
+        concurrency: Some(2),
+        test_timeout: inquest::config::TimeoutSetting::Fixed(std::time::Duration::from_secs(2)),
+        ..Default::default()
+    };
 
     let result = cmd.execute(&mut ui);
     assert!(result.is_ok(), "execute failed: {:?}", result);
@@ -1229,25 +1120,11 @@ fi
     .unwrap();
 
     let mut ui = TestUI::new();
-    let cmd = RunCommand::with_all_options(
-        Some(base_path.clone()),
-        false,
-        false,
-        false,
-        false,
-        None,
-        Some(2), // 2 workers
-        false,
-        None,
-        false,
-        false,
-        false,
-        None,
-        None,
-        inquest::config::TimeoutSetting::Disabled,
-        inquest::config::TimeoutSetting::Disabled,
-        None,
-    );
+    let cmd = RunCommand {
+        base_path: Some(base_path.clone()),
+        concurrency: Some(2),
+        ..Default::default()
+    };
 
     let result = cmd.execute(&mut ui);
     assert!(result.is_ok(), "execute failed: {:?}", result);
@@ -1324,25 +1201,11 @@ cat "$DIR/pass_a.bin"
 
     // Run in partial mode — only test_a runs, test_b should remain failing
     let mut ui = TestUI::new();
-    let cmd = RunCommand::with_all_options(
-        Some(base_path),
-        true, // partial
-        false,
-        false,
-        false,
-        None,
-        None,
-        false,
-        None,
-        false,
-        false,
-        false,
-        None,
-        None,
-        inquest::config::TimeoutSetting::Disabled,
-        inquest::config::TimeoutSetting::Disabled,
-        None,
-    );
+    let cmd = RunCommand {
+        base_path: Some(base_path),
+        partial: true,
+        ..Default::default()
+    };
 
     let result = cmd.execute(&mut ui);
     assert!(result.is_ok(), "execute failed: {:?}", result);
