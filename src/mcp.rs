@@ -487,10 +487,13 @@ impl InquestMcpService {
                     .map_err(|e| {
                         ErrorData::invalid_params(format!("Invalid test filter regex: {}", e), None)
                     })?;
-                let all_ids = test_ids
-                    .take()
-                    .or_else(|| test_cmd.list_tests().ok())
-                    .unwrap_or_default();
+                let all_ids = if let Some(ids) = test_ids.take() {
+                    ids
+                } else {
+                    test_cmd.list_tests().map_err(|e| {
+                        ErrorData::internal_error(format!("Failed to list tests: {}", e), None)
+                    })?
+                };
                 test_ids = Some(
                     all_ids
                         .into_iter()
@@ -498,6 +501,8 @@ impl InquestMcpService {
                         .collect(),
                 );
             }
+
+            let concurrency = params.0.concurrency.unwrap_or(1);
 
             // Pre-allocate the run — this creates the lock file so inq_running sees it
             let (run_id, writer) = repo.begin_test_run_raw().map_err(to_mcp_err)?;
@@ -519,24 +524,43 @@ impl InquestMcpService {
             tokio::task::spawn_blocking(move || {
                 let mut ui = NullUI;
                 let config = crate::test_executor::TestExecutorConfig {
-                    base_path: Some(base_path),
+                    base_path: Some(base_path.clone()),
                     all_output: false,
                     test_args: None,
                     cancellation_token: Some(cancel_token),
                 };
                 let executor = crate::test_executor::TestExecutor::new(&config);
 
-                let output = executor.run_serial(
-                    &mut ui,
-                    &test_cmd,
-                    test_ids.as_deref(),
-                    None,
-                    None,
-                    None,
-                    run_id,
-                    writer,
-                    &historical_times,
-                );
+                let output = if concurrency > 1 {
+                    let dir = base_path;
+                    executor.run_parallel(
+                        &mut ui,
+                        &test_cmd,
+                        test_ids.as_deref(),
+                        concurrency,
+                        None,
+                        None,
+                        None,
+                        run_id,
+                        &historical_times,
+                        || {
+                            let mut repo = crate::commands::utils::open_repository(Some(&dir))?;
+                            repo.begin_test_run_raw().map(|(_, w)| w)
+                        },
+                    )
+                } else {
+                    executor.run_serial(
+                        &mut ui,
+                        &test_cmd,
+                        test_ids.as_deref(),
+                        None,
+                        None,
+                        None,
+                        run_id,
+                        writer,
+                        &historical_times,
+                    )
+                };
 
                 match output {
                     Ok(output) => {
@@ -568,7 +592,6 @@ impl InquestMcpService {
                     }
                 }
 
-                // Clean up the cancellation token
                 cancel_tokens.lock().unwrap().remove(&run_id_for_cleanup);
             });
 

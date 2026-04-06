@@ -102,6 +102,15 @@ impl CancellationToken {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
     }
+
+    /// Build a check function suitable for passing to `wait_with_timeout_and_cancel`.
+    ///
+    /// Returns a closure that checks cancellation. The returned closure and its
+    /// reference must both be kept alive for the duration of the wait call.
+    pub fn make_check(&self) -> impl Fn() -> bool {
+        let t = self.clone();
+        move || t.is_cancelled()
+    }
 }
 
 impl std::fmt::Debug for CancellationToken {
@@ -122,6 +131,16 @@ pub struct TestExecutorConfig {
     pub test_args: Option<Vec<String>>,
     /// Optional cancellation token to stop execution.
     pub cancellation_token: Option<CancellationToken>,
+}
+
+impl TestExecutorConfig {
+    fn output_filter(&self) -> subunit_stream::OutputFilter {
+        if self.all_output {
+            subunit_stream::OutputFilter::All
+        } else {
+            subunit_stream::OutputFilter::FailuresOnly
+        }
+    }
 }
 
 /// Executes tests without touching the repository.
@@ -174,7 +193,6 @@ impl<'a> TestExecutor<'a> {
 
         let mut stdout = child.stdout.take().expect("stdout was piped");
 
-        // Tee to three destinations: repo writer, UI output, and in-memory buffer for parsing
         let mut buffer = Vec::new();
 
         struct TeeWriter3<'a, W1: Write, W2: Write> {
@@ -233,7 +251,6 @@ impl<'a> TestExecutor<'a> {
 
         drop(_temp_file);
 
-        // Parse the buffered stream to extract test results
         let test_run = subunit_stream::parse_stream(buffer.as_slice(), run_id.clone())?;
 
         Ok(RunOutput {
@@ -287,11 +304,7 @@ impl<'a> TestExecutor<'a> {
         let progress_bar = create_progress_bar(total_test_count as u64, bar_width);
         progress_bar.set_position(all_results.len() as u64);
 
-        let output_filter = if self.config.all_output {
-            subunit_stream::OutputFilter::All
-        } else {
-            subunit_stream::OutputFilter::FailuresOnly
-        };
+        let output_filter = self.config.output_filter();
 
         let cancel_token = self.config.cancellation_token.clone();
 
@@ -385,10 +398,7 @@ impl<'a> TestExecutor<'a> {
                 )
             });
 
-            let cancel_check = cancel_token.as_ref().map(|t| {
-                let t = t.clone();
-                move || t.is_cancelled()
-            });
+            let cancel_check = cancel_token.as_ref().map(|t| t.make_check());
             let cancel_fn: Option<&dyn Fn() -> bool> = cancel_check.as_ref().map(|f| f as _);
             let wait_result = wait_with_timeout_and_cancel(
                 &mut child,
@@ -544,11 +554,7 @@ impl<'a> TestExecutor<'a> {
     {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let output_filter = if self.config.all_output {
-            subunit_stream::OutputFilter::All
-        } else {
-            subunit_stream::OutputFilter::FailuresOnly
-        };
+        let output_filter = self.config.output_filter();
 
         let start_time = std::time::Instant::now();
 
@@ -570,9 +576,10 @@ impl<'a> TestExecutor<'a> {
             });
         }
 
+        let test_set: HashSet<&TestId> = all_tests.iter().collect();
         let durations: HashMap<TestId, Duration> = historical_times
             .iter()
-            .filter(|(id, _)| all_tests.contains(id))
+            .filter(|(id, _)| test_set.contains(id))
             .map(|(id, d)| (id.clone(), *d))
             .collect();
 
@@ -712,10 +719,7 @@ impl<'a> TestExecutor<'a> {
                     max_duration.map(|d| d.saturating_sub(start_time.elapsed()));
                 let cancel_token_for_supervisor = cancel_token.clone();
                 let supervisor = std::thread::spawn(move || {
-                    let cancel_check = cancel_token_for_supervisor.as_ref().map(|t| {
-                        let t = t.clone();
-                        move || t.is_cancelled()
-                    });
+                    let cancel_check = cancel_token_for_supervisor.as_ref().map(|t| t.make_check());
                     let cancel_fn: Option<&dyn Fn() -> bool> =
                         cancel_check.as_ref().map(|f| f as _);
                     wait_with_timeout_and_cancel(
@@ -943,11 +947,11 @@ impl<'a> TestExecutor<'a> {
                 Ok(buf)
             });
 
-            let cancel_token = &self.config.cancellation_token;
-            let cancel_check = cancel_token.as_ref().map(|t| {
-                let t = t.clone();
-                move || t.is_cancelled()
-            });
+            let cancel_check = self
+                .config
+                .cancellation_token
+                .as_ref()
+                .map(|t| t.make_check());
             let cancel_fn: Option<&dyn Fn() -> bool> = cancel_check.as_ref().map(|f| f as _);
             let wait_result = wait_with_timeout_and_cancel(
                 &mut child,
