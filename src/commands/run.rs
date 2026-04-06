@@ -210,7 +210,7 @@ impl RunCommand {
                 executor.run_subunit(ui, &test_cmd, test_ids.as_deref(), run_id, writer)?;
             let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
                 ui,
-                &mut repo,
+                repo.as_mut(),
                 output,
                 self.partial,
                 &historical_times,
@@ -288,7 +288,7 @@ impl RunCommand {
                     )?;
                     let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
                         ui,
-                        &mut repo,
+                        repo.as_mut(),
                         output,
                         self.partial,
                         &historical_times,
@@ -315,7 +315,7 @@ impl RunCommand {
                 )?;
                 let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
                     ui,
-                    &mut repo,
+                    repo.as_mut(),
                     output,
                     self.partial,
                     &historical_times,
@@ -371,7 +371,7 @@ impl RunCommand {
 
                 let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
                     ui,
-                    &mut repo,
+                    repo.as_mut(),
                     output,
                     self.partial,
                     &historical_times,
@@ -403,7 +403,7 @@ impl RunCommand {
             )?;
             let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
                 ui,
-                &mut repo,
+                repo.as_mut(),
                 output,
                 self.partial,
                 &historical_times,
@@ -427,7 +427,7 @@ impl RunCommand {
             )?;
             let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
                 ui,
-                &mut repo,
+                repo.as_mut(),
                 output,
                 self.partial,
                 &historical_times,

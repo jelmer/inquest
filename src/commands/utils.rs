@@ -109,10 +109,7 @@ pub fn resolve_run_id(repo: &dyn Repository, run_id: Option<&str>) -> Result<Str
 }
 
 /// Extract test durations from a test run and update the repository's times database
-pub fn update_test_times_from_run(
-    repo: &mut Box<dyn Repository>,
-    test_run: &TestRun,
-) -> Result<()> {
+pub fn update_test_times_from_run(repo: &mut dyn Repository, test_run: &TestRun) -> Result<()> {
     use std::collections::HashMap;
 
     let mut times = HashMap::new();
@@ -131,7 +128,7 @@ pub fn update_test_times_from_run(
 
 /// Capture and store run metadata (git commit, command, concurrency, duration, exit code)
 pub fn store_run_metadata(
-    repo: &mut Box<dyn Repository>,
+    repo: &mut dyn Repository,
     run_id: &str,
     command: Option<&str>,
     concurrency: Option<u32>,
@@ -178,7 +175,7 @@ pub fn store_run_metadata(
 
 /// Update repository failing tests based on partial mode
 pub fn update_repository_failing_tests(
-    repo: &mut Box<dyn Repository>,
+    repo: &mut dyn Repository,
     test_run: &TestRun,
     partial: bool,
 ) -> Result<()> {
@@ -274,7 +271,7 @@ pub fn warn_slow_tests(
 /// is consumed, saving the caller from cloning it beforehand.
 pub fn persist_and_display_run(
     ui: &mut dyn UI,
-    repo: &mut Box<dyn Repository>,
+    repo: &mut dyn Repository,
     output: crate::test_executor::RunOutput,
     partial: bool,
     historical_times: &std::collections::HashMap<crate::repository::TestId, std::time::Duration>,
@@ -548,7 +545,7 @@ mod tests {
         let mut ui = crate::ui::test_ui::TestUI::new();
         let historical = std::collections::HashMap::new();
         let (exit_code, run_id) =
-            persist_and_display_run(&mut ui, &mut repo, output, false, &historical).unwrap();
+            persist_and_display_run(&mut ui, repo.as_mut(), output, false, &historical).unwrap();
 
         assert_eq!(exit_code, 0);
         assert_eq!(run_id, "1");
@@ -583,7 +580,7 @@ mod tests {
         let mut ui = crate::ui::test_ui::TestUI::new();
         let historical = std::collections::HashMap::new();
         let (exit_code, run_id) =
-            persist_and_display_run(&mut ui, &mut repo, output, false, &historical).unwrap();
+            persist_and_display_run(&mut ui, repo.as_mut(), output, false, &historical).unwrap();
 
         assert_eq!(exit_code, 1);
         assert_eq!(run_id, "0");
