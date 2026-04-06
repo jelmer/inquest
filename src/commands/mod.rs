@@ -7,6 +7,7 @@ use crate::ui::UI;
 
 pub mod analyze_isolation;
 pub mod auto;
+pub mod diff;
 pub mod export;
 pub mod failing;
 pub mod help;
@@ -27,6 +28,7 @@ pub mod utils;
 
 pub use analyze_isolation::AnalyzeIsolationCommand;
 pub use auto::AutoCommand;
+pub use diff::DiffCommand;
 pub use export::{ExportCommand, ExportFormat};
 pub use failing::FailingCommand;
 pub use help::HelpCommand;
