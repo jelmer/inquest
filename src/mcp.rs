@@ -19,6 +19,36 @@ use crate::testcommand::TestCommand;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// A UI implementation that collects output and errors into vectors.
+struct CollectUI {
+    output: Vec<String>,
+    errors: Vec<String>,
+}
+
+impl CollectUI {
+    fn new() -> Self {
+        CollectUI {
+            output: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
+}
+
+impl crate::ui::UI for CollectUI {
+    fn output(&mut self, msg: &str) -> crate::error::Result<()> {
+        self.output.push(msg.to_string());
+        Ok(())
+    }
+    fn error(&mut self, msg: &str) -> crate::error::Result<()> {
+        self.errors.push(msg.to_string());
+        Ok(())
+    }
+    fn warning(&mut self, msg: &str) -> crate::error::Result<()> {
+        self.errors.push(msg.to_string());
+        Ok(())
+    }
+}
+
 /// MCP server for inquest test repositories.
 #[derive(Debug, Clone)]
 pub struct InquestMcpService {
@@ -490,7 +520,7 @@ impl InquestMcpService {
                             Ok(mut repo) => {
                                 if let Err(e) = crate::commands::utils::persist_and_display_run(
                                     &mut ui,
-                                    &mut repo,
+                                    repo.as_mut(),
                                     output,
                                     partial,
                                     &historical_times,
@@ -689,29 +719,7 @@ impl InquestMcpService {
         description = "Auto-detect project type (Cargo, pytest, unittest) and generate an inquest.toml configuration file"
     )]
     async fn inq_auto(&self) -> Result<CallToolResult, ErrorData> {
-        struct CollectUI {
-            output: Vec<String>,
-            errors: Vec<String>,
-        }
-        impl crate::ui::UI for CollectUI {
-            fn output(&mut self, msg: &str) -> crate::error::Result<()> {
-                self.output.push(msg.to_string());
-                Ok(())
-            }
-            fn error(&mut self, msg: &str) -> crate::error::Result<()> {
-                self.errors.push(msg.to_string());
-                Ok(())
-            }
-            fn warning(&mut self, msg: &str) -> crate::error::Result<()> {
-                self.errors.push(msg.to_string());
-                Ok(())
-            }
-        }
-
-        let mut ui = CollectUI {
-            output: Vec::new(),
-            errors: Vec::new(),
-        };
+        let mut ui = CollectUI::new();
 
         let cmd = crate::commands::AutoCommand::new(Some(self.dir_str()));
         use crate::commands::Command;
@@ -744,34 +752,18 @@ impl InquestMcpService {
         &self,
         params: Parameters<AnalyzeIsolationParam>,
     ) -> Result<CallToolResult, ErrorData> {
-        struct CollectUI {
-            output: Vec<String>,
-        }
-        impl crate::ui::UI for CollectUI {
-            fn output(&mut self, msg: &str) -> crate::error::Result<()> {
-                self.output.push(msg.to_string());
-                Ok(())
-            }
-            fn error(&mut self, msg: &str) -> crate::error::Result<()> {
-                self.output.push(msg.to_string());
-                Ok(())
-            }
-            fn warning(&mut self, msg: &str) -> crate::error::Result<()> {
-                self.output.push(msg.to_string());
-                Ok(())
-            }
-        }
-
-        let mut ui = CollectUI { output: Vec::new() };
+        let mut ui = CollectUI::new();
 
         let cmd =
             crate::commands::AnalyzeIsolationCommand::new(Some(self.dir_str()), params.0.test);
         use crate::commands::Command;
         let exit_code = cmd.execute(&mut ui).map_err(to_mcp_err)?;
 
+        let mut all_output = ui.output;
+        all_output.extend(ui.errors);
         let result = serde_json::json!({
             "exit_code": exit_code,
-            "output": ui.output,
+            "output": all_output,
         });
 
         Ok(CallToolResult::success(vec![Content::text(

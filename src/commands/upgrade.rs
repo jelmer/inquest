@@ -72,7 +72,7 @@ impl Command for UpgradeCommand {
         // During run migration, each insert_test_run called replace_failing_tests,
         // so the new repo's state reflects the last run. We need to overwrite with
         // the old repo's actual failing state.
-        migrate_failing_tests(&*old_repo, &mut new_repo, &run_ids)?;
+        migrate_failing_tests(&*old_repo, new_repo.as_mut(), &run_ids)?;
 
         // Try to migrate any additional test times that the old repo may have
         // beyond what was extracted from individual runs.
@@ -101,7 +101,7 @@ impl Command for UpgradeCommand {
 /// Restore the old repo's failing tests state in the new repo
 fn migrate_failing_tests(
     old_repo: &dyn Repository,
-    new_repo: &mut Box<dyn Repository>,
+    new_repo: &mut dyn Repository,
     run_ids: &[String],
 ) -> Result<()> {
     let failing_ids = old_repo.get_failing_tests()?;
