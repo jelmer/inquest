@@ -111,13 +111,13 @@ impl Command for LoadCommand {
 
         // Update failing tests (raw stream is already stored)
         crate::commands::utils::update_repository_failing_tests(
-            &mut repo,
+            repo.as_mut(),
             &test_run,
             self.partial,
         )?;
 
         // Update test times
-        crate::commands::utils::update_test_times_from_run(&mut repo, &test_run)?;
+        crate::commands::utils::update_test_times_from_run(repo.as_mut(), &test_run)?;
 
         ui.output(&format!(
             "Loaded {} test(s) as run {}",

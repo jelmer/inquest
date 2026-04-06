@@ -84,6 +84,7 @@ pub mod mcp;
 pub mod partition;
 pub mod repository;
 pub mod subunit_stream;
+pub mod test_executor;
 pub mod test_runner;
 pub mod testcommand;
 pub mod testlist;

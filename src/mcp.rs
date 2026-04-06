@@ -19,6 +19,36 @@ use crate::testcommand::TestCommand;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// A UI implementation that collects output and errors into vectors.
+struct CollectUI {
+    output: Vec<String>,
+    errors: Vec<String>,
+}
+
+impl CollectUI {
+    fn new() -> Self {
+        CollectUI {
+            output: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
+}
+
+impl crate::ui::UI for CollectUI {
+    fn output(&mut self, msg: &str) -> crate::error::Result<()> {
+        self.output.push(msg.to_string());
+        Ok(())
+    }
+    fn error(&mut self, msg: &str) -> crate::error::Result<()> {
+        self.errors.push(msg.to_string());
+        Ok(())
+    }
+    fn warning(&mut self, msg: &str) -> crate::error::Result<()> {
+        self.errors.push(msg.to_string());
+        Ok(())
+    }
+}
+
 /// MCP server for inquest test repositories.
 #[derive(Debug, Clone)]
 pub struct InquestMcpService {
@@ -94,6 +124,10 @@ pub struct RunParam {
     pub concurrency: Option<usize>,
     /// Regex patterns to filter which tests to run
     pub test_filters: Option<Vec<String>>,
+    /// Run tests in the background. Returns immediately with the run ID.
+    /// Use inq_running to check progress. Use inq_last or inq_log to see
+    /// partial results while running or final results when done.
+    pub background: Option<bool>,
 }
 
 fn to_mcp_err(e: impl std::fmt::Display) -> ErrorData {
@@ -352,7 +386,7 @@ impl InquestMcpService {
                 }
             })
             .collect();
-        matching.sort_by_key(|r| r.test_id.as_str().to_string());
+        matching.sort_by(|a, b| a.test_id.as_str().cmp(b.test_id.as_str()));
 
         let results: Vec<serde_json::Value> = matching
             .iter()
@@ -398,11 +432,131 @@ impl InquestMcpService {
                 Ok(())
             }
         }
-        let mut ui = NullUI;
 
         let failing_only = params.0.failing_only.unwrap_or(false);
         let partial = failing_only;
         let test_filters = params.0.test_filters.filter(|f| !f.is_empty());
+        let background = params.0.background.unwrap_or(false);
+
+        if background {
+            let mut repo = self.open_repo()?;
+
+            let base_path = base.to_string_lossy().to_string();
+            let test_cmd = TestCommand::from_directory(base).map_err(|e| {
+                ErrorData::internal_error(format!("Failed to load config: {}", e), None)
+            })?;
+
+            let historical_times = repo.get_test_times().map_err(to_mcp_err)?;
+
+            // Resolve test IDs before spawning (needs repo)
+            let mut test_ids = if failing_only {
+                let failing = repo.get_failing_tests().map_err(to_mcp_err)?;
+                if failing.is_empty() {
+                    let result = serde_json::json!({
+                        "exit_code": 0,
+                        "message": "No failing tests to run",
+                    });
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        serde_json::to_string_pretty(&result).unwrap(),
+                    )]));
+                }
+                Some(failing)
+            } else {
+                None
+            };
+
+            if let Some(filters) = test_filters {
+                let compiled: Vec<regex::Regex> = filters
+                    .iter()
+                    .map(|p| regex::Regex::new(p))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| {
+                        ErrorData::invalid_params(format!("Invalid test filter regex: {}", e), None)
+                    })?;
+                let all_ids = test_ids
+                    .take()
+                    .or_else(|| test_cmd.list_tests().ok())
+                    .unwrap_or_default();
+                test_ids = Some(
+                    all_ids
+                        .into_iter()
+                        .filter(|id| compiled.iter().any(|re| re.is_match(id.as_str())))
+                        .collect(),
+                );
+            }
+
+            // Pre-allocate the run — this creates the lock file so inq_running sees it
+            let (run_id, writer) = repo.begin_test_run_raw().map_err(to_mcp_err)?;
+            let run_id_for_response = run_id.clone();
+
+            // Drop the repo — the background thread will open its own for persistence
+            let dir_for_persist = self.dir_str();
+            drop(repo);
+
+            tokio::task::spawn_blocking(move || {
+                let mut ui = NullUI;
+                let config = crate::test_executor::TestExecutorConfig {
+                    base_path: Some(base_path),
+                    all_output: false,
+                    test_args: None,
+                };
+                let executor = crate::test_executor::TestExecutor::new(&config);
+
+                let output = executor.run_serial(
+                    &mut ui,
+                    &test_cmd,
+                    test_ids.as_deref(),
+                    None,
+                    None,
+                    None,
+                    run_id,
+                    writer,
+                    &historical_times,
+                );
+
+                match output {
+                    Ok(output) => {
+                        match crate::commands::utils::open_repository(Some(&dir_for_persist)) {
+                            Ok(mut repo) => {
+                                if let Err(e) = crate::commands::utils::persist_and_display_run(
+                                    &mut ui,
+                                    repo.as_mut(),
+                                    output,
+                                    partial,
+                                    &historical_times,
+                                ) {
+                                    tracing::error!(
+                                        "Failed to persist background run results: {}",
+                                        e
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to reopen repository for background run: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Background test execution failed: {}", e);
+                    }
+                }
+            });
+
+            let result = serde_json::json!({
+                "status": "started",
+                "run_id": run_id_for_response,
+            });
+
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&result).unwrap(),
+            )]));
+        }
+
+        // Foreground execution
+        let mut ui = NullUI;
 
         let cmd = crate::commands::RunCommand {
             base_path: Some(base.to_string_lossy().to_string()),
@@ -414,37 +568,46 @@ impl InquestMcpService {
             ..Default::default()
         };
 
-        use crate::commands::Command;
-        let exit_code = cmd.execute(&mut ui).map_err(|e| {
+        let cli_output = cmd.execute_returning_run_id(&mut ui).map_err(|e| {
             ErrorData::internal_error(format!("Test execution failed: {}", e), None)
         })?;
 
-        // After running, get the latest results
-        let repo = self.open_repo()?;
-        let test_run = repo.get_latest_run().map_err(to_mcp_err)?;
+        if let Some(ref run_id) = cli_output.run_id {
+            let repo = self.open_repo()?;
+            let test_run = repo.get_test_run(run_id).map_err(to_mcp_err)?;
 
-        let failing_tests: Vec<&str> = test_run
-            .get_failing_tests()
-            .iter()
-            .map(|id| id.as_str())
-            .collect();
+            let failing_tests: Vec<&str> = test_run
+                .get_failing_tests()
+                .iter()
+                .map(|id| id.as_str())
+                .collect();
 
-        let duration = test_run.total_duration().map(duration_secs);
-        let interruption = test_run.interruption.as_ref().map(|i| i.to_string());
-        let result = serde_json::json!({
-            "exit_code": exit_code,
-            "id": test_run.id,
-            "total_tests": test_run.total_tests(),
-            "passed": test_run.count_successes(),
-            "failed": test_run.count_failures(),
-            "duration_secs": duration,
-            "failing_tests": failing_tests,
-            "interruption": interruption,
-        });
+            let duration = test_run.total_duration().map(duration_secs);
+            let interruption = test_run.interruption.as_ref().map(|i| i.to_string());
+            let result = serde_json::json!({
+                "exit_code": cli_output.exit_code,
+                "id": run_id,
+                "total_tests": test_run.total_tests(),
+                "passed": test_run.count_successes(),
+                "failed": test_run.count_failures(),
+                "duration_secs": duration,
+                "failing_tests": failing_tests,
+                "interruption": interruption,
+            });
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
-        )]))
+            Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&result).unwrap(),
+            )]))
+        } else {
+            let result = serde_json::json!({
+                "exit_code": cli_output.exit_code,
+                "message": "No tests were executed",
+            });
+
+            Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&result).unwrap(),
+            )]))
+        }
     }
 
     /// List available tests.
@@ -556,29 +719,7 @@ impl InquestMcpService {
         description = "Auto-detect project type (Cargo, pytest, unittest) and generate an inquest.toml configuration file"
     )]
     async fn inq_auto(&self) -> Result<CallToolResult, ErrorData> {
-        struct CollectUI {
-            output: Vec<String>,
-            errors: Vec<String>,
-        }
-        impl crate::ui::UI for CollectUI {
-            fn output(&mut self, msg: &str) -> crate::error::Result<()> {
-                self.output.push(msg.to_string());
-                Ok(())
-            }
-            fn error(&mut self, msg: &str) -> crate::error::Result<()> {
-                self.errors.push(msg.to_string());
-                Ok(())
-            }
-            fn warning(&mut self, msg: &str) -> crate::error::Result<()> {
-                self.errors.push(msg.to_string());
-                Ok(())
-            }
-        }
-
-        let mut ui = CollectUI {
-            output: Vec::new(),
-            errors: Vec::new(),
-        };
+        let mut ui = CollectUI::new();
 
         let cmd = crate::commands::AutoCommand::new(Some(self.dir_str()));
         use crate::commands::Command;
@@ -611,34 +752,18 @@ impl InquestMcpService {
         &self,
         params: Parameters<AnalyzeIsolationParam>,
     ) -> Result<CallToolResult, ErrorData> {
-        struct CollectUI {
-            output: Vec<String>,
-        }
-        impl crate::ui::UI for CollectUI {
-            fn output(&mut self, msg: &str) -> crate::error::Result<()> {
-                self.output.push(msg.to_string());
-                Ok(())
-            }
-            fn error(&mut self, msg: &str) -> crate::error::Result<()> {
-                self.output.push(msg.to_string());
-                Ok(())
-            }
-            fn warning(&mut self, msg: &str) -> crate::error::Result<()> {
-                self.output.push(msg.to_string());
-                Ok(())
-            }
-        }
-
-        let mut ui = CollectUI { output: Vec::new() };
+        let mut ui = CollectUI::new();
 
         let cmd =
             crate::commands::AnalyzeIsolationCommand::new(Some(self.dir_str()), params.0.test);
         use crate::commands::Command;
         let exit_code = cmd.execute(&mut ui).map_err(to_mcp_err)?;
 
+        let mut all_output = ui.output;
+        all_output.extend(ui.errors);
         let result = serde_json::json!({
             "exit_code": exit_code,
-            "output": ui.output,
+            "output": all_output,
         });
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -895,6 +1020,66 @@ mod tests {
         assert_eq!(json["count"], 1);
         assert_eq!(json["results"][0]["test_id"], "test_fail");
         assert_eq!(json["results"][0]["status"], "failure");
+    }
+
+    fn setup_runnable_project(temp: &TempDir) {
+        let factory = InquestRepositoryFactory;
+        factory.initialise(temp.path()).unwrap();
+
+        // Create an inquest.toml with a test command that produces valid subunit v2 output.
+        // An empty stream is valid subunit (0 tests).
+        let config = "test_command = \"echo test\"\n";
+        std::fs::write(temp.path().join("inquest.toml"), config).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_inq_run_foreground() {
+        let temp = TempDir::new().unwrap();
+        setup_runnable_project(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_run(Parameters(RunParam {
+                failing_only: None,
+                concurrency: None,
+                test_filters: None,
+                background: None,
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert!(json.get("exit_code").is_some());
+        assert!(json.get("id").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_inq_run_background() {
+        let temp = TempDir::new().unwrap();
+        setup_runnable_project(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_run(Parameters(RunParam {
+                failing_only: None,
+                concurrency: None,
+                test_filters: None,
+                background: Some(true),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["status"], "started");
+        assert!(json.get("run_id").is_some());
+
+        // Wait for background task to complete
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // The run should no longer be in progress
+        let running = service.inq_running().await.unwrap();
+        let running_json = parse_result(&running);
+        assert_eq!(running_json["count"], 0);
     }
 
     #[tokio::test]

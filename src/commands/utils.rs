@@ -109,10 +109,7 @@ pub fn resolve_run_id(repo: &dyn Repository, run_id: Option<&str>) -> Result<Str
 }
 
 /// Extract test durations from a test run and update the repository's times database
-pub fn update_test_times_from_run(
-    repo: &mut Box<dyn Repository>,
-    test_run: &TestRun,
-) -> Result<()> {
+pub fn update_test_times_from_run(repo: &mut dyn Repository, test_run: &TestRun) -> Result<()> {
     use std::collections::HashMap;
 
     let mut times = HashMap::new();
@@ -131,7 +128,7 @@ pub fn update_test_times_from_run(
 
 /// Capture and store run metadata (git commit, command, concurrency, duration, exit code)
 pub fn store_run_metadata(
-    repo: &mut Box<dyn Repository>,
+    repo: &mut dyn Repository,
     run_id: &str,
     command: Option<&str>,
     concurrency: Option<u32>,
@@ -178,7 +175,7 @@ pub fn store_run_metadata(
 
 /// Update repository failing tests based on partial mode
 pub fn update_repository_failing_tests(
-    repo: &mut Box<dyn Repository>,
+    repo: &mut dyn Repository,
     test_run: &TestRun,
     partial: bool,
 ) -> Result<()> {
@@ -262,6 +259,54 @@ pub fn warn_slow_tests(
     }
 
     Ok(())
+}
+
+/// Persist a completed test run to the repository and display summary.
+///
+/// This handles the full post-execution lifecycle: updating failing tests,
+/// storing test times, recording metadata, and displaying results.
+/// Persist a completed test run to the repository and display summary.
+///
+/// Returns `(exit_code, run_id)`. The `run_id` is returned because `output`
+/// is consumed, saving the caller from cloning it beforehand.
+pub fn persist_and_display_run(
+    ui: &mut dyn UI,
+    repo: &mut dyn Repository,
+    output: crate::test_executor::RunOutput,
+    partial: bool,
+    historical_times: &std::collections::HashMap<crate::repository::TestId, std::time::Duration>,
+) -> Result<(i32, String)> {
+    let exit_code = output.exit_code();
+    let crate::test_executor::RunOutput {
+        run_id,
+        results,
+        duration,
+        test_command,
+        concurrency,
+        ..
+    } = output;
+
+    let mut combined_run = TestRun::new(run_id.clone());
+    combined_run.timestamp = chrono::Utc::now();
+    for (_, result) in results {
+        combined_run.add_result(result);
+    }
+
+    update_repository_failing_tests(repo, &combined_run, partial)?;
+    update_test_times_from_run(repo, &combined_run)?;
+    store_run_metadata(
+        repo,
+        &run_id,
+        Some(&test_command),
+        Some(concurrency),
+        Some(duration),
+        Some(exit_code),
+    )?;
+
+    display_test_summary(ui, &run_id, &combined_run)?;
+    warn_slow_tests(ui, &combined_run, historical_times)?;
+
+    Ok((exit_code, run_id))
 }
 
 #[cfg(test)]
@@ -468,5 +513,83 @@ mod tests {
         let output = ui.output.join("\n");
         assert!(output.contains("slow_test"), "got: {}", output);
         assert!(output.contains("slower"), "got: {}", output);
+    }
+
+    #[test]
+    fn test_persist_and_display_run_success() {
+        let temp = TempDir::new().unwrap();
+        let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+
+        // Insert an initial run so get_latest_run works
+        let mut initial_run = crate::repository::TestRun::new("0".to_string());
+        initial_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        initial_run.add_result(crate::repository::TestResult::success("test1"));
+        repo.insert_test_run(initial_run).unwrap();
+
+        let mut results = std::collections::HashMap::new();
+        results.insert(
+            crate::repository::TestId::new("test1"),
+            crate::repository::TestResult::success("test1")
+                .with_duration(std::time::Duration::from_secs(1)),
+        );
+
+        let output = crate::test_executor::RunOutput {
+            run_id: "1".to_string(),
+            results,
+            any_command_failed: false,
+            duration: std::time::Duration::from_secs(2),
+            test_command: "echo test".to_string(),
+            concurrency: 1,
+        };
+
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let historical = std::collections::HashMap::new();
+        let (exit_code, run_id) =
+            persist_and_display_run(&mut ui, repo.as_mut(), output, false, &historical).unwrap();
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(run_id, "1");
+        let ui_text = ui.output.join("\n");
+        assert!(ui_text.contains("Passed:  1"), "got: {}", ui_text);
+    }
+
+    #[test]
+    fn test_persist_and_display_run_with_failures() {
+        let temp = TempDir::new().unwrap();
+        let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+
+        let mut results = std::collections::HashMap::new();
+        results.insert(
+            crate::repository::TestId::new("test_pass"),
+            crate::repository::TestResult::success("test_pass"),
+        );
+        results.insert(
+            crate::repository::TestId::new("test_fail"),
+            crate::repository::TestResult::failure("test_fail", "assertion error"),
+        );
+
+        let output = crate::test_executor::RunOutput {
+            run_id: "0".to_string(),
+            results,
+            any_command_failed: false,
+            duration: std::time::Duration::from_secs(3),
+            test_command: "cargo test".to_string(),
+            concurrency: 1,
+        };
+
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let historical = std::collections::HashMap::new();
+        let (exit_code, run_id) =
+            persist_and_display_run(&mut ui, repo.as_mut(), output, false, &historical).unwrap();
+
+        assert_eq!(exit_code, 1);
+        assert_eq!(run_id, "0");
+        let ui_text = ui.output.join("\n");
+        assert!(ui_text.contains("Failed:  1"), "got: {}", ui_text);
+
+        // Verify failing tests were persisted
+        let failing = repo.get_failing_tests().unwrap();
+        assert_eq!(failing.len(), 1);
+        assert_eq!(failing[0].as_str(), "test_fail");
     }
 }
