@@ -33,6 +33,17 @@ enum Commands {
     /// Initialize a new test repository
     Init,
 
+    /// Export test results in standard formats
+    Export {
+        /// Run ID to export (defaults to latest; supports negative indices like -1, -2)
+        #[arg(long, short = 'r', value_hint = ValueHint::Other)]
+        run: Option<String>,
+
+        /// Output format: json, junit, or tap
+        #[arg(long, short = 'f', default_value = "json")]
+        format: String,
+    },
+
     /// Show detailed information about a test run
     Info {
         /// Run ID to show (defaults to latest; supports negative indices like -1, -2)
@@ -263,6 +274,17 @@ fn main() {
         }
         Commands::Init => {
             let cmd = InitCommand::new(cli.directory);
+            cmd.execute(&mut ui)
+        }
+        Commands::Export { run, format } => {
+            let format = match format.parse() {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::error!("{}", e);
+                    std::process::exit(1);
+                }
+            };
+            let cmd = ExportCommand::new(cli.directory, run, format);
             cmd.execute(&mut ui)
         }
         Commands::Info { run } => {
