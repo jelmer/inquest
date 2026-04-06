@@ -44,6 +44,17 @@ enum Commands {
         format: String,
     },
 
+    /// Compare two test runs and show what changed
+    Diff {
+        /// First run ID (defaults to second-to-latest; supports negative indices like -1, -2)
+        #[arg(value_hint = ValueHint::Other)]
+        run1: Option<String>,
+
+        /// Second run ID (defaults to latest; supports negative indices like -1, -2)
+        #[arg(value_hint = ValueHint::Other)]
+        run2: Option<String>,
+    },
+
     /// Show detailed information about a test run
     Info {
         /// Run ID to show (defaults to latest; supports negative indices like -1, -2)
@@ -285,6 +296,10 @@ fn main() {
                 }
             };
             let cmd = ExportCommand::new(cli.directory, run, format);
+            cmd.execute(&mut ui)
+        }
+        Commands::Diff { run1, run2 } => {
+            let cmd = DiffCommand::new(cli.directory, run1, run2);
             cmd.execute(&mut ui)
         }
         Commands::Info { run } => {

@@ -6,7 +6,7 @@ use std::fmt;
 use std::time::Duration;
 
 /// Unique identifier for a test
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct TestId(String);
 
 impl TestId {
