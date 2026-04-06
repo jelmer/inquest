@@ -60,6 +60,15 @@ pub struct SlowestParam {
     pub count: Option<usize>,
 }
 
+/// Parameters for the diff tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DiffParam {
+    /// First run ID (defaults to second-to-latest; supports negative indices like -1, -2)
+    pub run1: Option<String>,
+    /// Second run ID (defaults to latest; supports negative indices like -1, -2)
+    pub run2: Option<String>,
+}
+
 /// Parameters for the log tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct LogParam {
@@ -168,6 +177,89 @@ impl InquestMcpService {
             "duration_secs": duration,
             "failing_tests": failing_tests,
             "interruption": interruption,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap(),
+        )]))
+    }
+
+    /// Compare two test runs and show what changed.
+    #[tool(
+        description = "Compare two test runs and show new failures, new passes, added/removed tests, and status changes"
+    )]
+    async fn inq_diff(&self, params: Parameters<DiffParam>) -> Result<CallToolResult, ErrorData> {
+        let repo = self.open_repo()?;
+
+        let (id1, id2) = match (&params.0.run1, &params.0.run2) {
+            (Some(r1), Some(r2)) => (
+                resolve_run_id(&*repo, Some(r1)).map_err(to_mcp_err)?,
+                resolve_run_id(&*repo, Some(r2)).map_err(to_mcp_err)?,
+            ),
+            (Some(r1), None) => {
+                let id1 = resolve_run_id(&*repo, Some(r1)).map_err(to_mcp_err)?;
+                let id2 = resolve_run_id(&*repo, None).map_err(to_mcp_err)?;
+                (id1, id2)
+            }
+            (None, None) => {
+                let ids = repo.list_run_ids().map_err(to_mcp_err)?;
+                if ids.len() < 2 {
+                    return Err(ErrorData::invalid_params(
+                        "Need at least 2 test runs to diff".to_string(),
+                        None,
+                    ));
+                }
+                (ids[ids.len() - 2].clone(), ids[ids.len() - 1].clone())
+            }
+            (None, Some(_)) => {
+                return Err(ErrorData::invalid_params(
+                    "run1 must be provided if run2 is specified".to_string(),
+                    None,
+                ));
+            }
+        };
+
+        let run1 = repo.get_test_run(&id1).map_err(to_mcp_err)?;
+        let run2 = repo.get_test_run(&id2).map_err(to_mcp_err)?;
+
+        use std::collections::BTreeSet;
+        let ids1: BTreeSet<&crate::repository::TestId> = run1.results.keys().collect();
+        let ids2: BTreeSet<&crate::repository::TestId> = run2.results.keys().collect();
+
+        let mut new_failures = Vec::new();
+        let mut new_passes = Vec::new();
+        let mut status_changed = Vec::new();
+
+        for id in ids1.intersection(&ids2) {
+            let r1 = &run1.results[*id];
+            let r2 = &run2.results[*id];
+            if r1.status == r2.status {
+                continue;
+            }
+            if r2.status.is_failure() && r1.status.is_success() {
+                new_failures.push(r2.test_id.as_str());
+            } else if r2.status.is_success() && r1.status.is_failure() {
+                new_passes.push(r2.test_id.as_str());
+            } else {
+                status_changed.push(serde_json::json!({
+                    "test_id": r2.test_id.as_str(),
+                    "old_status": r1.status.to_string(),
+                    "new_status": r2.status.to_string(),
+                }));
+            }
+        }
+
+        let added: Vec<&str> = ids2.difference(&ids1).map(|id| id.as_str()).collect();
+        let removed: Vec<&str> = ids1.difference(&ids2).map(|id| id.as_str()).collect();
+
+        let result = serde_json::json!({
+            "run1": id1,
+            "run2": id2,
+            "new_failures": new_failures,
+            "new_passes": new_passes,
+            "status_changed": status_changed,
+            "added_tests": added,
+            "removed_tests": removed,
         });
 
         Ok(CallToolResult::success(vec![Content::text(

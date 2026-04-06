@@ -73,6 +73,26 @@ Examples:
   inq run --load-list tests_to_run.txt
 "#
                 }
+                "diff" => {
+                    r#"inq diff - Compare two test runs and show what changed
+
+Usage: inq diff [RUN1] [RUN2]
+
+Shows new failures, new passes, added tests, removed tests, and status
+changes between two runs. Defaults to comparing the last two runs.
+
+Arguments:
+  RUN1  First run ID (defaults to second-to-latest)
+  RUN2  Second run ID (defaults to latest)
+
+Supports negative indices: -1 is the latest run, -2 is the second-to-latest, etc.
+
+Examples:
+  inq diff
+  inq diff 3 5
+  inq diff -2 -1
+"#
+                }
                 "failing" => {
                     r#"inq failing - Show currently failing tests
 
@@ -180,6 +200,7 @@ Available commands:
   init          Initialize a new test repository
   load          Load test results from a subunit stream
   run           Run tests and load results
+  diff          Compare two test runs and show what changed
   failing       Show currently failing tests
   last          Show results from the last test run
   stats         Show repository statistics
