@@ -280,6 +280,7 @@ impl<'a> TestExecutor<'a> {
         raw_writer: Box<dyn std::io::Write + Send>,
         historical_times: &HashMap<TestId, Duration>,
     ) -> Result<RunOutput> {
+        let historical_times = Arc::new(historical_times.clone());
         let estimated_total: Duration = historical_times.values().sum();
 
         let mut remaining_tests: Option<Vec<TestId>> = test_ids.map(|ids| ids.to_vec());
@@ -358,7 +359,7 @@ impl<'a> TestExecutor<'a> {
             let progress_bar_clone = progress_bar.clone();
             let run_id_clone = run_id.clone();
             let channel_reader = crate::test_runner::ChannelReader::new(rx);
-            let historical_times_for_thread = historical_times.clone();
+            let historical_times_for_thread = Arc::clone(&historical_times);
 
             let parse_thread = std::thread::spawn(move || {
                 let historical_times = historical_times_for_thread;
@@ -500,7 +501,7 @@ impl<'a> TestExecutor<'a> {
                         TimeoutReason::NoOutput => tracing::warn!(
                             "test run killed after {:.1}s (no output for {:?})",
                             elapsed.as_secs_f64(),
-                            no_output_timeout.unwrap()
+                            no_output_timeout.expect("NoOutput requires no_output_timeout")
                         ),
                         TimeoutReason::TestTimeout(_) | TimeoutReason::Cancelled => {
                             unreachable!()
@@ -577,11 +578,13 @@ impl<'a> TestExecutor<'a> {
         }
 
         let test_set: HashSet<&TestId> = all_tests.iter().collect();
-        let durations: HashMap<TestId, Duration> = historical_times
-            .iter()
-            .filter(|(id, _)| test_set.contains(id))
-            .map(|(id, d)| (id.clone(), *d))
-            .collect();
+        let durations: Arc<HashMap<TestId, Duration>> = Arc::new(
+            historical_times
+                .iter()
+                .filter(|(id, _)| test_set.contains(id))
+                .map(|(id, d)| (id.clone(), *d))
+                .collect(),
+        );
 
         let group_regex = test_cmd.config().group_regex.as_deref();
 
@@ -736,7 +739,7 @@ impl<'a> TestExecutor<'a> {
                 let overall_bar_clone = overall_bar.clone();
                 let worker_run_id_clone = worker_run_id.clone();
                 let total_failures_clone = Arc::clone(&total_failures);
-                let worker_durations = durations.clone();
+                let worker_durations = Arc::clone(&durations);
                 let worker_estimated_total = partition_estimated_totals
                     .get(worker_id)
                     .copied()
@@ -990,9 +993,7 @@ impl<'a> TestExecutor<'a> {
                     TimeoutReason::Timeout | TimeoutReason::TestTimeout(_) => {
                         format!("test timed out after {:.1}s", elapsed.as_secs_f64())
                     }
-                    TimeoutReason::NoOutput => {
-                        format!("test killed: no output for {:?}", per_test_timeout.unwrap())
-                    }
+                    TimeoutReason::NoOutput => "test killed: no output received".to_string(),
                     TimeoutReason::Cancelled => unreachable!(),
                 };
                 tracing::warn!(
