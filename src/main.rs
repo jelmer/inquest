@@ -86,6 +86,9 @@ enum Commands {
         subunit: bool,
     },
 
+    /// Show currently in-progress test runs
+    Running,
+
     /// Show repository statistics
     Stats,
 
@@ -303,6 +306,10 @@ fn main() {
             } else {
                 FailingCommand::new(cli.directory)
             };
+            cmd.execute(&mut ui)
+        }
+        Commands::Running => {
+            let cmd = RunningCommand::new(cli.directory);
             cmd.execute(&mut ui)
         }
         Commands::Stats => {

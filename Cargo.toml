@@ -37,7 +37,6 @@ subunit = "0.3.0"
 tempfile = "3.13"
 regex = "1.0"
 glob = "0.3"
-libc = "0.2"
 memmap2 = "0.9"
 num_cpus = "1.16"
 indicatif = ">=0.17,<0.19"
@@ -49,6 +48,9 @@ rmcp = { version = "1", features = ["server", "transport-io"], optional = true }
 tokio = { version = "1", features = ["rt", "macros"], optional = true }
 schemars = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.13"

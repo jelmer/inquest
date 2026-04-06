@@ -17,6 +17,7 @@ pub mod load;
 pub mod log;
 pub mod quickstart;
 pub mod run;
+pub mod running;
 pub mod slowest;
 pub mod stats;
 #[cfg(feature = "testr")]
@@ -35,6 +36,7 @@ pub use load::LoadCommand;
 pub use log::LogCommand;
 pub use quickstart::QuickstartCommand;
 pub use run::RunCommand;
+pub use running::RunningCommand;
 pub use slowest::SlowestCommand;
 pub use stats::StatsCommand;
 #[cfg(feature = "testr")]
