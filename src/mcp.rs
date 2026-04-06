@@ -11,7 +11,8 @@ use rmcp::model::{
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use crate::commands::utils::{open_repository, resolve_run_id};
-use crate::repository::Repository;
+use crate::repository::inquest::InquestRepositoryFactory;
+use crate::repository::{Repository, RepositoryFactory};
 use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 
@@ -66,6 +67,13 @@ pub struct LogParam {
     pub run_id: Option<String>,
     /// Test ID patterns to match (glob-style wildcards). If empty, shows all tests.
     pub test_patterns: Option<Vec<String>>,
+}
+
+/// Parameters for the analyze-isolation tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AnalyzeIsolationParam {
+    /// The test ID to analyze for isolation issues
+    pub test: String,
 }
 
 /// Parameters for the run tool.
@@ -368,6 +376,183 @@ impl InquestMcpService {
             serde_json::to_string_pretty(&result).unwrap(),
         )]))
     }
+
+    /// Show detailed information about a test run including metadata.
+    #[tool(
+        description = "Show detailed information about a test run including git commit, command, concurrency, duration, and exit code"
+    )]
+    async fn inq_info(&self, params: Parameters<RunIdParam>) -> Result<CallToolResult, ErrorData> {
+        let repo = self.open_repo()?;
+        let run_id = resolve_run_id(&*repo, params.0.run_id.as_deref()).map_err(to_mcp_err)?;
+        let test_run = repo.get_test_run(&run_id).map_err(to_mcp_err)?;
+        let metadata = repo.get_run_metadata(&run_id).map_err(to_mcp_err)?;
+
+        let duration = test_run.total_duration().map(duration_secs);
+        let result = serde_json::json!({
+            "id": run_id,
+            "timestamp": test_run.timestamp.to_rfc3339(),
+            "git_commit": metadata.git_commit,
+            "git_dirty": metadata.git_dirty,
+            "command": metadata.command,
+            "concurrency": metadata.concurrency,
+            "wall_duration_secs": metadata.duration_secs,
+            "exit_code": metadata.exit_code,
+            "total_tests": test_run.total_tests(),
+            "passed": test_run.count_successes(),
+            "failed": test_run.count_failures(),
+            "total_test_time_secs": duration,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap(),
+        )]))
+    }
+
+    /// Show currently in-progress test runs.
+    #[tool(description = "Show currently in-progress test runs with their status and progress")]
+    async fn inq_running(&self) -> Result<CallToolResult, ErrorData> {
+        let repo = self.open_repo()?;
+        let run_ids = repo.get_running_run_ids().map_err(to_mcp_err)?;
+
+        let now = chrono::Utc::now();
+        let runs: Vec<serde_json::Value> = run_ids
+            .iter()
+            .filter_map(|run_id| {
+                let test_run = repo.get_test_run(run_id).ok()?;
+                let elapsed_secs = (now - test_run.timestamp).num_seconds();
+                Some(serde_json::json!({
+                    "id": run_id,
+                    "total_tests": test_run.total_tests(),
+                    "passed": test_run.count_successes(),
+                    "failed": test_run.count_failures(),
+                    "elapsed_secs": elapsed_secs,
+                }))
+            })
+            .collect();
+
+        let result = serde_json::json!({
+            "count": runs.len(),
+            "runs": runs,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap(),
+        )]))
+    }
+
+    /// Initialize a new test repository.
+    #[tool(description = "Initialize a new .inquest test repository in the project directory")]
+    async fn inq_init(&self) -> Result<CallToolResult, ErrorData> {
+        let factory = InquestRepositoryFactory;
+        match factory.initialise(&self.directory) {
+            Ok(_) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "initialized",
+                    "path": self.directory.join(".inquest").to_string_lossy(),
+                }))
+                .unwrap(),
+            )])),
+            Err(e) => Err(ErrorData::internal_error(
+                format!("Failed to initialize repository: {}", e),
+                None,
+            )),
+        }
+    }
+
+    /// Auto-detect project type and generate configuration.
+    #[tool(
+        description = "Auto-detect project type (Cargo, pytest, unittest) and generate an inquest.toml configuration file"
+    )]
+    async fn inq_auto(&self) -> Result<CallToolResult, ErrorData> {
+        struct CollectUI {
+            output: Vec<String>,
+            errors: Vec<String>,
+        }
+        impl crate::ui::UI for CollectUI {
+            fn output(&mut self, msg: &str) -> crate::error::Result<()> {
+                self.output.push(msg.to_string());
+                Ok(())
+            }
+            fn error(&mut self, msg: &str) -> crate::error::Result<()> {
+                self.errors.push(msg.to_string());
+                Ok(())
+            }
+            fn warning(&mut self, msg: &str) -> crate::error::Result<()> {
+                self.errors.push(msg.to_string());
+                Ok(())
+            }
+        }
+
+        let mut ui = CollectUI {
+            output: Vec::new(),
+            errors: Vec::new(),
+        };
+
+        let cmd = crate::commands::AutoCommand::new(Some(self.dir_str()));
+        use crate::commands::Command;
+        let exit_code = cmd.execute(&mut ui).map_err(to_mcp_err)?;
+
+        if exit_code != 0 {
+            let msg = if ui.errors.is_empty() {
+                "Auto-detection failed".to_string()
+            } else {
+                ui.errors.join("; ")
+            };
+            return Err(ErrorData::internal_error(msg, None));
+        }
+
+        let result = serde_json::json!({
+            "status": "created",
+            "message": ui.output.join("\n"),
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap(),
+        )]))
+    }
+
+    /// Analyze test isolation issues using bisection.
+    #[tool(
+        description = "Analyze test isolation issues by bisecting the test suite to find which tests cause a target test to fail when run together but pass in isolation"
+    )]
+    async fn inq_analyze_isolation(
+        &self,
+        params: Parameters<AnalyzeIsolationParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        struct CollectUI {
+            output: Vec<String>,
+        }
+        impl crate::ui::UI for CollectUI {
+            fn output(&mut self, msg: &str) -> crate::error::Result<()> {
+                self.output.push(msg.to_string());
+                Ok(())
+            }
+            fn error(&mut self, msg: &str) -> crate::error::Result<()> {
+                self.output.push(msg.to_string());
+                Ok(())
+            }
+            fn warning(&mut self, msg: &str) -> crate::error::Result<()> {
+                self.output.push(msg.to_string());
+                Ok(())
+            }
+        }
+
+        let mut ui = CollectUI { output: Vec::new() };
+
+        let cmd =
+            crate::commands::AnalyzeIsolationCommand::new(Some(self.dir_str()), params.0.test);
+        use crate::commands::Command;
+        let exit_code = cmd.execute(&mut ui).map_err(to_mcp_err)?;
+
+        let result = serde_json::json!({
+            "exit_code": exit_code,
+            "output": ui.output,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap(),
+        )]))
+    }
 }
 
 #[tool_handler]
@@ -390,4 +575,247 @@ pub async fn serve(directory: PathBuf) -> anyhow::Result<()> {
     let server = service.serve(rmcp::transport::io::stdio()).await?;
     server.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repository::inquest::InquestRepositoryFactory;
+    use crate::repository::{RepositoryFactory, RunMetadata, TestResult, TestRun};
+    use tempfile::TempDir;
+
+    fn parse_result(result: &CallToolResult) -> serde_json::Value {
+        let text_content = result.content[0].as_text().expect("Expected text content");
+        serde_json::from_str(&text_content.text).unwrap()
+    }
+
+    fn setup_repo_with_run(temp: &TempDir) -> Box<dyn Repository> {
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut run = TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(
+            TestResult::success("test_pass").with_duration(std::time::Duration::from_secs(2)),
+        );
+        run.add_result(TestResult::failure("test_fail", "assertion failed"));
+        repo.insert_test_run(run).unwrap();
+
+        repo.set_run_metadata(
+            "0",
+            RunMetadata {
+                git_commit: Some("abc123".to_string()),
+                git_dirty: Some(false),
+                command: Some("cargo test".to_string()),
+                concurrency: Some(4),
+                duration_secs: Some(5.0),
+                exit_code: Some(1),
+            },
+        )
+        .unwrap();
+
+        repo
+    }
+
+    #[tokio::test]
+    async fn test_inq_stats() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service.inq_stats().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["run_count"], 1);
+        assert_eq!(json["latest_run"]["total_tests"], 2);
+        assert_eq!(json["latest_run"]["passed"], 1);
+        assert_eq!(json["latest_run"]["failed"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_inq_failing() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service.inq_failing().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["tests"][0], "test_fail");
+    }
+
+    #[tokio::test]
+    async fn test_inq_last() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_last(Parameters(RunIdParam { run_id: None }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["id"], "0");
+        assert_eq!(json["total_tests"], 2);
+        assert_eq!(json["passed"], 1);
+        assert_eq!(json["failed"], 1);
+        assert_eq!(json["failing_tests"][0], "test_fail");
+    }
+
+    #[tokio::test]
+    async fn test_inq_slowest() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_slowest(Parameters(SlowestParam { count: Some(5) }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["tests"][0]["test_id"], "test_pass");
+        assert_eq!(json["tests"][0]["duration_secs"], 2.0);
+    }
+
+    #[tokio::test]
+    async fn test_inq_info() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_info(Parameters(RunIdParam { run_id: None }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["id"], "0");
+        assert_eq!(json["git_commit"], "abc123");
+        assert_eq!(json["git_dirty"], false);
+        assert_eq!(json["command"], "cargo test");
+        assert_eq!(json["concurrency"], 4);
+        assert_eq!(json["wall_duration_secs"], 5.0);
+        assert_eq!(json["exit_code"], 1);
+        assert_eq!(json["total_tests"], 2);
+        assert_eq!(json["passed"], 1);
+        assert_eq!(json["failed"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_inq_info_specific_run() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_info(Parameters(RunIdParam {
+                run_id: Some("0".to_string()),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["id"], "0");
+        assert_eq!(json["git_commit"], "abc123");
+    }
+
+    #[tokio::test]
+    async fn test_inq_running_no_runs() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service.inq_running().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["count"], 0);
+        assert_eq!(json["runs"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_inq_init() {
+        let temp = TempDir::new().unwrap();
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service.inq_init().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["status"], "initialized");
+        assert!(temp.path().join(".inquest").exists());
+    }
+
+    #[tokio::test]
+    async fn test_inq_init_already_exists() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        factory.initialise(temp.path()).unwrap();
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_init().await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_inq_auto_cargo_project() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"foo\"\n",
+        )
+        .unwrap();
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_auto().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["status"], "created");
+        assert!(temp.path().join("inquest.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn test_inq_auto_no_project() {
+        let temp = TempDir::new().unwrap();
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_auto().await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_inq_log() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_log(Parameters(LogParam {
+                run_id: None,
+                test_patterns: Some(vec!["test_fail".to_string()]),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["results"][0]["test_id"], "test_fail");
+        assert_eq!(json["results"][0]["status"], "failure");
+    }
+
+    #[tokio::test]
+    async fn test_inq_stats_empty_repo() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        factory.initialise(temp.path()).unwrap();
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_stats().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["run_count"], 0);
+        assert!(json.get("latest_run").is_none());
+    }
 }
