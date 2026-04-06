@@ -263,8 +263,6 @@ pub fn warn_slow_tests(
 
 /// Persist a completed test run to the repository and display summary.
 ///
-/// This handles the full post-execution lifecycle: updating failing tests,
-/// storing test times, recording metadata, and displaying results.
 /// Persist a completed test run to the repository and display summary.
 ///
 /// Returns `(exit_code, run_id)`. The `run_id` is returned because `output`

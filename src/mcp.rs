@@ -512,7 +512,7 @@ impl InquestMcpService {
             let cancel_token = CancellationToken::new();
             self.cancel_tokens
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(run_id_for_response.clone(), cancel_token.clone());
 
             // Drop the repo — the background thread will open its own for persistence
@@ -524,7 +524,7 @@ impl InquestMcpService {
             tokio::task::spawn_blocking(move || {
                 let mut ui = NullUI;
                 let config = crate::test_executor::TestExecutorConfig {
-                    base_path: Some(base_path.clone()),
+                    base_path: Some(base_path),
                     all_output: false,
                     test_args: None,
                     cancellation_token: Some(cancel_token),
@@ -532,7 +532,7 @@ impl InquestMcpService {
                 let executor = crate::test_executor::TestExecutor::new(&config);
 
                 let output = if concurrency > 1 {
-                    let dir = base_path;
+                    let dir = config.base_path.as_ref().unwrap().clone();
                     executor.run_parallel(
                         &mut ui,
                         &test_cmd,
@@ -592,7 +592,10 @@ impl InquestMcpService {
                     }
                 }
 
-                cancel_tokens.lock().unwrap().remove(&run_id_for_cleanup);
+                cancel_tokens
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&run_id_for_cleanup);
             });
 
             let result = serde_json::json!({
@@ -755,7 +758,12 @@ impl InquestMcpService {
     ) -> Result<CallToolResult, ErrorData> {
         let run_id = &params.0.run_id;
 
-        let token = self.cancel_tokens.lock().unwrap().get(run_id).cloned();
+        let token = self
+            .cancel_tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(run_id)
+            .cloned();
 
         if let Some(token) = token {
             token.cancel();
