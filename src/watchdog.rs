@@ -54,6 +54,8 @@ pub enum TimeoutReason {
     NoOutput,
     /// A specific test exceeded its per-test timeout.
     TestTimeout(String),
+    /// Cancellation was requested.
+    Cancelled,
 }
 
 /// Tracks per-test deadlines for tests running inside a single process.
@@ -135,7 +137,26 @@ pub fn wait_with_timeout(
     activity: Option<&ActivityTracker>,
     watchdog: Option<&TestWatchdog>,
 ) -> std::io::Result<Result<ExitStatus, TimeoutReason>> {
-    let needs_polling = timeout.is_some() || no_output_timeout.is_some() || watchdog.is_some();
+    wait_with_timeout_and_cancel(child, timeout, no_output_timeout, activity, watchdog, None)
+}
+
+/// Like [`wait_with_timeout`], but also accepts an optional cancellation callback.
+///
+/// The `is_cancelled` function is polled alongside other timeout conditions.
+/// When it returns `true`, the child process is killed and
+/// `Err(TimeoutReason::Cancelled)` is returned.
+pub fn wait_with_timeout_and_cancel(
+    child: &mut Child,
+    timeout: Option<Duration>,
+    no_output_timeout: Option<Duration>,
+    activity: Option<&ActivityTracker>,
+    watchdog: Option<&TestWatchdog>,
+    is_cancelled: Option<&dyn Fn() -> bool>,
+) -> std::io::Result<Result<ExitStatus, TimeoutReason>> {
+    let needs_polling = timeout.is_some()
+        || no_output_timeout.is_some()
+        || watchdog.is_some()
+        || is_cancelled.is_some();
 
     if !needs_polling {
         return child.wait().map(Ok);
@@ -151,6 +172,12 @@ pub fn wait_with_timeout(
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(Ok(status));
+        }
+        if let Some(check) = is_cancelled {
+            if check() {
+                kill_and_reap(child)?;
+                return Ok(Err(TimeoutReason::Cancelled));
+            }
         }
         if let Some(t) = timeout {
             if start.elapsed() >= t {
@@ -237,6 +264,33 @@ mod tests {
         let result = wait_with_timeout(&mut child, None, None, None, None).unwrap();
         assert!(result.is_ok());
         assert!(result.unwrap().success());
+    }
+
+    #[test]
+    fn test_wait_with_cancel() {
+        use std::process::{Command, Stdio};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_clone = cancelled.clone();
+
+        // Cancel after 200ms
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            cancelled_clone.store(true, Ordering::Relaxed);
+        });
+
+        let check = move || cancelled.load(Ordering::Relaxed);
+        let result =
+            wait_with_timeout_and_cancel(&mut child, None, None, None, None, Some(&check)).unwrap();
+        assert_eq!(result, Err(TimeoutReason::Cancelled));
     }
 
     #[test]

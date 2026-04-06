@@ -16,7 +16,11 @@ use crate::repository::{Repository, RepositoryFactory};
 use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 
+use crate::test_executor::CancellationToken;
+
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// A UI implementation that collects output and errors into vectors.
@@ -54,6 +58,8 @@ impl crate::ui::UI for CollectUI {
 pub struct InquestMcpService {
     directory: PathBuf,
     tool_router: ToolRouter<Self>,
+    /// Cancellation tokens for background runs, keyed by run ID.
+    cancel_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
 impl InquestMcpService {
@@ -62,6 +68,7 @@ impl InquestMcpService {
         Self {
             directory,
             tool_router: Self::tool_router(),
+            cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -128,6 +135,13 @@ pub struct RunParam {
     /// Use inq_running to check progress. Use inq_last or inq_log to see
     /// partial results while running or final results when done.
     pub background: Option<bool>,
+}
+
+/// Parameters for the cancel tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CancelParam {
+    /// Run ID of the background test run to cancel.
+    pub run_id: String,
 }
 
 fn to_mcp_err(e: impl std::fmt::Display) -> ErrorData {
@@ -489,8 +503,17 @@ impl InquestMcpService {
             let (run_id, writer) = repo.begin_test_run_raw().map_err(to_mcp_err)?;
             let run_id_for_response = run_id.clone();
 
+            // Create cancellation token and store it for inq_cancel
+            let cancel_token = CancellationToken::new();
+            self.cancel_tokens
+                .lock()
+                .unwrap()
+                .insert(run_id_for_response.clone(), cancel_token.clone());
+
             // Drop the repo — the background thread will open its own for persistence
             let dir_for_persist = self.dir_str();
+            let cancel_tokens = self.cancel_tokens.clone();
+            let run_id_for_cleanup = run_id_for_response.clone();
             drop(repo);
 
             tokio::task::spawn_blocking(move || {
@@ -499,6 +522,7 @@ impl InquestMcpService {
                     base_path: Some(base_path),
                     all_output: false,
                     test_args: None,
+                    cancellation_token: Some(cancel_token),
                 };
                 let executor = crate::test_executor::TestExecutor::new(&config);
 
@@ -543,6 +567,9 @@ impl InquestMcpService {
                         tracing::error!("Background test execution failed: {}", e);
                     }
                 }
+
+                // Clean up the cancellation token
+                cancel_tokens.lock().unwrap().remove(&run_id_for_cleanup);
             });
 
             let result = serde_json::json!({
@@ -693,6 +720,39 @@ impl InquestMcpService {
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&result).unwrap(),
         )]))
+    }
+
+    /// Cancel a running background test execution.
+    #[tool(
+        description = "Cancel a background test run. Use inq_running to find the run ID of in-progress runs."
+    )]
+    async fn inq_cancel(
+        &self,
+        params: Parameters<CancelParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let run_id = &params.0.run_id;
+
+        let token = self.cancel_tokens.lock().unwrap().get(run_id).cloned();
+
+        if let Some(token) = token {
+            token.cancel();
+            let result = serde_json::json!({
+                "status": "cancelling",
+                "run_id": run_id,
+            });
+            Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&result).unwrap(),
+            )]))
+        } else {
+            Err(ErrorData::invalid_params(
+                format!(
+                    "No cancellable background run with ID '{}'. \
+                     Only runs started with background=true can be cancelled via this tool.",
+                    run_id
+                ),
+                None,
+            ))
+        }
     }
 
     /// Initialize a new test repository.
@@ -1080,6 +1140,52 @@ mod tests {
         let running = service.inq_running().await.unwrap();
         let running_json = parse_result(&running);
         assert_eq!(running_json["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_inq_cancel_nonexistent_run() {
+        let temp = TempDir::new().unwrap();
+        setup_runnable_project(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_cancel(Parameters(CancelParam {
+                run_id: "nonexistent".to_string(),
+            }))
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_inq_cancel_background_run() {
+        use crate::test_executor::CancellationToken;
+
+        let temp = TempDir::new().unwrap();
+        setup_runnable_project(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        // Manually insert a cancellation token to simulate a background run
+        let token = CancellationToken::new();
+        service
+            .cancel_tokens
+            .lock()
+            .unwrap()
+            .insert("42".to_string(), token.clone());
+
+        // Cancel it
+        let cancel_result = service
+            .inq_cancel(Parameters(CancelParam {
+                run_id: "42".to_string(),
+            }))
+            .await
+            .unwrap();
+        let cancel_json = parse_result(&cancel_result);
+        assert_eq!(cancel_json["status"], "cancelling");
+        assert_eq!(cancel_json["run_id"], "42");
+
+        // Verify the token was actually cancelled
+        assert!(token.is_cancelled());
     }
 
     #[tokio::test]

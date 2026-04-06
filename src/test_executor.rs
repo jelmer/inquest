@@ -12,10 +12,11 @@ use crate::repository::{TestId, TestResult, TestRun};
 use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 use crate::ui::UI;
-use crate::watchdog::{wait_with_timeout, TestWatchdog, TimeoutReason};
+use crate::watchdog::{wait_with_timeout_and_cancel, TestWatchdog, TimeoutReason};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -77,6 +78,40 @@ impl RunOutput {
     }
 }
 
+/// A token that can be used to cancel a running test execution.
+///
+/// Clone the token to share it between the caller and the executor.
+/// Call [`cancel`](CancellationToken::cancel) to request cancellation.
+#[derive(Clone, Default)]
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    /// Create a new cancellation token.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Request cancellation. Running tests will be killed at the next check point.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    /// Check whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+}
+
+impl std::fmt::Debug for CancellationToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancellationToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
 /// Configuration for test execution, independent of CLI argument parsing.
 pub struct TestExecutorConfig {
     /// Working directory for test execution.
@@ -85,6 +120,8 @@ pub struct TestExecutorConfig {
     pub all_output: bool,
     /// Additional arguments to pass to the test command.
     pub test_args: Option<Vec<String>>,
+    /// Optional cancellation token to stop execution.
+    pub cancellation_token: Option<CancellationToken>,
 }
 
 /// Executes tests without touching the repository.
@@ -101,6 +138,13 @@ impl<'a> TestExecutor<'a> {
     /// Create a new executor with the given configuration.
     pub fn new(config: &'a TestExecutorConfig) -> Self {
         Self { config }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.config
+            .cancellation_token
+            .as_ref()
+            .is_some_and(|t| t.is_cancelled())
     }
 
     /// Run tests and output raw subunit stream (no progress bars).
@@ -249,7 +293,13 @@ impl<'a> TestExecutor<'a> {
             subunit_stream::OutputFilter::FailuresOnly
         };
 
+        let cancel_token = self.config.cancellation_token.clone();
+
         loop {
+            if self.is_cancelled() {
+                any_command_failed = true;
+                break;
+            }
             let current_ids = remaining_tests.as_deref();
             let (cmd_str, _temp_file) = test_cmd.build_command_full(
                 current_ids,
@@ -335,12 +385,18 @@ impl<'a> TestExecutor<'a> {
                 )
             });
 
-            let wait_result = wait_with_timeout(
+            let cancel_check = cancel_token.as_ref().map(|t| {
+                let t = t.clone();
+                move || t.is_cancelled()
+            });
+            let cancel_fn: Option<&dyn Fn() -> bool> = cancel_check.as_ref().map(|f| f as _);
+            let wait_result = wait_with_timeout_and_cancel(
                 &mut child,
                 max_duration.map(|d| d.saturating_sub(start_time.elapsed())),
                 no_output_timeout,
                 activity_tracker.as_ref(),
                 watchdog.as_ref(),
+                cancel_fn,
             )
             .map_err(|e| {
                 progress_bar.finish_and_clear();
@@ -419,6 +475,11 @@ impl<'a> TestExecutor<'a> {
                     remaining_tests = Some(next_remaining);
                     continue;
                 }
+                Err(TimeoutReason::Cancelled) => {
+                    tracing::info!("test run cancelled");
+                    any_command_failed = true;
+                    break;
+                }
                 Err(ref reason) => {
                     let elapsed = start_time.elapsed();
                     match reason {
@@ -431,7 +492,9 @@ impl<'a> TestExecutor<'a> {
                             elapsed.as_secs_f64(),
                             no_output_timeout.unwrap()
                         ),
-                        TimeoutReason::TestTimeout(_) => unreachable!(),
+                        TimeoutReason::TestTimeout(_) | TimeoutReason::Cancelled => {
+                            unreachable!()
+                        }
                     }
                     any_command_failed = true;
                     break;
@@ -561,7 +624,13 @@ impl<'a> TestExecutor<'a> {
             .filter(|(_, p)| !p.is_empty())
             .collect();
 
+        let cancel_token = self.config.cancellation_token.clone();
+
         loop {
+            if self.is_cancelled() {
+                any_failed = true;
+                break;
+            }
             let mut supervisors: Vec<(usize, std::thread::JoinHandle<SupervisorResult>)> =
                 Vec::new();
             let mut worker_threads: Vec<WorkerThreads> = Vec::new();
@@ -641,13 +710,21 @@ impl<'a> TestExecutor<'a> {
 
                 let remaining_timeout =
                     max_duration.map(|d| d.saturating_sub(start_time.elapsed()));
+                let cancel_token_for_supervisor = cancel_token.clone();
                 let supervisor = std::thread::spawn(move || {
-                    wait_with_timeout(
+                    let cancel_check = cancel_token_for_supervisor.as_ref().map(|t| {
+                        let t = t.clone();
+                        move || t.is_cancelled()
+                    });
+                    let cancel_fn: Option<&dyn Fn() -> bool> =
+                        cancel_check.as_ref().map(|f| f as _);
+                    wait_with_timeout_and_cancel(
                         &mut child,
                         remaining_timeout,
                         no_output_timeout,
                         worker_activity.as_ref(),
                         watchdog_for_supervisor.as_ref(),
+                        cancel_fn,
                     )
                 });
 
@@ -816,6 +893,11 @@ impl<'a> TestExecutor<'a> {
         let mut any_failed = false;
 
         for (idx, test_id) in test_ids.iter().enumerate() {
+            if self.is_cancelled() {
+                tracing::info!("test run cancelled");
+                any_failed = true;
+                break;
+            }
             if let Some(max_dur) = max_duration {
                 if start_time.elapsed() >= max_dur {
                     tracing::warn!(
@@ -861,13 +943,26 @@ impl<'a> TestExecutor<'a> {
                 Ok(buf)
             });
 
-            let wait_result = wait_with_timeout(&mut child, per_test_timeout, None, None, None)
-                .map_err(|e| {
-                    crate::error::Error::CommandExecution(format!(
-                        "Failed to wait for test {}: {}",
-                        test_id, e
-                    ))
-                })?;
+            let cancel_token = &self.config.cancellation_token;
+            let cancel_check = cancel_token.as_ref().map(|t| {
+                let t = t.clone();
+                move || t.is_cancelled()
+            });
+            let cancel_fn: Option<&dyn Fn() -> bool> = cancel_check.as_ref().map(|f| f as _);
+            let wait_result = wait_with_timeout_and_cancel(
+                &mut child,
+                per_test_timeout,
+                None,
+                None,
+                None,
+                cancel_fn,
+            )
+            .map_err(|e| {
+                crate::error::Error::CommandExecution(format!(
+                    "Failed to wait for test {}: {}",
+                    test_id, e
+                ))
+            })?;
 
             drop(_temp_file);
 
@@ -881,6 +976,11 @@ impl<'a> TestExecutor<'a> {
                 .map_err(crate::error::Error::Io)?;
 
             if let Err(reason) = wait_result {
+                if reason == TimeoutReason::Cancelled {
+                    tracing::info!("test run cancelled");
+                    any_failed = true;
+                    break;
+                }
                 let elapsed = test_start.elapsed();
                 let msg = match reason {
                     TimeoutReason::Timeout | TimeoutReason::TestTimeout(_) => {
@@ -889,6 +989,7 @@ impl<'a> TestExecutor<'a> {
                     TimeoutReason::NoOutput => {
                         format!("test killed: no output for {:?}", per_test_timeout.unwrap())
                     }
+                    TimeoutReason::Cancelled => unreachable!(),
                 };
                 tracing::warn!(
                     "test {} killed after {:.1}s ({})",
@@ -1460,6 +1561,10 @@ fn compute_restart_partitions(
                     worker_id,
                     no_output_timeout.unwrap()
                 );
+                *any_failed = true;
+            }
+            Err(TimeoutReason::Cancelled) => {
+                tracing::info!("worker {} cancelled", worker_id);
                 *any_failed = true;
             }
             Ok(status) if !status.success() => {
