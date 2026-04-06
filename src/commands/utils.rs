@@ -5,7 +5,7 @@ use crate::error::Result;
 use crate::repository::inquest::InquestRepositoryFactory;
 #[cfg(feature = "testr")]
 use crate::repository::testr::FileRepositoryFactory;
-use crate::repository::{Repository, RepositoryFactory, TestRun};
+use crate::repository::{Repository, RepositoryFactory, RunId, TestRun};
 use crate::ui::UI;
 use std::path::Path;
 
@@ -82,7 +82,7 @@ pub fn open_or_init_repository(
 ///
 /// Supports negative indices like Python: -1 is the latest run, -2 is the
 /// second-to-latest, etc.
-pub fn resolve_run_id(repo: &dyn Repository, run_id: Option<&str>) -> Result<String> {
+pub fn resolve_run_id(repo: &dyn Repository, run_id: Option<&str>) -> Result<RunId> {
     match run_id {
         Some(id) => {
             if let Some(neg) = id.strip_prefix('-') {
@@ -99,7 +99,7 @@ pub fn resolve_run_id(repo: &dyn Repository, run_id: Option<&str>) -> Result<Str
                     return Ok(ids[ids.len() - offset].clone());
                 }
             }
-            Ok(id.to_string())
+            Ok(RunId::new(id))
         }
         None => {
             let latest = repo.get_latest_run()?;
@@ -129,7 +129,7 @@ pub fn update_test_times_from_run(repo: &mut dyn Repository, test_run: &TestRun)
 /// Capture and store run metadata (git commit, command, concurrency, duration, exit code)
 pub fn store_run_metadata(
     repo: &mut dyn Repository,
-    run_id: &str,
+    run_id: &RunId,
     command: Option<&str>,
     concurrency: Option<u32>,
     duration: Option<std::time::Duration>,
@@ -188,7 +188,7 @@ pub fn update_repository_failing_tests(
 }
 
 /// Display a test run summary
-pub fn display_test_summary(ui: &mut dyn UI, run_id: &str, test_run: &TestRun) -> Result<()> {
+pub fn display_test_summary(ui: &mut dyn UI, run_id: &RunId, test_run: &TestRun) -> Result<()> {
     let total = test_run.total_tests();
     let failures = test_run.count_failures();
     let successes = test_run.count_successes();
@@ -273,7 +273,7 @@ pub fn persist_and_display_run(
     output: crate::test_executor::RunOutput,
     partial: bool,
     historical_times: &std::collections::HashMap<crate::repository::TestId, std::time::Duration>,
-) -> Result<(i32, String)> {
+) -> Result<(i32, RunId)> {
     let exit_code = output.exit_code();
     let crate::test_executor::RunOutput {
         run_id,
@@ -407,12 +407,12 @@ mod tests {
     fn test_resolve_run_id_none() {
         let temp = TempDir::new().unwrap();
         let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
-        let mut run = crate::repository::TestRun::new("0".to_string());
+        let mut run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(crate::repository::TestResult::success("test1"));
         repo.insert_test_run(run).unwrap();
 
-        assert_eq!(resolve_run_id(&*repo, None).unwrap(), "0");
+        assert_eq!(resolve_run_id(&*repo, None).unwrap().as_str(), "0");
     }
 
     #[test]
@@ -420,7 +420,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
 
-        assert_eq!(resolve_run_id(&*repo, Some("42")).unwrap(), "42");
+        assert_eq!(resolve_run_id(&*repo, Some("42")).unwrap().as_str(), "42");
     }
 
     #[test]
@@ -429,15 +429,16 @@ mod tests {
         let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
 
         for i in 0..3 {
-            let mut run = crate::repository::TestRun::new(i.to_string());
+            let mut run =
+                crate::repository::TestRun::new(crate::repository::RunId::new(i.to_string()));
             run.timestamp = chrono::DateTime::from_timestamp(1000000000 + i, 0).unwrap();
             run.add_result(crate::repository::TestResult::success("test1"));
             repo.insert_test_run(run).unwrap();
         }
 
-        assert_eq!(resolve_run_id(&*repo, Some("-1")).unwrap(), "2");
-        assert_eq!(resolve_run_id(&*repo, Some("-2")).unwrap(), "1");
-        assert_eq!(resolve_run_id(&*repo, Some("-3")).unwrap(), "0");
+        assert_eq!(resolve_run_id(&*repo, Some("-1")).unwrap().as_str(), "2");
+        assert_eq!(resolve_run_id(&*repo, Some("-2")).unwrap().as_str(), "1");
+        assert_eq!(resolve_run_id(&*repo, Some("-3")).unwrap().as_str(), "0");
     }
 
     #[test]
@@ -445,7 +446,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
 
-        let mut run = crate::repository::TestRun::new("0".to_string());
+        let mut run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(crate::repository::TestResult::success("test1"));
         repo.insert_test_run(run).unwrap();
@@ -458,7 +459,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
 
-        let mut run = crate::repository::TestRun::new("0".to_string());
+        let mut run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(crate::repository::TestResult::success("test1"));
         repo.insert_test_run(run).unwrap();
@@ -469,7 +470,7 @@ mod tests {
     #[test]
     fn test_warn_slow_tests_no_history() {
         let mut ui = crate::ui::test_ui::TestUI::new();
-        let run = crate::repository::TestRun::new("0".to_string());
+        let run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
         let historical = std::collections::HashMap::new();
         warn_slow_tests(&mut ui, &run, &historical).unwrap();
         assert!(ui.output.is_empty());
@@ -478,7 +479,7 @@ mod tests {
     #[test]
     fn test_warn_slow_tests_no_slow_tests() {
         let mut ui = crate::ui::test_ui::TestUI::new();
-        let mut run = crate::repository::TestRun::new("0".to_string());
+        let mut run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
         run.add_result(
             crate::repository::TestResult::success("test1")
                 .with_duration(std::time::Duration::from_secs(1)),
@@ -495,7 +496,7 @@ mod tests {
     #[test]
     fn test_warn_slow_tests_detects_slow_test() {
         let mut ui = crate::ui::test_ui::TestUI::new();
-        let mut run = crate::repository::TestRun::new("0".to_string());
+        let mut run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
         // Test took 10s but historical is 1s (10x slower, above 3x threshold)
         run.add_result(
             crate::repository::TestResult::success("slow_test")
@@ -519,7 +520,7 @@ mod tests {
         let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
 
         // Insert an initial run so get_latest_run works
-        let mut initial_run = crate::repository::TestRun::new("0".to_string());
+        let mut initial_run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
         initial_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         initial_run.add_result(crate::repository::TestResult::success("test1"));
         repo.insert_test_run(initial_run).unwrap();
@@ -532,7 +533,7 @@ mod tests {
         );
 
         let output = crate::test_executor::RunOutput {
-            run_id: "1".to_string(),
+            run_id: crate::repository::RunId::new("1"),
             results,
             any_command_failed: false,
             duration: std::time::Duration::from_secs(2),
@@ -546,7 +547,7 @@ mod tests {
             persist_and_display_run(&mut ui, repo.as_mut(), output, false, &historical).unwrap();
 
         assert_eq!(exit_code, 0);
-        assert_eq!(run_id, "1");
+        assert_eq!(run_id.as_str(), "1");
         let ui_text = ui.output.join("\n");
         assert!(ui_text.contains("Passed:  1"), "got: {}", ui_text);
     }
@@ -567,7 +568,7 @@ mod tests {
         );
 
         let output = crate::test_executor::RunOutput {
-            run_id: "0".to_string(),
+            run_id: crate::repository::RunId::new("0"),
             results,
             any_command_failed: false,
             duration: std::time::Duration::from_secs(3),
@@ -581,7 +582,7 @@ mod tests {
             persist_and_display_run(&mut ui, repo.as_mut(), output, false, &historical).unwrap();
 
         assert_eq!(exit_code, 1);
-        assert_eq!(run_id, "0");
+        assert_eq!(run_id.as_str(), "0");
         let ui_text = ui.output.join("\n");
         assert!(ui_text.contains("Failed:  1"), "got: {}", ui_text);
 

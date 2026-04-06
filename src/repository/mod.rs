@@ -13,14 +13,16 @@ pub mod test_run;
 #[cfg(feature = "testr")]
 pub mod testr;
 
-pub use test_run::{RunMetadata, StreamInterruption, TestId, TestResult, TestRun, TestStatus};
+pub use test_run::{
+    RunId, RunMetadata, StreamInterruption, TestId, TestResult, TestRun, TestStatus,
+};
 
 /// Abstract repository trait for test result storage
 ///
 /// # Examples
 ///
 /// ```
-/// use inquest::repository::{Repository, RepositoryFactory, TestResult, TestRun};
+/// use inquest::repository::{Repository, RepositoryFactory};
 /// use inquest::repository::inquest::InquestRepositoryFactory;
 /// use tempfile::TempDir;
 ///
@@ -32,15 +34,10 @@ pub use test_run::{RunMetadata, StreamInterruption, TestId, TestResult, TestRun,
 /// let factory = InquestRepositoryFactory;
 /// let mut repo = factory.initialise(temp.path())?;
 ///
-/// // Create a test run with results
-/// let mut test_run = TestRun::new("0".to_string());
-/// test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
-/// test_run.add_result(TestResult::success("test_example::test_passing"));
-/// test_run.add_result(TestResult::failure("test_example::test_failing", "assertion failed"));
-///
-/// // Insert the test run
-/// let run_id = repo.insert_test_run(test_run)?;
-/// println!("Inserted test run with ID: {}", run_id);
+/// // Begin a test run — the repository assigns the run ID
+/// let (run_id, writer) = repo.begin_test_run_raw()?;
+/// println!("Started test run with ID: {}", run_id);
+/// drop(writer); // finish the run
 ///
 /// // Retrieve the latest run
 /// let latest = repo.get_latest_run()?;
@@ -54,18 +51,18 @@ pub use test_run::{RunMetadata, StreamInterruption, TestId, TestResult, TestRun,
 /// ```
 pub trait Repository {
     /// Get a specific test run by ID
-    fn get_test_run(&self, run_id: &str) -> Result<TestRun>;
+    fn get_test_run(&self, run_id: &RunId) -> Result<TestRun>;
 
     /// Begin inserting a raw test run stream, returning (run_id, writer)
     /// This preserves the original stream byte-for-byte including non-subunit output
     /// The caller should write the raw subunit bytes to the returned writer
-    fn begin_test_run_raw(&mut self) -> Result<(String, Box<dyn std::io::Write + Send>)>;
+    fn begin_test_run_raw(&mut self) -> Result<(RunId, Box<dyn std::io::Write + Send>)>;
 
     /// Insert a test run (convenience method for tests - prefer begin_test_run_raw in production)
     ///
     /// This is a convenience wrapper around begin_test_run_raw() for test code.
     /// Production code should prefer the streaming API for better performance.
-    fn insert_test_run(&mut self, run: TestRun) -> Result<String> {
+    fn insert_test_run(&mut self, run: TestRun) -> Result<RunId> {
         use std::io::Write;
 
         let (run_id, mut writer) = self.begin_test_run_raw()?;
@@ -97,7 +94,7 @@ pub trait Repository {
     /// - Removes tests that now pass
     ///
     /// In full (non-partial) mode, all previous failures are cleared.
-    fn insert_test_run_partial(&mut self, run: TestRun, partial: bool) -> Result<String> {
+    fn insert_test_run_partial(&mut self, run: TestRun, partial: bool) -> Result<RunId> {
         use std::io::Write;
 
         let (run_id, mut writer) = self.begin_test_run_raw()?;
@@ -136,7 +133,7 @@ pub trait Repository {
     fn get_latest_run(&self) -> Result<TestRun>;
 
     /// Get the raw subunit stream for a test run as a reader
-    fn get_test_run_raw(&self, run_id: &str) -> Result<Box<dyn std::io::Read>>;
+    fn get_test_run_raw(&self, run_id: &RunId) -> Result<Box<dyn std::io::Read>>;
 
     /// Get the list of currently failing tests
     fn get_failing_tests(&self) -> Result<Vec<TestId>>;
@@ -154,21 +151,21 @@ pub trait Repository {
     fn update_test_times(&mut self, times: &HashMap<TestId, Duration>) -> Result<()>;
 
     /// Get the next run ID that will be assigned
-    fn get_next_run_id(&self) -> Result<u64>;
+    fn get_next_run_id(&self) -> Result<RunId>;
 
     /// List all run IDs in the repository
-    fn list_run_ids(&self) -> Result<Vec<String>>;
+    fn list_run_ids(&self) -> Result<Vec<RunId>>;
 
     /// Get the number of test runs in the repository
     fn count(&self) -> Result<usize>;
 
     /// Check whether a test run is currently in progress.
-    fn is_run_in_progress(&self, _run_id: &str) -> Result<bool> {
+    fn is_run_in_progress(&self, _run_id: &RunId) -> Result<bool> {
         Ok(false)
     }
 
     /// List all currently in-progress run IDs.
-    fn get_running_run_ids(&self) -> Result<Vec<String>> {
+    fn get_running_run_ids(&self) -> Result<Vec<RunId>> {
         Ok(vec![])
     }
 
@@ -176,7 +173,7 @@ pub trait Repository {
     ///
     /// The default implementation is a no-op for backends that don't support
     /// extended metadata.
-    fn set_run_metadata(&mut self, _run_id: &str, _metadata: RunMetadata) -> Result<()> {
+    fn set_run_metadata(&mut self, _run_id: &RunId, _metadata: RunMetadata) -> Result<()> {
         Ok(())
     }
 
@@ -184,7 +181,7 @@ pub trait Repository {
     ///
     /// The default implementation returns empty metadata for backends that
     /// don't support extended metadata.
-    fn get_run_metadata(&self, _run_id: &str) -> Result<RunMetadata> {
+    fn get_run_metadata(&self, _run_id: &RunId) -> Result<RunMetadata> {
         Ok(RunMetadata::default())
     }
 }

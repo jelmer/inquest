@@ -69,7 +69,7 @@ impl Command for StatsCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::{TestId, TestResult, TestRun, TestStatus};
+    use crate::repository::{RunId, TestId, TestResult, TestRun, TestStatus};
     use crate::ui::test_ui::TestUI;
     use tempfile::TempDir;
 
@@ -98,7 +98,7 @@ mod tests {
 
         // Add two test runs
         for i in 0..2 {
-            let mut test_run = TestRun::new(i.to_string());
+            let mut test_run = TestRun::new(RunId::new(i.to_string()));
             test_run.timestamp =
                 chrono::DateTime::from_timestamp(1000000000 + i as i64, 0).unwrap();
 

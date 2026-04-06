@@ -54,6 +54,43 @@ impl std::borrow::Borrow<str> for TestId {
     }
 }
 
+/// Unique identifier for a test run.
+///
+/// Run IDs are opaque strings assigned by the repository. They cannot be
+/// constructed outside the crate — use repository methods like
+/// `begin_test_run_raw()` or `get_next_run_id()` to obtain them.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+pub struct RunId(String);
+
+impl RunId {
+    /// Create a new run ID.
+    pub fn new(id: impl Into<String>) -> Self {
+        RunId(id.into())
+    }
+
+    /// Create a sub-run ID for a worker or isolated test (e.g. "0-1").
+    pub(crate) fn sub_run(&self, suffix: impl fmt::Display) -> Self {
+        RunId(format!("{}-{}", self.0, suffix))
+    }
+
+    /// Returns the run ID as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RunId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl AsRef<str> for RunId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Status of a test execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum TestStatus {
@@ -243,7 +280,7 @@ pub struct RunMetadata {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TestRun {
     /// Unique identifier for this test run.
-    pub id: String,
+    pub id: RunId,
     /// When this test run was executed.
     pub timestamp: DateTime<Utc>,
     /// Map of test IDs to their results.
@@ -259,7 +296,7 @@ impl TestRun {
     ///
     /// # Arguments
     /// * `id` - Unique identifier for this test run
-    pub fn new(id: String) -> Self {
+    pub fn new(id: RunId) -> Self {
         TestRun {
             id,
             timestamp: Utc::now(),
@@ -384,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_test_run_counts() {
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
 
         run.add_result(TestResult {
             test_id: TestId::new("test1"),
@@ -466,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_total_duration_no_timing() {
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.add_result(TestResult::success("test1"));
         run.add_result(TestResult::success("test2"));
 
@@ -475,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_total_duration_with_timing() {
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.add_result(TestResult::success("test1").with_duration(Duration::from_millis(100)));
         run.add_result(TestResult::success("test2").with_duration(Duration::from_millis(200)));
         run.add_result(TestResult::success("test3").with_duration(Duration::from_millis(300)));
@@ -485,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_total_duration_partial_timing() {
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.add_result(TestResult::success("test1").with_duration(Duration::from_millis(100)));
         run.add_result(TestResult::success("test2")); // No duration
 
@@ -495,7 +532,7 @@ mod tests {
 
     #[test]
     fn test_filtered_counts_empty_filter() {
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
 
         run.add_result(TestResult::success("test1").with_tag("worker-0"));
         run.add_result(TestResult::failure("test2", "Failed").with_tag("worker-1"));
@@ -508,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_filtered_counts_with_tags() {
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
 
         run.add_result(TestResult::success("test1").with_tag("worker-0"));
         run.add_result(TestResult::failure("test2", "Failed").with_tag("worker-0"));
@@ -530,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_filtered_counts_no_match() {
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
 
         run.add_result(TestResult::success("test1").with_tag("worker-0"));
 
@@ -543,7 +580,7 @@ mod tests {
 
     #[test]
     fn test_filtered_counts_multiple_tags() {
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
 
         run.add_result(
             TestResult::success("test1")

@@ -6,7 +6,7 @@
 use inquest::commands::{
     AnalyzeIsolationCommand, Command, FailingCommand, InitCommand, LastCommand, StatsCommand,
 };
-use inquest::repository::{RepositoryFactory, TestResult, TestRun};
+use inquest::repository::{RepositoryFactory, RunId, TestResult, TestRun};
 use inquest::ui::UI;
 use std::fs;
 use std::io::Write;
@@ -68,7 +68,7 @@ fn test_full_workflow_init_load_last() {
     assert!(temp.path().join(".inquest/format").exists());
 
     // Step 2: Load a test run
-    let mut test_run = TestRun::new("0".to_string());
+    let mut test_run = TestRun::new(RunId::new("0"));
     test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
     test_run.add_result(TestResult::success("test1"));
     test_run.add_result(TestResult::failure("test2", "Failed"));
@@ -126,7 +126,7 @@ fn test_workflow_with_failing_tests() {
     init_cmd.execute(&mut ui).unwrap();
 
     // Load first run with failures
-    let mut run1 = TestRun::new("0".to_string());
+    let mut run1 = TestRun::new(RunId::new("0"));
     run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
     run1.add_result(TestResult::success("test1"));
     run1.add_result(TestResult::failure("test2", "Error"));
@@ -148,7 +148,7 @@ fn test_workflow_with_failing_tests() {
     assert_ne!(ui.output[1], ui.output[2]); // Make sure they're different
 
     // Load second run where test2 passes
-    let mut run2 = TestRun::new("1".to_string());
+    let mut run2 = TestRun::new(RunId::new("1"));
     run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
     run2.add_result(TestResult::success("test1"));
     run2.add_result(TestResult::success("test2"));
@@ -180,7 +180,7 @@ fn test_workflow_partial_mode() {
     let mut repo = factory.open(temp.path()).unwrap();
 
     // First full run
-    let mut run1 = TestRun::new("0".to_string());
+    let mut run1 = TestRun::new(RunId::new("0"));
     run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
     run1.add_result(TestResult::failure("test1", "Error"));
     run1.add_result(TestResult::failure("test2", "Error"));
@@ -193,7 +193,7 @@ fn test_workflow_partial_mode() {
     assert_eq!(failing.len(), 2);
 
     // Second partial run - only test test1
-    let mut run2 = TestRun::new("1".to_string());
+    let mut run2 = TestRun::new(RunId::new("1"));
     run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
     run2.add_result(TestResult::success("test1")); // Now passes
 
@@ -239,7 +239,7 @@ fn test_workflow_times_database() {
     let mut repo = factory.open(temp.path()).unwrap();
 
     // Insert run with durations
-    let mut run = TestRun::new("0".to_string());
+    let mut run = TestRun::new(RunId::new("0"));
     run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
     run.add_result(
         TestResult::success("test1").with_duration(std::time::Duration::from_secs_f64(1.5)),
@@ -287,7 +287,7 @@ fn test_workflow_list_flag() {
     let mut repo = factory.open(temp.path()).unwrap();
 
     // Add a run with failures
-    let mut run = TestRun::new("0".to_string());
+    let mut run = TestRun::new(RunId::new("0"));
     run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
     run.add_result(TestResult::failure("test1", "Error"));
     run.add_result(TestResult::failure("test2", "Error"));
@@ -1023,7 +1023,7 @@ fn test_stream_interruption_partial_results() {
     stream.extend(b"\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8");
     stream.extend(b"\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8");
 
-    let run = inquest::subunit_stream::parse_stream(std::io::Cursor::new(stream), "0".into());
+    let run = inquest::subunit_stream::parse_stream(std::io::Cursor::new(stream), RunId::new("0"));
     let run = run.unwrap();
 
     // test_ok should have been fully parsed
@@ -1148,7 +1148,7 @@ fn test_partial_mode_preserves_untested_failures_via_run() {
     let mut repo = factory.initialise(temp.path()).unwrap();
 
     // Seed two failing tests
-    let mut run = TestRun::new("0".to_string());
+    let mut run = TestRun::new(RunId::new("0"));
     run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
     run.add_result(TestResult::failure("test_a", "Error"));
     run.add_result(TestResult::failure("test_b", "Error"));
@@ -1323,7 +1323,7 @@ fn test_isolated_run_with_cancellation() {
     let mut ui = TestUI::new();
     let start = std::time::Instant::now();
     let output = executor
-        .run_isolated(&mut ui, &test_cmd, &test_ids, None, None, "0".to_string())
+        .run_isolated(&mut ui, &test_cmd, &test_ids, None, None, RunId::new("0"))
         .unwrap();
     let elapsed = start.elapsed();
 

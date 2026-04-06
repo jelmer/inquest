@@ -8,7 +8,7 @@ use inquest::commands::{
 };
 use inquest::error::Result;
 use inquest::repository::inquest::InquestRepositoryFactory;
-use inquest::repository::{RepositoryFactory, TestResult, TestRun};
+use inquest::repository::{RepositoryFactory, RunId, TestResult, TestRun};
 use inquest::ui::UI;
 use std::fs;
 use std::path::Path;
@@ -218,7 +218,7 @@ fn test_load_invalid_subunit_data() {
         0x9A, 0x00, // Incomplete/corrupted packet
         0xFF, 0xFF, 0xFF, // Invalid data
     ];
-    let result = inquest::subunit_stream::parse_stream(invalid_data, "0".to_string());
+    let result = inquest::subunit_stream::parse_stream(invalid_data, RunId::new("0"));
 
     // The key requirement is: no panic. Whether it returns an error or empty result
     // depends on how lenient the parser is. Both are acceptable as long as it doesn't crash.
@@ -295,7 +295,7 @@ fn test_repository_file_permissions() {
         let result = factory.open(temp.path());
 
         if let Ok(mut repo) = result {
-            let mut test_run = TestRun::new("0".to_string());
+            let mut test_run = TestRun::new(RunId::new("0"));
             test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
             test_run.add_result(TestResult::success("test1"));
 
@@ -358,7 +358,7 @@ test_command=echo "test1"
 #[test]
 fn test_subunit_parse_empty_stream() {
     let empty_stream: &[u8] = &[];
-    let result = inquest::subunit_stream::parse_stream(empty_stream, "0".to_string());
+    let result = inquest::subunit_stream::parse_stream(empty_stream, RunId::new("0"));
 
     // Empty stream should be valid and return empty test run
     assert!(result.is_ok());
@@ -375,13 +375,13 @@ fn test_repository_insert_duplicate_run_id() {
     let mut repo = factory.initialise(temp.path()).unwrap();
 
     // Insert a test run
-    let mut test_run1 = TestRun::new("0".to_string());
+    let mut test_run1 = TestRun::new(RunId::new("0"));
     test_run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
     test_run1.add_result(TestResult::success("test1"));
     repo.insert_test_run(test_run1.clone()).unwrap();
 
     // Try to insert another run with the same ID
-    let mut test_run2 = TestRun::new("0".to_string());
+    let mut test_run2 = TestRun::new(RunId::new("0"));
     test_run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
     test_run2.add_result(TestResult::success("test2"));
 
