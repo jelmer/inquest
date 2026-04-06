@@ -15,7 +15,7 @@ pub struct CliRunOutput {
     /// Process exit code (0 = success, non-zero = failure).
     pub exit_code: i32,
     /// The run ID assigned to this execution, if any.
-    pub run_id: Option<String>,
+    pub run_id: Option<crate::repository::RunId>,
 }
 
 /// Command to run tests and load results into the repository.
@@ -258,7 +258,7 @@ impl RunCommand {
                 });
             }
 
-            let run_id = repo.get_next_run_id()?.to_string();
+            let run_id = repo.get_next_run_id()?;
 
             if self.until_failure {
                 let mut iteration = 1;
@@ -277,7 +277,7 @@ impl RunCommand {
                     let iter_run_id = if iteration == 1 {
                         run_id.clone()
                     } else {
-                        repo.get_next_run_id()?.to_string()
+                        repo.get_next_run_id()?
                     };
                     let output = executor.run_isolated(
                         ui,
@@ -342,7 +342,7 @@ impl RunCommand {
                 ui.output(&format!("\n=== Iteration {} ===", iteration))?;
 
                 let output = if concurrency > 1 {
-                    let run_id = repo.get_next_run_id()?.to_string();
+                    let run_id = repo.get_next_run_id()?;
                     executor.run_parallel(
                         ui,
                         &test_cmd,
@@ -389,7 +389,7 @@ impl RunCommand {
                 iteration += 1;
             }
         } else if concurrency > 1 {
-            let run_id = repo.get_next_run_id()?.to_string();
+            let run_id = repo.get_next_run_id()?;
             let output = executor.run_parallel(
                 ui,
                 &test_cmd,
@@ -471,7 +471,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut test_run = crate::repository::TestRun::new("0".to_string());
+        let mut test_run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         test_run.add_result(crate::repository::TestResult {
             test_id: crate::repository::TestId::new("test1"),

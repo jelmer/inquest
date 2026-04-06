@@ -6,7 +6,7 @@
 use crate::commands::utils::open_repository;
 use crate::commands::Command;
 use crate::error::Result;
-use crate::repository::TestId;
+use crate::repository::{RunId, TestId};
 use crate::testcommand::TestCommand;
 use crate::ui::UI;
 use std::path::Path;
@@ -61,7 +61,7 @@ impl AnalyzeIsolationCommand {
 
         // Parse results to check if target test failed
         let test_run =
-            crate::subunit_stream::parse_stream(output.stdout.as_slice(), "analyze".to_string())?;
+            crate::subunit_stream::parse_stream(output.stdout.as_slice(), RunId::new("analyze"))?;
 
         // Check if the target test failed
         let target_id = TestId::new(&self.target_test);

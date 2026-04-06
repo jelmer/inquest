@@ -153,7 +153,7 @@ impl Command for LoadCommand {
 mod tests {
     use super::*;
     use crate::repository::inquest::InquestRepositoryFactory;
-    use crate::repository::{RepositoryFactory, TestId, TestResult, TestRun, TestStatus};
+    use crate::repository::{RepositoryFactory, RunId, TestId, TestResult, TestRun, TestStatus};
     use tempfile::TempDir;
 
     #[test]
@@ -165,7 +165,7 @@ mod tests {
         factory.initialise(temp.path()).unwrap();
 
         // Create a test run to load
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         test_run.add_result(TestResult {
             test_id: TestId::new("test1"),

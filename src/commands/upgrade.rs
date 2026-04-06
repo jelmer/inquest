@@ -102,14 +102,17 @@ impl Command for UpgradeCommand {
 fn migrate_failing_tests(
     old_repo: &dyn Repository,
     new_repo: &mut dyn Repository,
-    run_ids: &[String],
+    run_ids: &[crate::repository::RunId],
 ) -> Result<()> {
     let failing_ids = old_repo.get_failing_tests()?;
-    let last_run_id = run_ids.last().map(|s| s.as_str()).unwrap_or("0");
+    let last_run_id = run_ids
+        .last()
+        .cloned()
+        .unwrap_or_else(|| crate::repository::RunId::new("0"));
 
     if failing_ids.is_empty() {
         // Clear any failing state that was set during run migration
-        let mut clear_run = crate::repository::TestRun::new(last_run_id.to_string());
+        let mut clear_run = crate::repository::TestRun::new(last_run_id);
         clear_run.timestamp = chrono::Utc::now();
         new_repo.replace_failing_tests(&clear_run)?;
         return Ok(());
@@ -117,7 +120,7 @@ fn migrate_failing_tests(
 
     // Construct a TestRun representing the failing state by looking up
     // each failing test's details from the runs that last recorded it.
-    let mut failing_run = crate::repository::TestRun::new(last_run_id.to_string());
+    let mut failing_run = crate::repository::TestRun::new(last_run_id);
     failing_run.timestamp = chrono::Utc::now();
 
     for test_id in &failing_ids {
@@ -149,7 +152,7 @@ fn migrate_failing_tests(
 mod tests {
     use super::*;
     use crate::repository::testr::FileRepositoryFactory;
-    use crate::repository::{RepositoryFactory, TestResult, TestRun};
+    use crate::repository::{RepositoryFactory, RunId, TestResult, TestRun};
     use crate::ui::test_ui::TestUI;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -184,13 +187,13 @@ mod tests {
         let factory = FileRepositoryFactory;
         let mut old_repo = factory.initialise(temp.path()).unwrap();
 
-        let mut run1 = TestRun::new("0".to_string());
+        let mut run1 = TestRun::new(RunId::new("0"));
         run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run1.add_result(TestResult::success("test1").with_duration(Duration::from_secs(1)));
         run1.add_result(TestResult::failure("test2", "Failed"));
         old_repo.insert_test_run(run1).unwrap();
 
-        let mut run2 = TestRun::new("1".to_string());
+        let mut run2 = TestRun::new(RunId::new("1"));
         run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
         run2.add_result(TestResult::success("test1").with_duration(Duration::from_secs(2)));
         run2.add_result(TestResult::success("test2"));
@@ -211,7 +214,10 @@ mod tests {
         let new_factory = InquestRepositoryFactory;
         let new_repo = new_factory.open(temp.path()).unwrap();
         assert_eq!(new_repo.count().unwrap(), 2);
-        assert_eq!(new_repo.list_run_ids().unwrap(), vec!["0", "1"]);
+        assert_eq!(
+            new_repo.list_run_ids().unwrap(),
+            vec![RunId::new("0"), RunId::new("1")]
+        );
 
         // Verify latest run contents
         let latest = new_repo.get_latest_run().unwrap();
@@ -226,7 +232,7 @@ mod tests {
         let factory = FileRepositoryFactory;
         let mut old_repo = factory.initialise(temp.path()).unwrap();
 
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(TestResult::success("test1"));
         run.add_result(TestResult::failure("test2", "Failed"));
@@ -257,7 +263,7 @@ mod tests {
         let factory = FileRepositoryFactory;
         let mut old_repo = factory.initialise(temp.path()).unwrap();
 
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(TestResult::success("test1").with_duration(Duration::from_secs_f64(1.5)));
         run.add_result(TestResult::success("test2").with_duration(Duration::from_secs_f64(0.3)));

@@ -82,7 +82,7 @@ impl Command for InfoCommand {
 mod tests {
     use super::*;
     use crate::repository::inquest::InquestRepositoryFactory;
-    use crate::repository::{RepositoryFactory, RunMetadata, TestResult, TestRun};
+    use crate::repository::{RepositoryFactory, RunId, RunMetadata, TestResult, TestRun};
     use crate::ui::test_ui::TestUI;
     use tempfile::TempDir;
 
@@ -92,7 +92,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(
             TestResult::success("test1").with_duration(std::time::Duration::from_secs(1)),
@@ -101,7 +101,7 @@ mod tests {
         repo.insert_test_run(run).unwrap();
 
         repo.set_run_metadata(
-            "0",
+            &RunId::new("0"),
             RunMetadata {
                 git_commit: Some("abc123".to_string()),
                 git_dirty: Some(true),
@@ -137,13 +137,13 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(TestResult::success("test1"));
         repo.insert_test_run(run).unwrap();
 
         repo.set_run_metadata(
-            "0",
+            &RunId::new("0"),
             RunMetadata {
                 git_commit: Some("def456".to_string()),
                 git_dirty: Some(false),
@@ -169,7 +169,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(TestResult::success("test1"));
         repo.insert_test_run(run).unwrap();

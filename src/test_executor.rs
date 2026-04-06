@@ -8,7 +8,7 @@ use crate::config::{
     TimeoutSetting, AUTO_MAX_DURATION_MINIMUM, AUTO_TIMEOUT_MULTIPLIER, MAX_TEST_TIMEOUT_RESTARTS,
 };
 use crate::error::Result;
-use crate::repository::{TestId, TestResult, TestRun};
+use crate::repository::{RunId, TestId, TestResult, TestRun};
 use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 use crate::ui::UI;
@@ -38,7 +38,7 @@ pub type TestTimeoutFn = Arc<dyn Fn(&str) -> Option<Duration> + Send + Sync>;
 /// Result of a test execution, containing everything the caller needs for persistence.
 pub struct RunOutput {
     /// The run ID assigned to this execution.
-    pub run_id: String,
+    pub run_id: RunId,
     /// Collected test results, keyed by test ID.
     pub results: HashMap<TestId, TestResult>,
     /// Whether any test command exited with failure status.
@@ -175,7 +175,7 @@ impl<'a> TestExecutor<'a> {
         ui: &mut dyn UI,
         test_cmd: &TestCommand,
         test_ids: Option<&[TestId]>,
-        run_id: String,
+        run_id: RunId,
         raw_writer: Box<dyn std::io::Write + Send>,
     ) -> Result<RunOutput> {
         use std::io::Write;
@@ -276,7 +276,7 @@ impl<'a> TestExecutor<'a> {
         max_duration: Option<Duration>,
         no_output_timeout: Option<Duration>,
         test_timeout_fn: Option<&TestTimeoutFn>,
-        run_id: String,
+        run_id: RunId,
         raw_writer: Box<dyn std::io::Write + Send>,
         historical_times: &HashMap<TestId, Duration>,
     ) -> Result<RunOutput> {
@@ -533,7 +533,7 @@ impl<'a> TestExecutor<'a> {
 
     /// Run tests in parallel across multiple workers, with per-test timeout and restart.
     ///
-    /// The caller must pre-allocate `run_id` (e.g. via `repo.get_next_run_id().to_string()`).
+    /// The caller must pre-allocate `run_id` (e.g. via `repo.get_next_run_id()`).
     /// The `writer_factory` closure is called to create a writer for each worker on the
     /// first iteration; on restart iterations, workers write to `io::sink()`.
     #[allow(clippy::too_many_arguments)]
@@ -546,7 +546,7 @@ impl<'a> TestExecutor<'a> {
         max_duration: Option<Duration>,
         no_output_timeout: Option<Duration>,
         test_timeout_fn: Option<&TestTimeoutFn>,
-        run_id: String,
+        run_id: RunId,
         historical_times: &HashMap<TestId, Duration>,
         mut writer_factory: F,
     ) -> Result<RunOutput>
@@ -691,7 +691,7 @@ impl<'a> TestExecutor<'a> {
                 let stdout = child.stdout.take().expect("stdout was piped");
                 let stderr = child.stderr.take().expect("stderr was piped");
 
-                let worker_run_id = format!("{}-{}", run_id, worker_id);
+                let worker_run_id = run_id.sub_run(worker_id);
                 let raw_writer: Box<dyn std::io::Write + Send> = if is_first_iteration {
                     writer_factory()?
                 } else {
@@ -878,7 +878,7 @@ impl<'a> TestExecutor<'a> {
 
     /// Run each test in complete isolation (one test per process).
     ///
-    /// The caller must pre-allocate `run_id` (e.g. via `repo.get_next_run_id().to_string()`).
+    /// The caller must pre-allocate `run_id` (e.g. via `repo.get_next_run_id()`).
     #[allow(clippy::too_many_arguments)]
     pub fn run_isolated(
         &self,
@@ -887,7 +887,7 @@ impl<'a> TestExecutor<'a> {
         test_ids: &[TestId],
         test_timeout_fn: Option<&TestTimeoutFn>,
         max_duration: Option<Duration>,
-        run_id: String,
+        run_id: RunId,
     ) -> Result<RunOutput> {
         let start_time = std::time::Instant::now();
 
@@ -1014,7 +1014,7 @@ impl<'a> TestExecutor<'a> {
                 any_failed = true;
             }
 
-            let test_run_id = format!("{}-{}", run_id, idx);
+            let test_run_id = run_id.sub_run(idx);
             let test_run = subunit_stream::parse_stream(stdout_bytes.as_slice(), test_run_id)?;
 
             for (test_id, result) in test_run.results {
@@ -1604,7 +1604,7 @@ mod tests {
         results.insert(TestId::new("test1"), TestResult::success("test1"));
         results.insert(TestId::new("test2"), TestResult::success("test2"));
         let output = RunOutput {
-            run_id: "0".to_string(),
+            run_id: RunId::new("0"),
             results,
             any_command_failed: false,
             duration: Duration::from_secs(1),
@@ -1623,7 +1623,7 @@ mod tests {
             TestResult::failure("test2", "assertion failed"),
         );
         let output = RunOutput {
-            run_id: "0".to_string(),
+            run_id: RunId::new("0"),
             results,
             any_command_failed: false,
             duration: Duration::from_secs(1),
@@ -1636,7 +1636,7 @@ mod tests {
     #[test]
     fn test_run_output_exit_code_command_failed() {
         let output = RunOutput {
-            run_id: "0".to_string(),
+            run_id: RunId::new("0"),
             results: HashMap::new(),
             any_command_failed: true,
             duration: Duration::from_secs(1),
@@ -1654,7 +1654,7 @@ mod tests {
             TestResult::error("test1", "something broke"),
         );
         let output = RunOutput {
-            run_id: "0".to_string(),
+            run_id: RunId::new("0"),
             results,
             any_command_failed: false,
             duration: Duration::from_secs(1),
@@ -1670,7 +1670,7 @@ mod tests {
         results.insert(TestId::new("test1"), TestResult::success("test1"));
         results.insert(TestId::new("test2"), TestResult::failure("test2", "failed"));
         let output = RunOutput {
-            run_id: "42".to_string(),
+            run_id: RunId::new("42"),
             results,
             any_command_failed: false,
             duration: Duration::from_secs(5),
@@ -1678,7 +1678,7 @@ mod tests {
             concurrency: 2,
         };
         let test_run = output.into_test_run();
-        assert_eq!(test_run.id, "42");
+        assert_eq!(test_run.id.as_str(), "42");
         assert_eq!(test_run.total_tests(), 2);
         assert_eq!(test_run.count_successes(), 1);
         assert_eq!(test_run.count_failures(), 1);
