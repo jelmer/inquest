@@ -576,3 +576,246 @@ pub async fn serve(directory: PathBuf) -> anyhow::Result<()> {
     server.waiting().await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repository::inquest::InquestRepositoryFactory;
+    use crate::repository::{RepositoryFactory, RunMetadata, TestResult, TestRun};
+    use tempfile::TempDir;
+
+    fn parse_result(result: &CallToolResult) -> serde_json::Value {
+        let text_content = result.content[0].as_text().expect("Expected text content");
+        serde_json::from_str(&text_content.text).unwrap()
+    }
+
+    fn setup_repo_with_run(temp: &TempDir) -> Box<dyn Repository> {
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut run = TestRun::new("0".to_string());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(
+            TestResult::success("test_pass").with_duration(std::time::Duration::from_secs(2)),
+        );
+        run.add_result(TestResult::failure("test_fail", "assertion failed"));
+        repo.insert_test_run(run).unwrap();
+
+        repo.set_run_metadata(
+            "0",
+            RunMetadata {
+                git_commit: Some("abc123".to_string()),
+                git_dirty: Some(false),
+                command: Some("cargo test".to_string()),
+                concurrency: Some(4),
+                duration_secs: Some(5.0),
+                exit_code: Some(1),
+            },
+        )
+        .unwrap();
+
+        repo
+    }
+
+    #[tokio::test]
+    async fn test_inq_stats() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service.inq_stats().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["run_count"], 1);
+        assert_eq!(json["latest_run"]["total_tests"], 2);
+        assert_eq!(json["latest_run"]["passed"], 1);
+        assert_eq!(json["latest_run"]["failed"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_inq_failing() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service.inq_failing().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["tests"][0], "test_fail");
+    }
+
+    #[tokio::test]
+    async fn test_inq_last() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_last(Parameters(RunIdParam { run_id: None }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["id"], "0");
+        assert_eq!(json["total_tests"], 2);
+        assert_eq!(json["passed"], 1);
+        assert_eq!(json["failed"], 1);
+        assert_eq!(json["failing_tests"][0], "test_fail");
+    }
+
+    #[tokio::test]
+    async fn test_inq_slowest() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_slowest(Parameters(SlowestParam { count: Some(5) }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["tests"][0]["test_id"], "test_pass");
+        assert_eq!(json["tests"][0]["duration_secs"], 2.0);
+    }
+
+    #[tokio::test]
+    async fn test_inq_info() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_info(Parameters(RunIdParam { run_id: None }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["id"], "0");
+        assert_eq!(json["git_commit"], "abc123");
+        assert_eq!(json["git_dirty"], false);
+        assert_eq!(json["command"], "cargo test");
+        assert_eq!(json["concurrency"], 4);
+        assert_eq!(json["wall_duration_secs"], 5.0);
+        assert_eq!(json["exit_code"], 1);
+        assert_eq!(json["total_tests"], 2);
+        assert_eq!(json["passed"], 1);
+        assert_eq!(json["failed"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_inq_info_specific_run() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_info(Parameters(RunIdParam {
+                run_id: Some("0".to_string()),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["id"], "0");
+        assert_eq!(json["git_commit"], "abc123");
+    }
+
+    #[tokio::test]
+    async fn test_inq_running_no_runs() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service.inq_running().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["count"], 0);
+        assert_eq!(json["runs"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_inq_init() {
+        let temp = TempDir::new().unwrap();
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service.inq_init().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["status"], "initialized");
+        assert!(temp.path().join(".inquest").exists());
+    }
+
+    #[tokio::test]
+    async fn test_inq_init_already_exists() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        factory.initialise(temp.path()).unwrap();
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_init().await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_inq_auto_cargo_project() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"foo\"\n",
+        )
+        .unwrap();
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_auto().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["status"], "created");
+        assert!(temp.path().join("inquest.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn test_inq_auto_no_project() {
+        let temp = TempDir::new().unwrap();
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_auto().await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_inq_log() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_log(Parameters(LogParam {
+                run_id: None,
+                test_patterns: Some(vec!["test_fail".to_string()]),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["results"][0]["test_id"], "test_fail");
+        assert_eq!(json["results"][0]["status"], "failure");
+    }
+
+    #[tokio::test]
+    async fn test_inq_stats_empty_repo() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        factory.initialise(temp.path()).unwrap();
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_stats().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["run_count"], 0);
+        assert!(json.get("latest_run").is_none());
+    }
+}
