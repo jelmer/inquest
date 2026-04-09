@@ -12,7 +12,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
 use crate::commands::utils::{open_repository, resolve_run_id};
 use crate::repository::inquest::InquestRepositoryFactory;
-use crate::repository::{Repository, RepositoryFactory};
+use crate::repository::{Repository, RepositoryFactory, TestStatus};
 use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 
@@ -113,6 +113,10 @@ pub struct LogParam {
     pub run_id: Option<String>,
     /// Test ID patterns to match (glob-style wildcards). If empty, shows all tests.
     pub test_patterns: Option<Vec<String>>,
+    /// Filter by test status. Valid values: "success", "failure", "error", "skip", "xfail",
+    /// "uxsuccess". Also accepts "failing" (equivalent to failure+error+uxsuccess) and
+    /// "passing" (equivalent to success+skip+xfail). If empty, shows all statuses.
+    pub status_filter: Option<Vec<String>>,
 }
 
 /// Parameters for the analyze-isolation tool.
@@ -150,6 +154,48 @@ fn to_mcp_err(e: impl std::fmt::Display) -> ErrorData {
 
 fn duration_secs(d: Duration) -> f64 {
     d.as_secs_f64()
+}
+
+/// Parse status filter strings into a set of TestStatus values.
+///
+/// Accepts individual status names ("success", "failure", "error", "skip", "xfail", "uxsuccess")
+/// and group aliases ("failing" = failure+error+uxsuccess, "passing" = success+skip+xfail).
+fn parse_status_filters(filters: &[String]) -> Result<Vec<TestStatus>, ErrorData> {
+    let mut statuses = Vec::new();
+    for f in filters {
+        match f.to_lowercase().as_str() {
+            "failing" => {
+                statuses.extend([
+                    TestStatus::Failure,
+                    TestStatus::Error,
+                    TestStatus::UnexpectedSuccess,
+                ]);
+            }
+            "passing" => {
+                statuses.extend([
+                    TestStatus::Success,
+                    TestStatus::Skip,
+                    TestStatus::ExpectedFailure,
+                ]);
+            }
+            "success" => statuses.push(TestStatus::Success),
+            "failure" => statuses.push(TestStatus::Failure),
+            "error" => statuses.push(TestStatus::Error),
+            "skip" => statuses.push(TestStatus::Skip),
+            "xfail" => statuses.push(TestStatus::ExpectedFailure),
+            "uxsuccess" => statuses.push(TestStatus::UnexpectedSuccess),
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "Unknown status filter: '{}'. Valid values: success, failure, error, skip, xfail, uxsuccess, failing, passing",
+                        other
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(statuses)
 }
 
 #[tool_router]
@@ -389,15 +435,16 @@ impl InquestMcpService {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| ErrorData::invalid_params(format!("Invalid glob pattern: {}", e), None))?;
 
+        let status_filters = parse_status_filters(&params.0.status_filter.unwrap_or_default())?;
+
         let mut matching: Vec<_> = test_run
             .results
             .values()
             .filter(|r| {
-                if patterns.is_empty() {
-                    true
-                } else {
-                    patterns.iter().any(|p| p.matches(r.test_id.as_str()))
-                }
+                let name_match =
+                    patterns.is_empty() || patterns.iter().any(|p| p.matches(r.test_id.as_str()));
+                let status_match = status_filters.is_empty() || status_filters.contains(&r.status);
+                name_match && status_match
             })
             .collect();
         matching.sort_by(|a, b| a.test_id.as_str().cmp(b.test_id.as_str()));
@@ -1104,6 +1151,7 @@ mod tests {
             .inq_log(Parameters(LogParam {
                 run_id: None,
                 test_patterns: Some(vec!["test_fail".to_string()]),
+                status_filter: None,
             }))
             .await
             .unwrap();
@@ -1112,6 +1160,68 @@ mod tests {
         assert_eq!(json["count"], 1);
         assert_eq!(json["results"][0]["test_id"], "test_fail");
         assert_eq!(json["results"][0]["status"], "failure");
+    }
+
+    #[tokio::test]
+    async fn test_inq_log_status_filter() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        // Filter for failures only
+        let result = service
+            .inq_log(Parameters(LogParam {
+                run_id: None,
+                test_patterns: None,
+                status_filter: Some(vec!["failure".to_string()]),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["results"][0]["test_id"], "test_fail");
+
+        // Filter for successes only
+        let result = service
+            .inq_log(Parameters(LogParam {
+                run_id: None,
+                test_patterns: None,
+                status_filter: Some(vec!["success".to_string()]),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["results"][0]["test_id"], "test_pass");
+
+        // Use "failing" group alias
+        let result = service
+            .inq_log(Parameters(LogParam {
+                run_id: None,
+                test_patterns: None,
+                status_filter: Some(vec!["failing".to_string()]),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["results"][0]["status"], "failure");
+    }
+
+    #[tokio::test]
+    async fn test_inq_log_invalid_status_filter() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_log(Parameters(LogParam {
+                run_id: None,
+                test_patterns: None,
+                status_filter: Some(vec!["bogus".to_string()]),
+            }))
+            .await;
+        assert!(result.is_err());
     }
 
     fn setup_runnable_project(temp: &TempDir) {
