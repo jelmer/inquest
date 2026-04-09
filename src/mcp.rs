@@ -10,7 +10,7 @@ use rmcp::model::{
 };
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 
-use crate::commands::utils::{open_repository, resolve_run_id};
+use crate::commands::utils::{open_or_init_repository, open_repository, resolve_run_id};
 use crate::repository::inquest::InquestRepositoryFactory;
 use crate::repository::{Repository, RepositoryFactory, TestStatus};
 use crate::subunit_stream;
@@ -514,7 +514,14 @@ impl InquestMcpService {
         let background = params.0.background.unwrap_or(false);
 
         if background {
-            let mut repo = self.open_repo()?;
+            let mut repo = open_or_init_repository(
+                Some(&self.dir_str()),
+                true,
+                &mut NullUI,
+            )
+            .map_err(|e| {
+                ErrorData::internal_error(format!("Failed to open repository: {}", e), None)
+            })?;
 
             let base_path = base.to_string_lossy().to_string();
             let test_cmd = TestCommand::from_directory(base).map_err(|e| {
