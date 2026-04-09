@@ -12,6 +12,19 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::NamedTempFile;
 
+/// Describes where the resolved concurrency value came from.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConcurrencySource {
+    /// Explicitly provided by the caller.
+    Explicit,
+    /// Auto-detected from the number of CPUs.
+    AutoDetected(usize),
+    /// From the `test_run_concurrency` config callout.
+    ConfigCallout(usize),
+    /// Default value (1).
+    Default,
+}
+
 /// Test command executor
 #[derive(Debug)]
 pub struct TestCommand {
@@ -83,6 +96,26 @@ impl TestCommand {
         }
 
         Ok(Some(concurrency))
+    }
+
+    /// Resolve the effective concurrency level.
+    ///
+    /// Priority: explicit value > config callout > default of 1.
+    /// A value of 0 means auto-detect (number of CPUs).
+    ///
+    /// Returns (concurrency, source) where source describes where the value came from.
+    pub fn resolve_concurrency(&self, explicit: Option<usize>) -> Result<(usize, ConcurrencySource)> {
+        if let Some(0) = explicit {
+            let cpus = num_cpus::get();
+            return Ok((cpus, ConcurrencySource::AutoDetected(cpus)));
+        }
+        if let Some(c) = explicit {
+            return Ok((c, ConcurrencySource::Explicit));
+        }
+        if let Some(c) = self.get_concurrency()? {
+            return Ok((c, ConcurrencySource::ConfigCallout(c)));
+        }
+        Ok((1, ConcurrencySource::Default))
     }
 
     /// Build the command to execute tests

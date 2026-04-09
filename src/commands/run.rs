@@ -222,26 +222,16 @@ impl RunCommand {
             });
         }
 
-        let concurrency = if let Some(explicit_concurrency) = self.concurrency {
-            if explicit_concurrency == 0 {
-                let cpu_count = num_cpus::get();
-                ui.output(&format!(
-                    "Auto-detected {} CPUs for parallel execution",
-                    cpu_count
-                ))?;
-                cpu_count
-            } else {
-                explicit_concurrency
+        let (concurrency, concurrency_source) = test_cmd.resolve_concurrency(self.concurrency)?;
+        match &concurrency_source {
+            crate::testcommand::ConcurrencySource::AutoDetected(cpus) => {
+                ui.output(&format!("Auto-detected {} CPUs for parallel execution", cpus))?;
             }
-        } else if let Some(callout_concurrency) = test_cmd.get_concurrency()? {
-            ui.output(&format!(
-                "Using concurrency from test_run_concurrency: {}",
-                callout_concurrency
-            ))?;
-            callout_concurrency
-        } else {
-            1
-        };
+            crate::testcommand::ConcurrencySource::ConfigCallout(c) => {
+                ui.output(&format!("Using concurrency from test_run_concurrency: {}", c))?;
+            }
+            _ => {}
+        }
 
         if self.isolated {
             let all_tests = if let Some(ids) = test_ids {

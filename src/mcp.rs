@@ -502,7 +502,9 @@ impl InquestMcpService {
                 );
             }
 
-            let concurrency = params.0.concurrency.unwrap_or(1);
+            let (concurrency, _source) = test_cmd
+                .resolve_concurrency(params.0.concurrency)
+                .map_err(to_mcp_err)?;
 
             // Pre-allocate the run — this creates the lock file so inq_running sees it
             let (run_id, writer) = repo.begin_test_run_raw().map_err(to_mcp_err)?;
