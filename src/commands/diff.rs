@@ -209,7 +209,7 @@ impl Command for DiffCommand {
 mod tests {
     use super::*;
     use crate::repository::inquest::InquestRepositoryFactory;
-    use crate::repository::{RepositoryFactory, TestResult};
+    use crate::repository::{RepositoryFactory, RunId, TestResult};
     use crate::ui::test_ui::TestUI;
     use tempfile::TempDir;
 
@@ -219,7 +219,7 @@ mod tests {
     }
 
     fn make_run(id: &str, timestamp_offset: i64) -> TestRun {
-        let mut run = TestRun::new(id.to_string());
+        let mut run = TestRun::new(RunId::new(id));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000 + timestamp_offset, 0).unwrap();
         run
     }

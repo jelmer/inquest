@@ -59,7 +59,7 @@ pub struct InquestMcpService {
     directory: PathBuf,
     tool_router: ToolRouter<Self>,
     /// Cancellation tokens for background runs, keyed by run ID.
-    cancel_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    cancel_tokens: Arc<Mutex<HashMap<crate::repository::RunId, CancellationToken>>>,
 }
 
 impl InquestMcpService {
@@ -757,12 +757,13 @@ impl InquestMcpService {
         params: Parameters<CancelParam>,
     ) -> Result<CallToolResult, ErrorData> {
         let run_id = &params.0.run_id;
+        let run_id_key = crate::repository::RunId::new(run_id);
 
         let token = self
             .cancel_tokens
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(run_id)
+            .get(&run_id_key)
             .cloned();
 
         if let Some(token) = token {
@@ -889,7 +890,7 @@ pub async fn serve(directory: PathBuf) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::repository::inquest::InquestRepositoryFactory;
-    use crate::repository::{RepositoryFactory, RunMetadata, TestResult, TestRun};
+    use crate::repository::{RepositoryFactory, RunId, RunMetadata, TestResult, TestRun};
     use tempfile::TempDir;
 
     fn parse_result(result: &CallToolResult) -> serde_json::Value {
@@ -901,7 +902,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(
             TestResult::success("test_pass").with_duration(std::time::Duration::from_secs(2)),
@@ -910,7 +911,7 @@ mod tests {
         repo.insert_test_run(run).unwrap();
 
         repo.set_run_metadata(
-            "0",
+            &RunId::new("0"),
             RunMetadata {
                 git_commit: Some("abc123".to_string()),
                 git_dirty: Some(false),
@@ -1202,7 +1203,7 @@ mod tests {
             .cancel_tokens
             .lock()
             .unwrap()
-            .insert("42".to_string(), token.clone());
+            .insert(crate::repository::RunId::new("42"), token.clone());
 
         // Cancel it
         let cancel_result = service

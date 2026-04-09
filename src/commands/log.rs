@@ -117,7 +117,7 @@ impl Command for LogCommand {
 mod tests {
     use super::*;
     use crate::repository::inquest::InquestRepositoryFactory;
-    use crate::repository::{RepositoryFactory, TestId, TestResult, TestRun, TestStatus};
+    use crate::repository::{RepositoryFactory, RunId, TestId, TestResult, TestRun, TestStatus};
     use crate::ui::test_ui::TestUI;
     use tempfile::TempDir;
 
@@ -127,7 +127,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         test_run.add_result(TestResult {
             test_id: TestId::new("test1"),
@@ -161,7 +161,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut run0 = TestRun::new("0".to_string());
+        let mut run0 = TestRun::new(RunId::new("0"));
         run0.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run0.add_result(TestResult {
             test_id: TestId::new("test1"),
@@ -173,7 +173,7 @@ mod tests {
         });
         repo.insert_test_run(run0).unwrap();
 
-        let mut run1 = TestRun::new("1".to_string());
+        let mut run1 = TestRun::new(RunId::new("1"));
         run1.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
         run1.add_result(TestResult {
             test_id: TestId::new("test1"),
@@ -203,7 +203,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         test_run.add_result(TestResult {
             test_id: TestId::new("module.TestClass.test_alpha"),
@@ -253,7 +253,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         test_run.add_result(TestResult {
             test_id: TestId::new("test1"),
@@ -294,7 +294,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         test_run.add_result(TestResult {
             test_id: TestId::new("test1"),

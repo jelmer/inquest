@@ -10,7 +10,7 @@
 
 use crate::error::{Error, Result};
 use crate::repository::{
-    Repository, RepositoryFactory, RunMetadata, TestId, TestResult, TestRun, TestStatus,
+    Repository, RepositoryFactory, RunId, RunMetadata, TestId, TestResult, TestRun, TestStatus,
 };
 use crate::subunit_stream;
 use rusqlite::params;
@@ -233,11 +233,11 @@ impl InquestRepository {
         self.path.join("runs")
     }
 
-    fn run_file_path(&self, run_id: &str) -> PathBuf {
-        self.runs_path().join(run_id)
+    fn run_file_path(&self, run_id: &RunId) -> PathBuf {
+        self.runs_path().join(run_id.as_str())
     }
 
-    fn run_lock_path(&self, run_id: &str) -> PathBuf {
+    fn run_lock_path(&self, run_id: &RunId) -> PathBuf {
         self.runs_path().join(format!("{}.lock", run_id))
     }
 }
@@ -266,7 +266,7 @@ fn str_to_status(s: &str) -> TestStatus {
 }
 
 impl Repository for InquestRepository {
-    fn get_test_run(&self, run_id: &str) -> Result<TestRun> {
+    fn get_test_run(&self, run_id: &RunId) -> Result<TestRun> {
         let path = self.run_file_path(run_id);
         if !path.exists() {
             return Err(Error::TestRunNotFound(run_id.to_string()));
@@ -276,31 +276,36 @@ impl Repository for InquestRepository {
         let metadata = file.metadata()?;
         let test_run = if metadata.len() > MMAP_THRESHOLD_BYTES {
             let mmap = unsafe { memmap2::Mmap::map(&file)? };
-            subunit_stream::parse_stream_bytes(&mmap, run_id.to_string())
+            subunit_stream::parse_stream_bytes(&mmap, run_id.clone())
         } else {
-            subunit_stream::parse_stream(file, run_id.to_string())
+            subunit_stream::parse_stream(file, run_id.clone())
         }?;
 
         Ok(test_run)
     }
 
-    fn begin_test_run_raw(&mut self) -> Result<(String, Box<dyn std::io::Write + Send>)> {
+    fn begin_test_run_raw(&mut self) -> Result<(RunId, Box<dyn std::io::Write + Send>)> {
         let next_id = self.get_next_run_id()?;
         let timestamp = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO runs (id, timestamp) VALUES (?, ?)",
-            params![next_id as i64, &timestamp],
+            params![
+                next_id
+                    .as_str()
+                    .parse::<i64>()
+                    .map_err(|e| Error::Other(format!("Invalid run ID: {}", e)))?,
+                &timestamp
+            ],
         )?;
-        let run_id_str = next_id.to_string();
 
-        let lock_path = self.run_lock_path(&run_id_str);
+        let lock_path = self.run_lock_path(&next_id);
         fs::write(&lock_path, std::process::id().to_string())?;
 
-        let path = self.run_file_path(&run_id_str);
+        let path = self.run_file_path(&next_id);
         let file = File::create(&path)?;
 
         Ok((
-            run_id_str,
+            next_id,
             Box::new(LockingWriter {
                 inner: file,
                 lock_path,
@@ -316,10 +321,10 @@ impl Repository for InquestRepository {
             })
             .map_err(|_| Error::NoTestRuns)?;
 
-        self.get_test_run(&run_id.to_string())
+        self.get_test_run(&RunId::new(run_id.to_string()))
     }
 
-    fn get_test_run_raw(&self, run_id: &str) -> Result<Box<dyn std::io::Read>> {
+    fn get_test_run_raw(&self, run_id: &RunId) -> Result<Box<dyn std::io::Read>> {
         let path = self.run_file_path(run_id);
         let file = File::open(&path)?;
         Ok(Box::new(file))
@@ -328,6 +333,7 @@ impl Repository for InquestRepository {
     fn replace_failing_tests(&mut self, run: &TestRun) -> Result<()> {
         let run_id: i64 = run
             .id
+            .as_str()
             .parse()
             .map_err(|e| Error::Other(format!("Invalid run ID: {}", e)))?;
 
@@ -367,6 +373,7 @@ impl Repository for InquestRepository {
     fn update_failing_tests(&mut self, run: &TestRun) -> Result<()> {
         let run_id: i64 = run
             .id
+            .as_str()
             .parse()
             .map_err(|e| Error::Other(format!("Invalid run ID: {}", e)))?;
 
@@ -419,7 +426,7 @@ impl Repository for InquestRepository {
             .conn
             .prepare("SELECT test_id, status, message, details FROM failing_tests")?;
 
-        let mut test_run = TestRun::new("failing".to_string());
+        let mut test_run = TestRun::new(RunId::new("failing"));
         let rows = stmt.query_map([], |row| {
             let test_id: String = row.get(0)?;
             let status_str: String = row.get(1)?;
@@ -506,21 +513,21 @@ impl Repository for InquestRepository {
         Ok(())
     }
 
-    fn get_next_run_id(&self) -> Result<u64> {
+    fn get_next_run_id(&self) -> Result<RunId> {
         let id: i64 =
             self.conn
                 .query_row("SELECT COALESCE(MAX(id) + 1, 0) FROM runs", [], |row| {
                     row.get(0)
                 })?;
-        Ok(id as u64)
+        Ok(RunId::new(id.to_string()))
     }
 
-    fn list_run_ids(&self) -> Result<Vec<String>> {
+    fn list_run_ids(&self) -> Result<Vec<RunId>> {
         let mut stmt = self.conn.prepare("SELECT id FROM runs ORDER BY id ASC")?;
         let ids = stmt
             .query_map([], |row| {
                 let id: i64 = row.get(0)?;
-                Ok(id.to_string())
+                Ok(RunId::new(id.to_string()))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(ids)
@@ -533,10 +540,10 @@ impl Repository for InquestRepository {
         Ok(count as usize)
     }
 
-    fn get_run_metadata(&self, run_id: &str) -> Result<RunMetadata> {
+    fn get_run_metadata(&self, run_id: &RunId) -> Result<RunMetadata> {
         let result = self.conn.query_row(
             "SELECT git_commit, git_dirty, command, concurrency, duration_secs, exit_code FROM runs WHERE id = ?",
-            [run_id],
+            [run_id.as_str()],
             |row| {
                 Ok(RunMetadata {
                     git_commit: row.get(0)?,
@@ -555,7 +562,7 @@ impl Repository for InquestRepository {
         }
     }
 
-    fn is_run_in_progress(&self, run_id: &str) -> Result<bool> {
+    fn is_run_in_progress(&self, run_id: &RunId) -> Result<bool> {
         let lock_path = self.run_lock_path(run_id);
         let contents = match fs::read_to_string(&lock_path) {
             Ok(c) => c,
@@ -576,7 +583,7 @@ impl Repository for InquestRepository {
         Ok(alive)
     }
 
-    fn get_running_run_ids(&self) -> Result<Vec<String>> {
+    fn get_running_run_ids(&self) -> Result<Vec<RunId>> {
         let runs_dir = self.runs_path();
         let mut result = Vec::new();
         let entries = match fs::read_dir(&runs_dir) {
@@ -587,7 +594,7 @@ impl Repository for InquestRepository {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "lock") {
-                let run_id = path.file_stem().unwrap().to_string_lossy().to_string();
+                let run_id = RunId::new(path.file_stem().unwrap().to_string_lossy().to_string());
                 if self.is_run_in_progress(&run_id)? {
                     result.push(run_id);
                 }
@@ -597,7 +604,7 @@ impl Repository for InquestRepository {
         Ok(result)
     }
 
-    fn set_run_metadata(&mut self, run_id: &str, metadata: RunMetadata) -> Result<()> {
+    fn set_run_metadata(&mut self, run_id: &RunId, metadata: RunMetadata) -> Result<()> {
         self.conn.execute(
             "UPDATE runs SET git_commit = ?, git_dirty = ?, command = ?, concurrency = ?, duration_secs = ?, exit_code = ? WHERE id = ?",
             params![
@@ -607,7 +614,7 @@ impl Repository for InquestRepository {
                 metadata.concurrency,
                 metadata.duration_secs,
                 metadata.exit_code,
-                run_id,
+                run_id.as_str(),
             ],
         )?;
         Ok(())
@@ -677,7 +684,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
 
         let repo = factory.initialise(temp.path()).unwrap();
-        assert_eq!(repo.get_next_run_id().unwrap(), 0);
+        assert_eq!(repo.get_next_run_id().unwrap(), RunId::new("0"));
 
         // Verify directory structure
         let repo_path = temp.path().join(REPO_DIR);
@@ -717,7 +724,7 @@ mod tests {
 
         factory.initialise(temp.path()).unwrap();
         let repo = factory.open(temp.path()).unwrap();
-        assert_eq!(repo.get_next_run_id().unwrap(), 0);
+        assert_eq!(repo.get_next_run_id().unwrap(), RunId::new("0"));
     }
 
     #[test]
@@ -727,14 +734,14 @@ mod tests {
 
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let run = TestRun::new("0".to_string());
+        let run = TestRun::new(RunId::new("0"));
         let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
 
         subunit_stream::write_stream(&run, &mut writer).unwrap();
         drop(writer);
 
-        assert_eq!(run_id, "0");
-        assert_eq!(repo.get_next_run_id().unwrap(), 1);
+        assert_eq!(run_id, RunId::new("0"));
+        assert_eq!(repo.get_next_run_id().unwrap(), RunId::new("1"));
 
         // Verify file was created
         let run_path = temp.path().join(REPO_DIR).join("runs").join("0");
@@ -750,19 +757,19 @@ mod tests {
         assert_eq!(repo.list_run_ids().unwrap().len(), 0);
 
         // Insert two runs
-        let run = TestRun::new("0".to_string());
+        let run = TestRun::new(RunId::new("0"));
         let (_, mut writer) = repo.begin_test_run_raw().unwrap();
         subunit_stream::write_stream(&run, &mut writer).unwrap();
         drop(writer);
 
-        let run = TestRun::new("1".to_string());
+        let run = TestRun::new(RunId::new("1"));
         let (_, mut writer) = repo.begin_test_run_raw().unwrap();
         subunit_stream::write_stream(&run, &mut writer).unwrap();
         drop(writer);
 
         let ids = repo.list_run_ids().unwrap();
         assert_eq!(ids.len(), 2);
-        assert_eq!(ids, vec!["0", "1"]);
+        assert_eq!(ids, vec![RunId::new("0"), RunId::new("1")]);
     }
 
     #[test]
@@ -773,7 +780,7 @@ mod tests {
         let mut repo = factory.initialise(temp.path()).unwrap();
         assert_eq!(repo.count().unwrap(), 0);
 
-        let run = TestRun::new("0".to_string());
+        let run = TestRun::new(RunId::new("0"));
         let (_, mut writer) = repo.begin_test_run_raw().unwrap();
         subunit_stream::write_stream(&run, &mut writer).unwrap();
         drop(writer);
@@ -798,7 +805,7 @@ mod tests {
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         // First run: test1 fails, test2 passes
-        let mut run1 = TestRun::new("0".to_string());
+        let mut run1 = TestRun::new(RunId::new("0"));
         run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run1.add_result(TestResult::failure("test1", "Failed"));
         run1.add_result(TestResult::success("test2"));
@@ -814,7 +821,7 @@ mod tests {
         assert!(failing.iter().any(|id| id.as_str() == "test1"));
 
         // Second full run: only test3 fails
-        let mut run2 = TestRun::new("1".to_string());
+        let mut run2 = TestRun::new(RunId::new("1"));
         run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
         run2.add_result(TestResult::success("test1"));
         run2.add_result(TestResult::success("test2"));
@@ -839,7 +846,7 @@ mod tests {
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         // First run: test1 fails
-        let mut run1 = TestRun::new("0".to_string());
+        let mut run1 = TestRun::new(RunId::new("0"));
         run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run1.add_result(TestResult::failure("test1", "Failed"));
         run1.add_result(TestResult::success("test2"));
@@ -851,7 +858,7 @@ mod tests {
         repo.replace_failing_tests(&run1).unwrap();
 
         // Second partial run: test1 passes, test3 fails
-        let mut run2 = TestRun::new("1".to_string());
+        let mut run2 = TestRun::new(RunId::new("1"));
         run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
         run2.add_result(TestResult::success("test1"));
         run2.add_result(TestResult::failure("test3", "Failed"));
@@ -875,7 +882,7 @@ mod tests {
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         // First run: test1, test2, test3 all fail
-        let mut run1 = TestRun::new("0".to_string());
+        let mut run1 = TestRun::new(RunId::new("0"));
         run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run1.add_result(TestResult::failure("test1", "Failed"));
         run1.add_result(TestResult::failure("test2", "Failed"));
@@ -890,7 +897,7 @@ mod tests {
         assert_eq!(repo.get_failing_tests().unwrap().len(), 3);
 
         // Second partial run: only test1 passes, test2/test3 not re-tested
-        let mut run2 = TestRun::new("1".to_string());
+        let mut run2 = TestRun::new(RunId::new("1"));
         run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
         run2.add_result(TestResult::success("test1"));
 
@@ -967,7 +974,7 @@ mod tests {
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         // Create a run
-        let run = TestRun::new("0".to_string());
+        let run = TestRun::new(RunId::new("0"));
         let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
         subunit_stream::write_stream(&run, &mut writer).unwrap();
         drop(writer);
@@ -999,7 +1006,7 @@ mod tests {
         ) = conn
             .query_row(
                 "SELECT git_commit, git_dirty, command, concurrency, duration_secs, exit_code FROM runs WHERE id = ?",
-                [&run_id],
+                [run_id.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
             .unwrap();
@@ -1043,7 +1050,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let run = TestRun::new("0".to_string());
+        let run = TestRun::new(RunId::new("0"));
         let run_id = repo.insert_test_run(run).unwrap();
 
         // Create a stale lock file with a PID that doesn't exist
@@ -1114,7 +1121,7 @@ mod tests {
         let mut repo = factory.open(temp.path()).unwrap();
 
         // Create a run and set metadata with the new fields
-        let run = TestRun::new("0".to_string());
+        let run = TestRun::new(RunId::new("0"));
         let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
         subunit_stream::write_stream(&run, &mut writer).unwrap();
         drop(writer);
@@ -1137,7 +1144,7 @@ mod tests {
         let (duration_secs, exit_code, git_dirty): (Option<f64>, Option<i32>, Option<bool>) = conn
             .query_row(
                 "SELECT duration_secs, exit_code, git_dirty FROM runs WHERE id = ?",
-                [&run_id],
+                [run_id.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
@@ -1153,7 +1160,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(TestResult::success("test1").with_duration(Duration::from_secs(1)));
         run.add_result(TestResult::failure("test2", "assertion failed"));
@@ -1196,7 +1203,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(TestResult::success("test1"));
         run.add_result(TestResult::failure("test2", "Failed"));
@@ -1210,7 +1217,7 @@ mod tests {
 
         // Get raw failing stream and parse it
         let reader = repo.get_failing_tests_raw().unwrap();
-        let parsed = subunit_stream::parse_stream(reader, "failing".to_string()).unwrap();
+        let parsed = subunit_stream::parse_stream(reader, RunId::new("failing")).unwrap();
 
         assert_eq!(parsed.results.len(), 2);
         assert!(parsed.results.contains_key(&TestId::new("test2")));

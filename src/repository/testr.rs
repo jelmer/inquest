@@ -8,7 +8,7 @@
 //! - times.dbm: test timing database (NOT YET IMPLEMENTED - will use different format)
 
 use crate::error::{Error, Result};
-use crate::repository::{Repository, RepositoryFactory, TestId, TestResult, TestRun};
+use crate::repository::{Repository, RepositoryFactory, RunId, TestId, TestResult, TestRun};
 use crate::subunit_stream;
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -108,8 +108,8 @@ impl FileRepository {
         Ok(current)
     }
 
-    fn get_run_path(&self, run_id: &str) -> PathBuf {
-        self.path.join(run_id)
+    fn get_run_path(&self, run_id: &RunId) -> PathBuf {
+        self.path.join(run_id.as_str())
     }
 
     fn get_failing_path(&self) -> PathBuf {
@@ -131,15 +131,15 @@ impl FileRepository {
         let test_run = if metadata.len() > MMAP_THRESHOLD_BYTES {
             // Safety: We're only reading from the file, not modifying it
             let mmap = unsafe { memmap2::Mmap::map(&file)? };
-            subunit_stream::parse_stream_bytes(&mmap, "failing".to_string())?
+            subunit_stream::parse_stream_bytes(&mmap, RunId::new("failing"))?
         } else {
-            subunit_stream::parse_stream(file, "failing".to_string())?
+            subunit_stream::parse_stream(file, RunId::new("failing"))?
         };
 
         Ok(test_run.results)
     }
 
-    fn write_failing_run_from_raw(&self, run_id: &str) -> Result<()> {
+    fn write_failing_run_from_raw(&self, run_id: &RunId) -> Result<()> {
         let failing_path = self.get_failing_path();
         let run_path = self.get_run_path(run_id);
 
@@ -158,7 +158,7 @@ impl FileRepository {
         Ok(())
     }
 
-    fn update_failing_run_from_raw(&self, run_id: &str) -> Result<()> {
+    fn update_failing_run_from_raw(&self, run_id: &RunId) -> Result<()> {
         use std::io::Write;
 
         // Get existing failing tests
@@ -351,7 +351,7 @@ impl FileRepository {
 }
 
 impl Repository for FileRepository {
-    fn get_test_run(&self, run_id: &str) -> Result<TestRun> {
+    fn get_test_run(&self, run_id: &RunId) -> Result<TestRun> {
         let path = self.get_run_path(run_id);
         if !path.exists() {
             return Err(Error::TestRunNotFound(run_id.to_string()));
@@ -365,23 +365,23 @@ impl Repository for FileRepository {
         let test_run = if metadata.len() > MMAP_THRESHOLD_BYTES {
             // Safety: We're only reading from the file, not modifying it
             let mmap = unsafe { memmap2::Mmap::map(&file)? };
-            subunit_stream::parse_stream_bytes(&mmap, run_id.to_string())
+            subunit_stream::parse_stream_bytes(&mmap, run_id.clone())
         } else {
             // For small files, regular I/O is faster
-            subunit_stream::parse_stream(file, run_id.to_string())
+            subunit_stream::parse_stream(file, run_id.clone())
         }?;
 
         Ok(test_run)
     }
 
-    fn begin_test_run_raw(&mut self) -> Result<(String, Box<dyn std::io::Write + Send>)> {
-        let run_id = self.increment_next_stream()?;
-        let run_id_str = run_id.to_string();
+    fn begin_test_run_raw(&mut self) -> Result<(RunId, Box<dyn std::io::Write + Send>)> {
+        let next_id = self.increment_next_stream()?;
+        let run_id = RunId::new(next_id.to_string());
 
-        let path = self.get_run_path(&run_id_str);
+        let path = self.get_run_path(&run_id);
         let file = File::create(&path)?;
 
-        Ok((run_id_str, Box::new(file)))
+        Ok((run_id, Box::new(file)))
     }
 
     fn get_latest_run(&self) -> Result<TestRun> {
@@ -390,11 +390,11 @@ impl Repository for FileRepository {
             return Err(Error::NoTestRuns);
         }
 
-        let run_id = (next_stream - 1).to_string();
+        let run_id = RunId::new((next_stream - 1).to_string());
         self.get_test_run(&run_id)
     }
 
-    fn get_test_run_raw(&self, run_id: &str) -> Result<Box<dyn std::io::Read>> {
+    fn get_test_run_raw(&self, run_id: &RunId) -> Result<Box<dyn std::io::Read>> {
         let path = self.get_run_path(run_id);
         let file = File::open(&path)?;
         Ok(Box::new(file))
@@ -440,19 +440,20 @@ impl Repository for FileRepository {
         self.update_test_times_impl(times)
     }
 
-    fn get_next_run_id(&self) -> Result<u64> {
-        self.read_next_stream()
+    fn get_next_run_id(&self) -> Result<RunId> {
+        let next_stream = self.read_next_stream()?;
+        Ok(RunId::new(next_stream.to_string()))
     }
 
-    fn list_run_ids(&self) -> Result<Vec<String>> {
+    fn list_run_ids(&self) -> Result<Vec<RunId>> {
         let next_stream = self.read_next_stream()?;
         let mut ids = Vec::new();
 
         for i in 0..next_stream {
-            let id = i.to_string();
-            let path = self.get_run_path(&id);
+            let run_id = RunId::new(i.to_string());
+            let path = self.get_run_path(&run_id);
             if path.exists() {
-                ids.push(id);
+                ids.push(run_id);
             }
         }
 
@@ -476,7 +477,7 @@ mod tests {
         let factory = FileRepositoryFactory;
 
         let repo = factory.initialise(temp.path()).unwrap();
-        assert_eq!(repo.get_next_run_id().unwrap(), 0);
+        assert_eq!(repo.get_next_run_id().unwrap(), RunId::new("0"));
 
         // Verify files were created
         let repo_path = temp.path().join(REPO_DIR);
@@ -515,7 +516,7 @@ mod tests {
 
         factory.initialise(temp.path()).unwrap();
         let repo = factory.open(temp.path()).unwrap();
-        assert_eq!(repo.get_next_run_id().unwrap(), 0);
+        assert_eq!(repo.get_next_run_id().unwrap(), RunId::new("0"));
     }
 
     #[test]
@@ -526,15 +527,15 @@ mod tests {
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         // Use begin_test_run_raw to stream the test run
-        let run = TestRun::new("0".to_string());
+        let run = TestRun::new(RunId::new("0"));
         let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
 
         // Write the test run as subunit stream
         crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
         drop(writer);
 
-        assert_eq!(run_id, "0");
-        assert_eq!(repo.get_next_run_id().unwrap(), 1);
+        assert_eq!(run_id, RunId::new("0"));
+        assert_eq!(repo.get_next_run_id().unwrap(), RunId::new("1"));
 
         // Verify file was created
         let repo_path = temp.path().join(REPO_DIR);
@@ -551,19 +552,19 @@ mod tests {
         assert_eq!(repo.list_run_ids().unwrap().len(), 0);
 
         // Insert test runs using streaming API
-        let run = TestRun::new("0".to_string());
+        let run = TestRun::new(RunId::new("0"));
         let (_, mut writer) = repo.begin_test_run_raw().unwrap();
         crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
         drop(writer);
 
-        let run = TestRun::new("1".to_string());
+        let run = TestRun::new(RunId::new("1"));
         let (_, mut writer) = repo.begin_test_run_raw().unwrap();
         crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
         drop(writer);
 
         let ids = repo.list_run_ids().unwrap();
         assert_eq!(ids.len(), 2);
-        assert_eq!(ids, vec!["0", "1"]);
+        assert_eq!(ids, vec![RunId::new("0"), RunId::new("1")]);
     }
 
     #[test]
@@ -574,7 +575,7 @@ mod tests {
         let mut repo = factory.initialise(temp.path()).unwrap();
         assert_eq!(repo.count().unwrap(), 0);
 
-        let run = TestRun::new("0".to_string());
+        let run = TestRun::new(RunId::new("0"));
         let (_, mut writer) = repo.begin_test_run_raw().unwrap();
         crate::subunit_stream::write_stream(&run, &mut writer).unwrap();
         drop(writer);
@@ -599,7 +600,7 @@ mod tests {
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         // First run: test1 fails, test2 passes
-        let mut run1 = TestRun::new("0".to_string());
+        let mut run1 = TestRun::new(RunId::new("0"));
         run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run1.add_result(TestResult::failure("test1", "Failed"));
         run1.add_result(TestResult::success("test2"));
@@ -616,7 +617,7 @@ mod tests {
         assert!(failing.iter().any(|id| id.as_str() == "test1"));
 
         // Second partial run: test1 now passes, test3 fails
-        let mut run2 = TestRun::new("1".to_string());
+        let mut run2 = TestRun::new(RunId::new("1"));
         run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
         run2.add_result(TestResult::success("test1")); // Now passes
         run2.add_result(TestResult::failure("test3", "Failed")); // New failure
@@ -642,7 +643,7 @@ mod tests {
         let mut repo = factory.initialise(temp.path()).unwrap();
 
         // First run: test1 and test2 fail
-        let mut run1 = TestRun::new("0".to_string());
+        let mut run1 = TestRun::new(RunId::new("0"));
         run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run1.add_result(TestResult::failure("test1", "Failed"));
         run1.add_result(TestResult::failure("test2", "Failed"));
@@ -656,7 +657,7 @@ mod tests {
         assert_eq!(failing.len(), 2);
 
         // Second full run: only test3 fails
-        let mut run2 = TestRun::new("1".to_string());
+        let mut run2 = TestRun::new(RunId::new("1"));
         run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
         run2.add_result(TestResult::success("test1"));
         run2.add_result(TestResult::success("test2"));
@@ -690,7 +691,7 @@ mod tests {
         };
 
         // Create a test run with durations
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(TestResult::success("test1").with_duration(Duration::from_secs_f64(1.5)));
         run.add_result(TestResult::success("test2").with_duration(Duration::from_secs_f64(0.5)));
@@ -747,7 +748,7 @@ mod tests {
         };
 
         // First run with initial times
-        let mut run1 = TestRun::new("0".to_string());
+        let mut run1 = TestRun::new(RunId::new("0"));
         run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run1.add_result(TestResult::success("test1").with_duration(Duration::from_secs_f64(1.0)));
 
@@ -765,7 +766,7 @@ mod tests {
         file_repo.update_test_times(&times).unwrap();
 
         // Second run with updated time for test1
-        let mut run2 = TestRun::new("1".to_string());
+        let mut run2 = TestRun::new(RunId::new("1"));
         run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
         run2.add_result(TestResult::success("test1").with_duration(Duration::from_secs_f64(2.0)));
 
@@ -797,7 +798,7 @@ mod tests {
         let mut file_repo = factory.initialise(temp.path()).unwrap();
 
         // Create a test run with failures
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(TestResult::success("test1"));
         run.add_result(TestResult::failure("test2", "Failed"));
@@ -830,7 +831,7 @@ mod tests {
         let mut file_repo = factory.initialise(temp.path()).unwrap();
 
         // Create a test run with multiple failures
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(TestResult::success("test.pass1"));
         run.add_result(TestResult::failure("test.fail1", "Failure 1"));
@@ -865,7 +866,7 @@ mod tests {
         let mut file_repo = factory.initialise(temp.path()).unwrap();
 
         // First run with some failures
-        let mut run1 = TestRun::new("0".to_string());
+        let mut run1 = TestRun::new(RunId::new("0"));
         run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run1.add_result(TestResult::success("test1"));
         run1.add_result(TestResult::failure("test2", "Failed"));
@@ -906,7 +907,7 @@ mod tests {
         let mut file_repo = factory.initialise(temp.path()).unwrap();
 
         // Create a small test run
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(TestResult::success("test1"));
 
@@ -928,7 +929,7 @@ mod tests {
         let mut file_repo = factory.initialise(temp.path()).unwrap();
 
         // Create a large test run with many tests to exceed 4KB
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
 
         // Add enough tests with details to exceed 4KB
@@ -945,7 +946,7 @@ mod tests {
         drop(writer);
 
         // Verify file is actually > 4KB
-        let file_path = temp.path().join(".testrepository").join(&run_id);
+        let file_path = temp.path().join(".testrepository").join(run_id.as_str());
         let metadata = std::fs::metadata(&file_path).unwrap();
         assert!(
             metadata.len() > 4096,
@@ -965,7 +966,7 @@ mod tests {
         let mut file_repo = factory.initialise(temp.path()).unwrap();
 
         // Create a run with a few failing tests
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run.add_result(TestResult::failure("test1", "Failed"));
         run.add_result(TestResult::failure("test2", "Failed"));
@@ -989,7 +990,7 @@ mod tests {
         let mut file_repo = factory.initialise(temp.path()).unwrap();
 
         // Create a run with many failing tests to exceed 4KB
-        let mut run = TestRun::new("0".to_string());
+        let mut run = TestRun::new(RunId::new("0"));
         run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
 
         for i in 0..100 {
@@ -1026,7 +1027,7 @@ mod tests {
         let mut file_repo = factory.initialise(temp.path()).unwrap();
 
         // First run: test1, test2, test3 all fail
-        let mut run1 = TestRun::new("0".to_string());
+        let mut run1 = TestRun::new(RunId::new("0"));
         run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         run1.add_result(TestResult::failure("test1", "Failed"));
         run1.add_result(TestResult::failure("test2", "Failed"));
@@ -1043,7 +1044,7 @@ mod tests {
 
         // Second partial run: only re-run test1 (it passes now)
         // test2 and test3 are NOT re-run
-        let mut run2 = TestRun::new("1".to_string());
+        let mut run2 = TestRun::new(RunId::new("1"));
         run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
         run2.add_result(TestResult::success("test1")); // Now passes
 
@@ -1086,7 +1087,7 @@ mod tests {
         let mut file_repo = factory.initialise(temp.path()).unwrap();
 
         // Initial run: 3 tests fail
-        let mut run1 = TestRun::new("0".to_string());
+        let mut run1 = TestRun::new(RunId::new("0"));
         run1.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         for i in 1..=3 {
             run1.add_result(TestResult::failure(format!("test{}", i), "Failed"));
@@ -1098,7 +1099,7 @@ mod tests {
         assert_eq!(file_repo.get_failing_tests().unwrap().len(), 3);
 
         // Second run: only test1 appears in output (test2/test3 missing)
-        let mut run2 = TestRun::new("1".to_string());
+        let mut run2 = TestRun::new(RunId::new("1"));
         run2.timestamp = chrono::DateTime::from_timestamp(1000000001, 0).unwrap();
         run2.add_result(TestResult::failure("test1", "Still failing"));
         let (_, mut writer) = file_repo.begin_test_run_raw().unwrap();

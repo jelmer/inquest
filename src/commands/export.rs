@@ -221,12 +221,12 @@ fn export_tap(test_run: &TestRun) -> String {
 mod tests {
     use super::*;
     use crate::repository::inquest::InquestRepositoryFactory;
-    use crate::repository::{RepositoryFactory, TestResult, TestRun};
+    use crate::repository::{RepositoryFactory, RunId, TestResult, TestRun};
     use std::time::Duration;
     use tempfile::TempDir;
 
     fn make_test_run() -> TestRun {
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
 
         test_run.add_result(
@@ -384,7 +384,7 @@ ok 4 tests.unit.test_gamma # SKIP
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         test_run.add_result(TestResult::success("test1"));
         repo.insert_test_run(test_run).unwrap();
@@ -411,7 +411,7 @@ ok 4 tests.unit.test_gamma # SKIP
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         test_run.add_result(TestResult::success("test1"));
         repo.insert_test_run(test_run).unwrap();
@@ -439,7 +439,7 @@ ok 4 tests.unit.test_gamma # SKIP
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
         test_run.add_result(TestResult::success("test1"));
         repo.insert_test_run(test_run).unwrap();
@@ -473,7 +473,7 @@ ok 4 tests.unit.test_gamma # SKIP
     #[cfg(feature = "junit")]
     #[test]
     fn test_junit_classname_splitting() {
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
 
         test_run.add_result(TestResult::success("tests.unit.test_foo"));

@@ -68,7 +68,7 @@ impl Command for RunningCommand {
 mod tests {
     use super::*;
     use crate::repository::inquest::InquestRepositoryFactory;
-    use crate::repository::{RepositoryFactory, TestRun};
+    use crate::repository::{RepositoryFactory, RunId, TestRun};
     use crate::ui::test_ui::TestUI;
     use tempfile::TempDir;
 
@@ -92,7 +92,7 @@ mod tests {
         let factory = InquestRepositoryFactory;
         let mut repo = factory.initialise(temp.path()).unwrap();
 
-        let run = TestRun::new("0".to_string());
+        let run = TestRun::new(RunId::new("0"));
         repo.insert_test_run(run).unwrap();
 
         let mut ui = TestUI::new();

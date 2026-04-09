@@ -7,7 +7,7 @@
 //! for improved performance with large subunit streams.
 
 use crate::error::{Error, Result};
-use crate::repository::{StreamInterruption, TestId, TestResult, TestRun, TestStatus};
+use crate::repository::{RunId, StreamInterruption, TestId, TestResult, TestRun, TestStatus};
 use std::io::{Read, Write};
 use subunit::io::sync::iter_stream;
 use subunit::serialize::Serializable;
@@ -102,7 +102,7 @@ fn convert_status_with_progress(status: SubunitTestStatus) -> Option<(TestStatus
 /// Parse a subunit stream from a byte slice into a TestRun
 ///
 /// This is optimized for memory-mapped files and avoids copying data.
-pub fn parse_stream_bytes(data: &[u8], run_id: String) -> Result<TestRun> {
+pub fn parse_stream_bytes(data: &[u8], run_id: RunId) -> Result<TestRun> {
     parse_stream(data, run_id)
 }
 
@@ -118,7 +118,7 @@ pub fn parse_stream_bytes(data: &[u8], run_id: String) -> Result<TestRun> {
 /// Returns an error only for invalid timestamps in otherwise valid events.
 pub fn parse_stream_with_progress<R: Read, F, B>(
     reader: R,
-    run_id: String,
+    run_id: RunId,
     mut progress_callback: F,
     mut bytes_callback: B,
     output_filter: OutputFilter,
@@ -390,7 +390,7 @@ where
 ///
 /// If the stream is incomplete or interrupted, returns partial results collected before the error.
 /// Returns an error only for invalid timestamps in otherwise valid events.
-pub fn parse_stream<R: Read>(reader: R, run_id: String) -> Result<TestRun> {
+pub fn parse_stream<R: Read>(reader: R, run_id: RunId) -> Result<TestRun> {
     use std::collections::HashMap;
 
     let mut test_run = TestRun::new(run_id.clone());
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn test_parse_empty_stream() {
         let empty_stream: &[u8] = &[];
-        let result = parse_stream(empty_stream, "0".to_string());
+        let result = parse_stream(empty_stream, RunId::new("0"));
         assert!(result.is_ok());
         let run = result.unwrap();
         assert_eq!(run.total_tests(), 0);
@@ -641,7 +641,7 @@ mod tests {
     fn test_roundtrip_test_run() {
         // Create a test run
         // Use a fixed timestamp to avoid chrono issues with the subunit crate
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
 
         test_run.add_result(TestResult {
@@ -667,7 +667,7 @@ mod tests {
         write_stream(&test_run, &mut buffer).unwrap();
 
         // Parse back
-        let parsed = parse_stream(&buffer[..], "1".to_string()).unwrap();
+        let parsed = parse_stream(&buffer[..], RunId::new("1")).unwrap();
 
         // Verify
         assert_eq!(parsed.total_tests(), 2);
@@ -687,7 +687,7 @@ mod tests {
         ];
 
         for (status, _expected_str) in statuses {
-            let mut test_run = TestRun::new("0".to_string());
+            let mut test_run = TestRun::new(RunId::new("0"));
             // Use a fixed timestamp to avoid chrono issues with the subunit crate
             test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
 
@@ -703,7 +703,7 @@ mod tests {
             let mut buffer = Vec::new();
             write_stream(&test_run, &mut buffer).unwrap();
 
-            let parsed = parse_stream(&buffer[..], "1".to_string()).unwrap();
+            let parsed = parse_stream(&buffer[..], RunId::new("1")).unwrap();
             assert_eq!(parsed.total_tests(), 1);
 
             let result = parsed.results.values().next().unwrap();
@@ -732,7 +732,7 @@ mod tests {
             0x9A, 0x00, // Incomplete/corrupted packet
             0xFF, 0xFF, 0xFF, // Invalid data
         ];
-        let result = parse_stream(invalid_data, "0".to_string());
+        let result = parse_stream(invalid_data, RunId::new("0"));
 
         // The key requirement is: no panic. Whether it returns an error or empty result
         // depends on how lenient the parser is. Both are acceptable.
@@ -758,7 +758,7 @@ mod tests {
     #[test]
     fn test_parse_stream_bytes() {
         // Test the memory-mapped parsing path
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
 
         test_run.add_result(TestResult {
@@ -775,7 +775,7 @@ mod tests {
         write_stream(&test_run, &mut buffer).unwrap();
 
         // Parse using the bytes function (simulating mmap)
-        let parsed = parse_stream_bytes(&buffer, "1".to_string()).unwrap();
+        let parsed = parse_stream_bytes(&buffer, RunId::new("1")).unwrap();
 
         // Verify
         assert_eq!(parsed.total_tests(), 1);
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn test_filter_failing_tests() {
         // Create a test run with mixed results
-        let mut test_run = TestRun::new("0".to_string());
+        let mut test_run = TestRun::new(RunId::new("0"));
         test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
 
         // Add passing test
@@ -830,7 +830,7 @@ mod tests {
         filter_failing_tests(&full_stream[..], &mut filtered_stream).unwrap();
 
         // Parse the filtered stream
-        let parsed = parse_stream(&filtered_stream[..], "filtered".to_string()).unwrap();
+        let parsed = parse_stream(&filtered_stream[..], RunId::new("filtered")).unwrap();
 
         // Should only have the 2 failing tests (Failure + UnexpectedSuccess)
         assert_eq!(parsed.total_tests(), 2);
