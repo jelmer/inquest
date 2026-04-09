@@ -514,14 +514,10 @@ impl InquestMcpService {
         let background = params.0.background.unwrap_or(false);
 
         if background {
-            let mut repo = open_or_init_repository(
-                Some(&self.dir_str()),
-                true,
-                &mut NullUI,
-            )
-            .map_err(|e| {
-                ErrorData::internal_error(format!("Failed to open repository: {}", e), None)
-            })?;
+            let mut repo = open_or_init_repository(Some(&self.dir_str()), true, &mut NullUI)
+                .map_err(|e| {
+                    ErrorData::internal_error(format!("Failed to open repository: {}", e), None)
+                })?;
 
             let base_path = base.to_string_lossy().to_string();
             let test_cmd = TestCommand::from_directory(base).map_err(|e| {
@@ -822,14 +818,13 @@ impl InquestMcpService {
                         or early if status_filter is set and a running test matches that status \
                         (e.g. \"failing\"). Much more efficient than polling inq_running in a loop."
     )]
-    async fn inq_wait(
-        &self,
-        params: Parameters<WaitParam>,
-    ) -> Result<CallToolResult, ErrorData> {
+    async fn inq_wait(&self, params: Parameters<WaitParam>) -> Result<CallToolResult, ErrorData> {
         let timeout = Duration::from_secs(params.0.timeout_secs.unwrap_or(600));
-        let target_run_id = params.0.run_id.as_ref().map(|id| {
-            crate::repository::RunId::new(id)
-        });
+        let target_run_id = params
+            .0
+            .run_id
+            .as_ref()
+            .map(|id| crate::repository::RunId::new(id));
         let status_filter = if let Some(ref filters) = params.0.status_filter {
             Some(parse_status_filters(filters)?)
         } else {
