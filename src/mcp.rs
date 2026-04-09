@@ -136,8 +136,8 @@ pub struct RunParam {
     /// Regex patterns to filter which tests to run
     pub test_filters: Option<Vec<String>>,
     /// Run tests in the background. Returns immediately with the run ID.
-    /// Use inq_running to check progress. Use inq_last or inq_log to see
-    /// partial results while running or final results when done.
+    /// Use inq_wait to block until the run completes, or inq_running to check
+    /// progress. Use inq_last or inq_log to see results when done.
     pub background: Option<bool>,
 }
 
@@ -146,6 +146,20 @@ pub struct RunParam {
 pub struct CancelParam {
     /// Run ID of the background test run to cancel.
     pub run_id: String,
+}
+
+/// Parameters for the wait tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WaitParam {
+    /// Optional run ID to wait for. If not specified, waits for all running tests to complete.
+    pub run_id: Option<String>,
+    /// Optional status filter. If specified, returns early when any test result matches
+    /// this status (e.g. "failing", "failure", "error"). Uses the same filter syntax as
+    /// other tools: "failing" = failure+error+uxsuccess, "passing" = success+skip+xfail,
+    /// or individual statuses like "failure", "error", "success", "skip", "xfail", "uxsuccess".
+    pub status_filter: Option<Vec<String>>,
+    /// Maximum time to wait in seconds. Defaults to 600 (10 minutes).
+    pub timeout_secs: Option<u64>,
 }
 
 fn to_mcp_err(e: impl std::fmt::Display) -> ErrorData {
@@ -795,6 +809,103 @@ impl InquestMcpService {
         )]))
     }
 
+    /// Wait for background test runs to complete.
+    #[tool(
+        description = "Wait for background test runs to complete. Returns when all runs finish, \
+                        or early if status_filter is set and a running test matches that status \
+                        (e.g. \"failing\"). Much more efficient than polling inq_running in a loop."
+    )]
+    async fn inq_wait(
+        &self,
+        params: Parameters<WaitParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let timeout = Duration::from_secs(params.0.timeout_secs.unwrap_or(600));
+        let target_run_id = params.0.run_id.as_ref().map(|id| {
+            crate::repository::RunId::new(id)
+        });
+        let status_filter = if let Some(ref filters) = params.0.status_filter {
+            Some(parse_status_filters(filters)?)
+        } else {
+            None
+        };
+
+        let poll_interval = Duration::from_secs(2);
+        let start = std::time::Instant::now();
+
+        loop {
+            let repo = self.open_repo()?;
+            let running_ids = repo.get_running_run_ids().map_err(to_mcp_err)?;
+
+            let still_running = if let Some(ref target) = target_run_id {
+                running_ids.contains(target)
+            } else {
+                !running_ids.is_empty()
+            };
+
+            if !still_running {
+                let result = serde_json::json!({
+                    "status": "completed",
+                    "message": "No matching runs are in progress",
+                });
+                return Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&result).unwrap(),
+                )]));
+            }
+
+            if let Some(ref statuses) = status_filter {
+                let ids_to_check = if let Some(ref target) = target_run_id {
+                    vec![target.clone()]
+                } else {
+                    running_ids.clone()
+                };
+                for run_id in &ids_to_check {
+                    if let Ok(test_run) = repo.get_test_run(run_id) {
+                        let matching: Vec<_> = test_run
+                            .results
+                            .iter()
+                            .filter(|(_, r)| statuses.contains(&r.status))
+                            .map(|(id, r)| {
+                                serde_json::json!({
+                                    "test_id": id.as_str(),
+                                    "status": format!("{:?}", r.status),
+                                })
+                            })
+                            .collect();
+                        if !matching.is_empty() {
+                            let result = serde_json::json!({
+                                "status": "early_return",
+                                "reason": "Tests matching status filter found while run is still in progress",
+                                "run_id": run_id.as_str(),
+                                "total_tests": test_run.total_tests(),
+                                "passed": test_run.count_successes(),
+                                "failed": test_run.count_failures(),
+                                "matching_tests": matching,
+                            });
+                            return Ok(CallToolResult::success(vec![Content::text(
+                                serde_json::to_string_pretty(&result).unwrap(),
+                            )]));
+                        }
+                    }
+                }
+            }
+
+            drop(repo);
+
+            if start.elapsed() >= timeout {
+                let result = serde_json::json!({
+                    "status": "timeout",
+                    "message": format!("Timed out after {} seconds, runs still in progress", timeout.as_secs()),
+                    "still_running": running_ids.iter().map(|id| id.as_str().to_string()).collect::<Vec<_>>(),
+                });
+                return Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&result).unwrap(),
+                )]));
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
     /// Cancel a running background test execution.
     #[tool(
         description = "Cancel a background test run. Use inq_running to find the run ID of in-progress runs."
@@ -1328,6 +1439,56 @@ mod tests {
 
         // Verify the token was actually cancelled
         assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_inq_wait_no_runs() {
+        let temp = TempDir::new().unwrap();
+        setup_runnable_project(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_wait(Parameters(WaitParam {
+                run_id: None,
+                status_filter: None,
+                timeout_secs: Some(5),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+        assert_eq!(json["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn test_inq_wait_background_run() {
+        let temp = TempDir::new().unwrap();
+        setup_runnable_project(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        // Start a background run
+        let result = service
+            .inq_run(Parameters(RunParam {
+                failing_only: None,
+                concurrency: None,
+                test_filters: None,
+                background: Some(true),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+        let run_id = json["run_id"].as_str().unwrap().to_string();
+
+        // Wait for it to complete
+        let wait_result = service
+            .inq_wait(Parameters(WaitParam {
+                run_id: Some(run_id),
+                status_filter: None,
+                timeout_secs: Some(10),
+            }))
+            .await
+            .unwrap();
+        let wait_json = parse_result(&wait_result);
+        assert_eq!(wait_json["status"], "completed");
     }
 
     #[tokio::test]
