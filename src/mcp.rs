@@ -1702,7 +1702,9 @@ impl InquestMcpService {
                 );
             }
 
-            let concurrency = params.concurrency.unwrap_or(1);
+            let (concurrency, _source) = test_cmd
+                .resolve_concurrency(params.concurrency)
+                .map_err(to_mcp_err)?;
             let calibration_factor =
                 crate::eta::calibration_factor(&calibration_samples, concurrency as u32);
 
