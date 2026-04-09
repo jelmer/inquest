@@ -84,6 +84,7 @@ impl RunCommand {
             base_path: self.base_path.clone(),
             all_output: self.all_output,
             test_args: self.test_args.clone(),
+            cancellation_token: None,
         }
     }
 }

@@ -1214,3 +1214,123 @@ cat "$DIR/pass_a.bin"
     assert_eq!(failing.len(), 1);
     assert_eq!(failing[0].as_str(), "test_b");
 }
+
+#[test]
+fn test_serial_run_with_cancellation() {
+    use inquest::repository::inquest::InquestRepositoryFactory;
+    use inquest::test_executor::{CancellationToken, TestExecutor, TestExecutorConfig};
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    let mut repo = factory.initialise(temp.path()).unwrap();
+
+    // Use sleep 300 as the test command — it would hang without cancellation
+    let config = "test_command = \"sleep 300\"\n";
+    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+    let test_cmd = inquest::testcommand::TestCommand::from_directory(temp.path()).unwrap();
+
+    let token = CancellationToken::new();
+    let token_clone = token.clone();
+
+    // Cancel after 500ms from a background thread
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        token_clone.cancel();
+    });
+
+    let exec_config = TestExecutorConfig {
+        base_path: Some(base_path),
+        all_output: false,
+        test_args: None,
+        cancellation_token: Some(token),
+    };
+    let executor = TestExecutor::new(&exec_config);
+
+    let (run_id, writer) = repo.begin_test_run_raw().unwrap();
+
+    let test_ids = vec![inquest::repository::TestId::new("fake_test")];
+    let historical_times = std::collections::HashMap::new();
+
+    let mut ui = TestUI::new();
+    let start = std::time::Instant::now();
+    let output = executor
+        .run_serial(
+            &mut ui,
+            &test_cmd,
+            Some(&test_ids),
+            None,
+            None,
+            None,
+            run_id,
+            writer,
+            &historical_times,
+        )
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    // Should complete quickly (not hang for 300 seconds)
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "Test took {:?} — cancellation did not kill the process promptly",
+        elapsed
+    );
+    assert!(output.any_command_failed);
+}
+
+#[test]
+fn test_isolated_run_with_cancellation() {
+    use inquest::repository::inquest::InquestRepositoryFactory;
+    use inquest::test_executor::{CancellationToken, TestExecutor, TestExecutorConfig};
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    let config = "test_command = \"sleep 300\"\n";
+    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+    let test_cmd = inquest::testcommand::TestCommand::from_directory(temp.path()).unwrap();
+
+    let token = CancellationToken::new();
+    let token_clone = token.clone();
+
+    // Cancel after 500ms
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        token_clone.cancel();
+    });
+
+    let exec_config = TestExecutorConfig {
+        base_path: Some(base_path),
+        all_output: false,
+        test_args: None,
+        cancellation_token: Some(token),
+    };
+    let executor = TestExecutor::new(&exec_config);
+
+    // Multiple test IDs — cancellation should stop before running all of them
+    let test_ids = vec![
+        inquest::repository::TestId::new("test1"),
+        inquest::repository::TestId::new("test2"),
+        inquest::repository::TestId::new("test3"),
+    ];
+
+    let mut ui = TestUI::new();
+    let start = std::time::Instant::now();
+    let output = executor
+        .run_isolated(&mut ui, &test_cmd, &test_ids, None, None, "0".to_string())
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "Test took {:?} — cancellation did not stop isolated run promptly",
+        elapsed
+    );
+    assert!(output.any_command_failed);
+}
