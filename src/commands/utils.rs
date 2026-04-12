@@ -1,6 +1,8 @@
 //! Utility functions for command implementation
 
-use crate::config::{CONFIG_FILE_NAMES, SLOW_TEST_WARNING_MULTIPLIER};
+use crate::config::{
+    CONFIG_FILE_NAMES, SLOW_TEST_WARNING_MIN_DURATION, SLOW_TEST_WARNING_MULTIPLIER,
+};
 use crate::error::Result;
 use crate::repository::inquest::InquestRepositoryFactory;
 #[cfg(feature = "testr")]
@@ -223,6 +225,9 @@ pub fn warn_slow_tests(
         .values()
         .filter_map(|result| {
             let actual = result.duration?;
+            if actual < SLOW_TEST_WARNING_MIN_DURATION {
+                return None;
+            }
             let historical = historical_times.get(&result.test_id)?;
             let threshold = std::time::Duration::from_secs_f64(
                 historical.as_secs_f64() * SLOW_TEST_WARNING_MULTIPLIER,
@@ -512,6 +517,23 @@ mod tests {
         let output = ui.output.join("\n");
         assert!(output.contains("slow_test"), "got: {}", output);
         assert!(output.contains("slower"), "got: {}", output);
+    }
+
+    #[test]
+    fn test_warn_slow_tests_ignores_very_fast_tests() {
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let mut run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
+        run.add_result(
+            crate::repository::TestResult::success("fast_test")
+                .with_duration(std::time::Duration::from_micros(500)),
+        );
+        let mut historical = std::collections::HashMap::new();
+        historical.insert(
+            crate::repository::TestId::new("fast_test"),
+            std::time::Duration::from_micros(10),
+        );
+        warn_slow_tests(&mut ui, &run, &historical).unwrap();
+        assert!(ui.output.is_empty());
     }
 
     #[test]
