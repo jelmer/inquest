@@ -224,6 +224,10 @@ enum Commands {
         #[arg(long, value_name = "DURATION")]
         no_output_timeout: Option<String>,
 
+        /// Maximum number of test process restarts on timeout or crash
+        #[arg(long, value_name = "N")]
+        max_restarts: Option<usize>,
+
         /// Additional arguments to pass to the test command (use after --)
         #[arg(last = true, value_name = "TESTARGS")]
         testargs: Vec<String>,
@@ -420,6 +424,7 @@ fn main() {
             test_timeout,
             max_duration,
             no_output_timeout,
+            max_restarts,
             testfilters,
             testargs,
         } => {
@@ -482,6 +487,7 @@ fn main() {
                 test_timeout,
                 max_duration,
                 no_output_timeout,
+                max_restarts,
             };
             cmd.execute(&mut ui)
         }

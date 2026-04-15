@@ -24,9 +24,10 @@ pub const AUTO_MAX_DURATION_MINIMUM: Duration = Duration::from_secs(60);
 /// Interval between polls when waiting for a child process with a timeout.
 pub const TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Maximum number of times a test process can be restarted due to per-test
-/// timeouts before giving up. Prevents infinite restart loops when many tests hang.
-pub const MAX_TEST_TIMEOUT_RESTARTS: usize = 10;
+/// Maximum number of times a test process can be restarted (due to per-test
+/// timeouts or crashes) before giving up. Prevents infinite restart loops when
+/// many tests hang or the runner keeps crashing.
+pub const MAX_TEST_RESTARTS: usize = 10;
 
 /// Multiplier for slow test warnings: warn if a test takes longer than this
 /// multiple of its historical average duration.
