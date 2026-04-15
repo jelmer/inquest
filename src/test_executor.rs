@@ -5,7 +5,7 @@
 //! fetching historical times, and persisting results after execution.
 
 use crate::config::{
-    TimeoutSetting, AUTO_MAX_DURATION_MINIMUM, AUTO_TIMEOUT_MULTIPLIER, MAX_TEST_TIMEOUT_RESTARTS,
+    TimeoutSetting, AUTO_MAX_DURATION_MINIMUM, AUTO_TIMEOUT_MULTIPLIER, MAX_TEST_RESTARTS,
 };
 use crate::error::Result;
 use crate::repository::{RunId, TestId, TestResult, TestRun};
@@ -121,6 +121,18 @@ impl std::fmt::Debug for CancellationToken {
     }
 }
 
+/// Reason the test runner exited and a restart is being considered.
+enum RestartReason {
+    /// A test exceeded its per-test timeout and the runner was killed.
+    Timeout { hung_test: String },
+    /// The runner exited with a non-success status (crash, panic, signal)
+    /// while one or more tests were still in progress.
+    Crash {
+        exit_status: std::process::ExitStatus,
+        blamed: HashSet<String>,
+    },
+}
+
 /// Configuration for test execution, independent of CLI argument parsing.
 pub struct TestExecutorConfig {
     /// Working directory for test execution.
@@ -131,6 +143,9 @@ pub struct TestExecutorConfig {
     pub test_args: Option<Vec<String>>,
     /// Optional cancellation token to stop execution.
     pub cancellation_token: Option<CancellationToken>,
+    /// Maximum number of test process restarts on timeout or crash.
+    /// `None` falls back to [`MAX_TEST_RESTARTS`].
+    pub max_restarts: Option<usize>,
 }
 
 impl TestExecutorConfig {
@@ -140,6 +155,10 @@ impl TestExecutorConfig {
         } else {
             subunit_stream::OutputFilter::FailuresOnly
         }
+    }
+
+    fn max_restarts(&self) -> usize {
+        self.max_restarts.unwrap_or(MAX_TEST_RESTARTS)
     }
 }
 
@@ -352,7 +371,9 @@ impl<'a> TestExecutor<'a> {
                 progress_bar.clone(),
             );
 
-            let watchdog = test_timeout_fn.as_ref().map(|_| TestWatchdog::new());
+            // Always construct the watchdog so crash attribution works even
+            // when no per-test timeout is configured.
+            let watchdog = Some(TestWatchdog::new());
             let watchdog_for_thread = watchdog.clone();
             let test_timeout_fn_clone = test_timeout_fn.cloned();
 
@@ -430,7 +451,8 @@ impl<'a> TestExecutor<'a> {
                 all_results.insert(id, result);
             }
 
-            match wait_result {
+            let max_restarts = self.config.max_restarts();
+            let restart_reason: Option<RestartReason> = match wait_result {
                 Err(TimeoutReason::TestTimeout(ref hung_test)) => {
                     tracing::warn!(
                         "test {} timed out, killing process and restarting",
@@ -439,52 +461,9 @@ impl<'a> TestExecutor<'a> {
                     let test_id = TestId::new(hung_test);
                     all_results.insert(test_id.clone(), timeout_error_result(test_id));
                     any_command_failed = true;
-
-                    if !test_cmd.supports_test_filtering() {
-                        tracing::warn!(
-                            "cannot restart: test command does not support \
-                             filtering by test ID ($IDOPTION/$IDFILE/$IDLIST)"
-                        );
-                        break;
-                    }
-
-                    let completed_from_watchdog = watchdog
-                        .as_ref()
-                        .map(|wd| wd.completed_tests())
-                        .unwrap_or_default();
-                    let completed_in_results: HashSet<&str> =
-                        all_results.keys().map(|id| id.as_str()).collect();
-                    let discovered_tests;
-                    let all_test_ids: &[TestId] = if let Some(ref ids) = remaining_tests {
-                        ids
-                    } else {
-                        discovered_tests = test_cmd.list_tests()?;
-                        &discovered_tests
-                    };
-                    let next_remaining = compute_remaining_tests(
-                        all_test_ids,
-                        &completed_from_watchdog,
-                        &completed_in_results,
-                        hung_test,
-                    );
-
-                    restarts += 1;
-                    if restarts >= MAX_TEST_TIMEOUT_RESTARTS || next_remaining.is_empty() {
-                        if restarts >= MAX_TEST_TIMEOUT_RESTARTS {
-                            tracing::error!(
-                                "exceeded maximum restart limit ({}), stopping",
-                                MAX_TEST_TIMEOUT_RESTARTS
-                            );
-                        }
-                        break;
-                    }
-
-                    tracing::warn!(
-                        "restarting test runner with {} remaining tests",
-                        next_remaining.len()
-                    );
-                    remaining_tests = Some(next_remaining);
-                    continue;
+                    Some(RestartReason::Timeout {
+                        hung_test: hung_test.clone(),
+                    })
                 }
                 Err(TimeoutReason::Cancelled) => {
                     tracing::info!("test run cancelled");
@@ -511,12 +490,129 @@ impl<'a> TestExecutor<'a> {
                     break;
                 }
                 Ok(status) => {
-                    if !status.success() {
-                        any_command_failed = true;
+                    if status.success() {
+                        break;
                     }
-                    break;
+                    any_command_failed = true;
+                    // Non-success exit. Only treat this as a crash worth
+                    // restarting when there were tests mid-flight — otherwise
+                    // it's an ordinary failing run that finished on its own.
+                    let in_progress = watchdog
+                        .as_ref()
+                        .map(|wd| wd.in_progress_tests())
+                        .unwrap_or_default();
+                    if in_progress.is_empty() {
+                        break;
+                    }
+                    Some(RestartReason::Crash {
+                        exit_status: status,
+                        blamed: in_progress,
+                    })
+                }
+            };
+
+            let Some(reason) = restart_reason else {
+                break;
+            };
+
+            if !test_cmd.supports_test_filtering() {
+                tracing::warn!(
+                    "cannot restart: test command does not support \
+                     filtering by test ID ($IDOPTION/$IDFILE/$IDLIST)"
+                );
+                break;
+            }
+
+            let completed_from_watchdog = watchdog
+                .as_ref()
+                .map(|wd| wd.completed_tests())
+                .unwrap_or_default();
+            let completed_in_results: HashSet<&str> =
+                all_results.keys().map(|id| id.as_str()).collect();
+            let discovered_tests;
+            let all_test_ids: &[TestId] = if let Some(ref ids) = remaining_tests {
+                ids
+            } else {
+                discovered_tests = test_cmd.list_tests()?;
+                &discovered_tests
+            };
+
+            // Genuine progress = at least one input test reached a terminal
+            // status. Measured BEFORE inserting crash error results so blamed
+            // tests don't inflate progress.
+            let made_progress = all_test_ids.iter().any(|id| {
+                completed_from_watchdog.contains(id.as_str())
+                    || completed_in_results.contains(id.as_str())
+            });
+
+            // Now blame the crashers (if any) so they are recorded as errors
+            // and excluded from the next iteration.
+            if let RestartReason::Crash {
+                ref exit_status,
+                ref blamed,
+            } = reason
+            {
+                for id in blamed {
+                    let test_id = TestId::new(id);
+                    all_results.insert(test_id.clone(), crash_error_result(test_id, exit_status));
                 }
             }
+
+            let hung_test = match &reason {
+                RestartReason::Timeout { hung_test } => hung_test.as_str(),
+                RestartReason::Crash { .. } => "",
+            };
+            let current_completed_in_results: HashSet<&str> =
+                all_results.keys().map(|id| id.as_str()).collect();
+            let next_remaining = compute_remaining_tests(
+                all_test_ids,
+                &completed_from_watchdog,
+                &current_completed_in_results,
+                hung_test,
+            );
+
+            if matches!(reason, RestartReason::Crash { .. }) && !made_progress {
+                tracing::error!(
+                    "test runner exited with {}, and no forward progress was made; \
+                     not restarting",
+                    match &reason {
+                        RestartReason::Crash { exit_status, .. } => format!("{}", exit_status),
+                        _ => unreachable!(),
+                    }
+                );
+                break;
+            }
+
+            restarts += 1;
+            if restarts >= max_restarts || next_remaining.is_empty() {
+                if restarts >= max_restarts {
+                    tracing::error!(
+                        "exceeded maximum restart limit ({}), stopping",
+                        max_restarts
+                    );
+                }
+                break;
+            }
+
+            match &reason {
+                RestartReason::Timeout { .. } => tracing::warn!(
+                    "restarting test runner with {} remaining tests",
+                    next_remaining.len()
+                ),
+                RestartReason::Crash {
+                    exit_status,
+                    blamed,
+                } => tracing::warn!(
+                    "test runner crashed ({}) while running {} test(s) ({}); \
+                     restarting with {} remaining tests",
+                    exit_status,
+                    blamed.len(),
+                    blamed.iter().cloned().collect::<Vec<_>>().join(", "),
+                    next_remaining.len()
+                ),
+            }
+            remaining_tests = Some(next_remaining);
+            continue;
         }
 
         progress_bar.finish_and_clear();
@@ -713,7 +809,9 @@ impl<'a> TestExecutor<'a> {
 
                 let channel_reader = crate::test_runner::ChannelReader::new(rx);
 
-                let worker_watchdog = test_timeout_fn.as_ref().map(|_| TestWatchdog::new());
+                // Always construct the watchdog so crash attribution works
+                // even when no per-test timeout is configured.
+                let worker_watchdog = Some(TestWatchdog::new());
                 let watchdog_for_thread = worker_watchdog.clone();
                 let watchdog_for_supervisor = worker_watchdog.clone();
                 let test_timeout_fn_clone = test_timeout_fn.cloned();
@@ -839,11 +937,12 @@ impl<'a> TestExecutor<'a> {
             }
 
             restarts += 1;
-            if restart_partitions.is_empty() || restarts >= MAX_TEST_TIMEOUT_RESTARTS {
-                if restarts >= MAX_TEST_TIMEOUT_RESTARTS && !restart_partitions.is_empty() {
+            let max_restarts = self.config.max_restarts();
+            if restart_partitions.is_empty() || restarts >= max_restarts {
+                if restarts >= max_restarts && !restart_partitions.is_empty() {
                     tracing::error!(
                         "exceeded maximum restart limit ({}), stopping",
-                        MAX_TEST_TIMEOUT_RESTARTS
+                        max_restarts
                     );
                 }
                 break;
@@ -1338,6 +1437,18 @@ fn timeout_error_result(test_id: TestId) -> TestResult {
     TestResult::error(test_id, "test timed out (killed after per-test timeout)")
 }
 
+/// Create an error result for a test that was in progress when the runner
+/// exited with a non-success status (crash, panic, signal).
+fn crash_error_result(test_id: TestId, exit_status: &std::process::ExitStatus) -> TestResult {
+    TestResult::error(
+        test_id,
+        format!(
+            "test runner exited while this test was running ({})",
+            exit_status
+        ),
+    )
+}
+
 /// Filter out tests that have already completed or timed out, returning the remaining tests.
 fn compute_remaining_tests(
     all_test_ids: &[TestId],
@@ -1574,6 +1685,70 @@ fn compute_restart_partitions(
             }
             Ok(status) if !status.success() => {
                 *any_failed = true;
+                // Non-success exit. Only treat as a crash worth restarting
+                // when there were tests mid-flight on this worker; otherwise
+                // it is an ordinary failing run that finished on its own.
+                let wd = worker_watchdogs.get(worker_id).and_then(|wd| wd.as_ref());
+                let in_progress = wd.map(|wd| wd.in_progress_tests()).unwrap_or_default();
+                if in_progress.is_empty() {
+                    continue;
+                }
+                let completed_from_watchdog = wd.map(|wd| wd.completed_tests()).unwrap_or_default();
+                let completed_in_results: HashSet<String> = all_results
+                    .keys()
+                    .map(|id| id.as_str().to_string())
+                    .collect();
+
+                let original_partition: &[TestId] = &pending_partitions
+                    .iter()
+                    .find(|(wid, _)| wid == worker_id)
+                    .expect("worker_id must exist in pending_partitions")
+                    .1;
+
+                // Genuine progress = at least one partition test completed
+                // (before blaming the crashers). Measure this BEFORE inserting
+                // crash error results so blamed tests don't inflate progress.
+                let made_progress = original_partition.iter().any(|id| {
+                    completed_from_watchdog.contains(id.as_str())
+                        || completed_in_results.contains(id.as_str())
+                });
+
+                // Blame the mid-flight tests.
+                for id in &in_progress {
+                    let test_id = TestId::new(id);
+                    all_results.insert(test_id.clone(), crash_error_result(test_id, status));
+                }
+
+                // Remaining = partition tests that are neither completed nor blamed.
+                let remaining: Vec<TestId> = original_partition
+                    .iter()
+                    .filter(|id| {
+                        !completed_from_watchdog.contains(id.as_str())
+                            && !completed_in_results.contains(id.as_str())
+                            && !in_progress.contains(id.as_str())
+                    })
+                    .cloned()
+                    .collect();
+
+                if !remaining.is_empty() && made_progress {
+                    tracing::warn!(
+                        "worker {} exited with {} while running {} test(s) ({}); \
+                         restarting with {} remaining tests",
+                        worker_id,
+                        status,
+                        in_progress.len(),
+                        in_progress.iter().cloned().collect::<Vec<_>>().join(", "),
+                        remaining.len()
+                    );
+                    restart_partitions.push((*worker_id, remaining));
+                } else if !remaining.is_empty() {
+                    tracing::error!(
+                        "worker {} exited with {} with no forward progress; \
+                         not restarting",
+                        worker_id,
+                        status
+                    );
+                }
             }
             Ok(_) => {}
         }
@@ -1692,6 +1867,7 @@ mod tests {
 #[cfg(test)]
 mod helper_tests {
     use super::*;
+    use crate::repository::TestStatus;
 
     #[test]
     fn test_truncate_test_name_no_truncation_needed() {
@@ -1782,6 +1958,177 @@ mod helper_tests {
         let (filled, empty) = get_progress_bar_colors(0.75);
         assert_eq!(filled, "red");
         assert_eq!(empty, "red");
+    }
+
+    #[cfg(unix)]
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        // The raw wait status encodes exit code in the high byte.
+        std::process::ExitStatus::from_raw(code << 8)
+    }
+
+    #[test]
+    fn test_compute_remaining_tests_filters_completed_and_hung() {
+        let all = vec![
+            TestId::new("a"),
+            TestId::new("b"),
+            TestId::new("c"),
+            TestId::new("d"),
+        ];
+        let completed_from_watchdog: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let completed_in_results: HashSet<&str> = ["b"].into_iter().collect();
+        let remaining =
+            compute_remaining_tests(&all, &completed_from_watchdog, &completed_in_results, "c");
+        assert_eq!(remaining, vec![TestId::new("d")]);
+    }
+
+    #[test]
+    fn test_compute_remaining_tests_empty_hung_keeps_everything_not_completed() {
+        let all = vec![TestId::new("a"), TestId::new("b"), TestId::new("c")];
+        let completed_from_watchdog: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let completed_in_results: HashSet<&str> = HashSet::new();
+        let remaining =
+            compute_remaining_tests(&all, &completed_from_watchdog, &completed_in_results, "");
+        assert_eq!(remaining, vec![TestId::new("b"), TestId::new("c")]);
+    }
+
+    #[test]
+    fn test_crash_error_result_is_error_status() {
+        #[cfg(unix)]
+        {
+            let status = exit_status(139);
+            let result = crash_error_result(TestId::new("mid.flight"), &status);
+            assert_eq!(result.test_id, TestId::new("mid.flight"));
+            assert_eq!(result.status, TestStatus::Error);
+            assert_eq!(
+                result.message.as_deref(),
+                Some("test runner exited while this test was running (exit status: 139)"),
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_compute_restart_partitions_crash_with_in_progress_blames_and_restarts() {
+        let watchdog = TestWatchdog::new();
+        watchdog.on_test_start("a", None);
+        watchdog.on_test_complete("a");
+        watchdog.on_test_start("b", None);
+        // "b" is left in progress — it's the test that crashed the runner.
+
+        let mut supervisor_results = HashMap::new();
+        supervisor_results.insert(0usize, Ok(exit_status(1)));
+
+        let mut worker_watchdogs = HashMap::new();
+        worker_watchdogs.insert(0usize, Some(watchdog));
+
+        let pending_partitions = vec![(
+            0usize,
+            vec![TestId::new("a"), TestId::new("b"), TestId::new("c")],
+        )];
+
+        let mut all_results = HashMap::new();
+        all_results.insert(TestId::new("a"), TestResult::success("a"));
+
+        let mut any_failed = false;
+        let restart = compute_restart_partitions(
+            &supervisor_results,
+            &worker_watchdogs,
+            &pending_partitions,
+            &mut all_results,
+            &mut any_failed,
+            std::time::Instant::now(),
+            None,
+        );
+
+        assert!(any_failed);
+        assert_eq!(restart, vec![(0usize, vec![TestId::new("c")])]);
+        // "b" was blamed with a crash error result.
+        let b_result = all_results
+            .get(&TestId::new("b"))
+            .expect("blamed test must be recorded");
+        assert_eq!(b_result.status, TestStatus::Error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_compute_restart_partitions_crash_without_in_progress_does_not_restart() {
+        // Ordinary failing run: runner exited non-zero but no test was
+        // mid-flight. Should mark failure but not restart, and not inject a
+        // crash error for any test.
+        let watchdog = TestWatchdog::new();
+        watchdog.on_test_start("a", None);
+        watchdog.on_test_complete("a");
+        watchdog.on_test_start("b", None);
+        watchdog.on_test_complete("b");
+
+        let mut supervisor_results = HashMap::new();
+        supervisor_results.insert(0usize, Ok(exit_status(1)));
+
+        let mut worker_watchdogs = HashMap::new();
+        worker_watchdogs.insert(0usize, Some(watchdog));
+
+        let pending_partitions = vec![(0usize, vec![TestId::new("a"), TestId::new("b")])];
+
+        let mut all_results = HashMap::new();
+        all_results.insert(TestId::new("a"), TestResult::success("a"));
+        all_results.insert(
+            TestId::new("b"),
+            TestResult::failure("b", "assertion failed"),
+        );
+
+        let mut any_failed = false;
+        let restart = compute_restart_partitions(
+            &supervisor_results,
+            &worker_watchdogs,
+            &pending_partitions,
+            &mut all_results,
+            &mut any_failed,
+            std::time::Instant::now(),
+            None,
+        );
+
+        assert!(any_failed);
+        assert_eq!(restart, Vec::<(usize, Vec<TestId>)>::new());
+        // "b" keeps its original failure result, not overwritten by a crash error.
+        let b_result = all_results.get(&TestId::new("b")).unwrap();
+        assert_eq!(b_result.status, TestStatus::Failure);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_compute_restart_partitions_crash_with_no_forward_progress_does_not_restart() {
+        // First test crashes immediately — nothing completed, nothing to
+        // shrink the remaining set. Must not restart.
+        let watchdog = TestWatchdog::new();
+        watchdog.on_test_start("a", None);
+
+        let mut supervisor_results = HashMap::new();
+        supervisor_results.insert(0usize, Ok(exit_status(139)));
+
+        let mut worker_watchdogs = HashMap::new();
+        worker_watchdogs.insert(0usize, Some(watchdog));
+
+        let pending_partitions = vec![(0usize, vec![TestId::new("a"), TestId::new("b")])];
+
+        let mut all_results = HashMap::new();
+        let mut any_failed = false;
+        let restart = compute_restart_partitions(
+            &supervisor_results,
+            &worker_watchdogs,
+            &pending_partitions,
+            &mut all_results,
+            &mut any_failed,
+            std::time::Instant::now(),
+            None,
+        );
+
+        assert!(any_failed);
+        assert_eq!(restart, Vec::<(usize, Vec<TestId>)>::new());
+        // "a" was still blamed (recorded as crash error) even though we
+        // give up restarting — the user still sees which test killed the runner.
+        let a_result = all_results.get(&TestId::new("a")).unwrap();
+        assert_eq!(a_result.status, TestStatus::Error);
     }
 
     #[test]
