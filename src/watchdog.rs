@@ -71,8 +71,10 @@ pub struct TestWatchdog {
 
 #[derive(Default)]
 struct WatchdogState {
-    /// Currently in-progress tests with their deadlines.
-    in_progress: HashMap<String, Instant>,
+    /// Currently in-progress tests. The value holds an optional deadline;
+    /// `None` means the test is being tracked for crash attribution but has
+    /// no per-test timeout.
+    in_progress: HashMap<String, Option<Instant>>,
     /// Tests that reached a terminal status.
     completed: HashSet<String>,
 }
@@ -85,14 +87,13 @@ impl TestWatchdog {
         }
     }
 
-    /// Record that a test has started. If `timeout` is `Some`, a deadline is set.
+    /// Record that a test has started. If `timeout` is `Some`, a deadline is
+    /// set for timeout detection; otherwise the test is tracked without a
+    /// deadline so it can still be attributed on a crash.
     pub fn on_test_start(&self, test_id: &str, timeout: Option<Duration>) {
         let mut state = self.inner.lock().unwrap();
-        if let Some(t) = timeout {
-            state
-                .in_progress
-                .insert(test_id.to_string(), Instant::now() + t);
-        }
+        let deadline = timeout.map(|t| Instant::now() + t);
+        state.in_progress.insert(test_id.to_string(), deadline);
     }
 
     /// Record that a test has completed (any terminal status).
@@ -104,15 +105,16 @@ impl TestWatchdog {
 
     /// Check whether any in-progress test has exceeded its deadline.
     ///
-    /// Returns the test ID of the first overdue test, or `None`.
+    /// Returns the test ID of the first overdue test, or `None`. Tests
+    /// tracked without a deadline are ignored.
     pub fn check_timeout(&self) -> Option<String> {
         let state = self.inner.lock().unwrap();
         let now = Instant::now();
-        // Return the test with the earliest expired deadline
         state
             .in_progress
             .iter()
-            .filter(|(_, deadline)| now >= **deadline)
+            .filter_map(|(id, deadline)| deadline.map(|d| (id, d)))
+            .filter(|(_, deadline)| now >= *deadline)
             .min_by_key(|(_, deadline)| *deadline)
             .map(|(id, _)| id.clone())
     }
@@ -120,6 +122,18 @@ impl TestWatchdog {
     /// Snapshot of all test IDs that have completed so far.
     pub fn completed_tests(&self) -> HashSet<String> {
         self.inner.lock().unwrap().completed.clone()
+    }
+
+    /// Snapshot of all test IDs that are currently in progress (started but
+    /// not yet completed). Includes tests tracked without a deadline.
+    pub fn in_progress_tests(&self) -> HashSet<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .in_progress
+            .keys()
+            .cloned()
+            .collect()
     }
 }
 
@@ -244,6 +258,22 @@ mod tests {
         wd.on_test_start("hung", Some(Duration::ZERO));
         std::thread::sleep(Duration::from_millis(1));
         assert_eq!(wd.check_timeout(), Some("hung".to_string()));
+    }
+
+    #[test]
+    fn test_watchdog_in_progress_tests_tracks_without_deadline() {
+        let wd = TestWatchdog::new();
+        wd.on_test_start("a", None);
+        wd.on_test_start("b", Some(Duration::from_secs(60)));
+        assert_eq!(
+            wd.in_progress_tests(),
+            HashSet::from(["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(wd.check_timeout(), None);
+
+        wd.on_test_complete("a");
+        assert_eq!(wd.in_progress_tests(), HashSet::from(["b".to_string()]));
+        assert_eq!(wd.completed_tests(), HashSet::from(["a".to_string()]));
     }
 
     #[test]

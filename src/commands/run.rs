@@ -58,6 +58,8 @@ pub struct RunCommand {
     pub max_duration: TimeoutSetting,
     /// Kill test if no output for this duration
     pub no_output_timeout: Option<Duration>,
+    /// Maximum number of restarts on timeout or crash (None = default).
+    pub max_restarts: Option<usize>,
 }
 
 impl RunCommand {
@@ -85,6 +87,7 @@ impl RunCommand {
             all_output: self.all_output,
             test_args: self.test_args.clone(),
             cancellation_token: None,
+            max_restarts: self.max_restarts,
         }
     }
 }

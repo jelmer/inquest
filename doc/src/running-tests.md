@@ -94,6 +94,35 @@ filtering by test ID (`$IDOPTION`/`$IDFILE`/`$IDLIST` in the command),
 inq restarts the runner with the remaining tests. Otherwise the run
 stops.
 
+### Restarting after a crash
+
+If the test runner exits with a non-success status while one or more
+tests are still in progress (a panic, segfault, or other abnormal
+termination), inq treats this as a crash rather than a normal failing
+run. The in-flight tests are recorded as errors ("test runner exited
+while this test was running"), and — provided the test command supports
+filtering by test ID — inq restarts the runner with the remaining
+tests.
+
+Restart-on-crash only fires when forward progress was made: if the
+first test in a partition crashes the runner without any other test
+completing, inq stops instead of looping. An ordinary failing run,
+where all tests completed and the runner just exits non-zero because
+of the failures, is not treated as a crash and does not trigger a
+restart.
+
+### Maximum number of restarts (`--max-restarts`)
+
+Both timeout and crash restarts share a single budget, defaulting to
+10 restarts per run. Override it with:
+
+```sh
+  $ inq run --max-restarts 3
+```
+
+Once the budget is exhausted, inq stops restarting and reports whatever
+results it has so far.
+
 ### Overall run timeout (`--max-duration`)
 
 Kills the entire test run if it exceeds the given duration:
