@@ -1,6 +1,68 @@
-############################
-testrepository release notes
-############################
+#######################
+inquest release notes
+#######################
+
+0.1.3
++++++
+
+CHANGES
+-------
+
+* Add inquest-native repository format (``.inquest/``) with SQLite metadata.
+  (Jelmer Vernooĳ)
+
+* Store run duration and exit code in run metadata. (Jelmer Vernooĳ)
+
+* Add ``inq info`` command with git dirty tracking. (Jelmer Vernooĳ)
+
+* Add ``inq diff`` command to compare two test runs. (Jelmer Vernooĳ)
+
+* Add ``inq export`` command with JSON, JUnit XML, and TAP output formats.
+  The JUnit XML export lives behind the ``junit`` feature flag.
+  (Jelmer Vernooĳ)
+
+* Add ``inq running`` command and per-run lock files. (Jelmer Vernooĳ)
+
+* Add timeout support and slow test detection for hanging tests, including
+  a per-test timeout watchdog with kill-and-restart for streaming modes.
+  (Jelmer Vernooĳ)
+
+* Restart the test runner on crashes and blame the in-progress test.
+  (Jelmer Vernooĳ)
+
+* Add ``testr`` feature flag for legacy ``.testrepository`` support; make
+  ``gdbm`` depend on ``testr``. (Jelmer Vernooĳ)
+
+* Add ``--max-iterations`` flag and validate configuration early.
+  (Jelmer Vernooĳ)
+
+* Add basic manpage. (Jelmer Vernooĳ)
+
+MCP SERVER
+----------
+
+* Expose remaining commands via the MCP server, including background
+  execution, cancellation, and the ``inq_wait`` tool for blocking on
+  background test runs. (Jelmer Vernooĳ)
+
+* Add ``status_filter`` parameter to the ``inq_log`` MCP tool.
+  (Jelmer Vernooĳ)
+
+* Auto-initialize repository for background MCP test runs.
+  (Jelmer Vernooĳ)
+
+INTERNALS
+---------
+
+* Add ``RunId`` newtype for type-safe run identifiers. (Jelmer Vernooĳ)
+
+* Fix Windows compatibility: cross-platform PID liveness check, process
+  tree killing, and TOML config generation in tests. (Jelmer Vernooĳ)
+
+* Skip slow-test warnings for sub-millisecond tests. (Jelmer Vernooĳ)
+
+testrepository release notes (historical)
++++++++++++++++++++++++++++++++++++++++++
 
 0.0.22
 ++++++
