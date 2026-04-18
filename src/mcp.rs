@@ -9,6 +9,7 @@ use rmcp::model::{
     CallToolResult, Content, ErrorData, Implementation, ServerCapabilities, ServerInfo,
 };
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use serde::Serialize;
 
 use crate::commands::utils::{open_or_init_repository, open_repository, resolve_run_id};
 use crate::repository::inquest::InquestRepositoryFactory;
@@ -104,10 +105,24 @@ pub struct DiffParam {
     pub run1: Option<String>,
     /// Second run ID (defaults to latest; supports negative indices like -1, -2)
     pub run2: Option<String>,
+    /// Max number of test IDs to return per category (new_failures, new_passes, etc.).
+    /// Default 50. The response reports totals so you know if more exist.
+    pub limit: Option<usize>,
+}
+
+/// Parameters for tools that return a potentially large list of test IDs.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListParam {
+    /// Max number of test IDs to return (default 100). The response reports `total`
+    /// and `truncated` so you know if more exist.
+    pub limit: Option<usize>,
+    /// Number of items to skip before returning results (default 0). Use with `limit`
+    /// to page through large lists.
+    pub offset: Option<usize>,
 }
 
 /// Parameters for the log tool.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct LogParam {
     /// Run ID to query (defaults to latest; supports negative indices like -1, -2)
     pub run_id: Option<String>,
@@ -117,6 +132,12 @@ pub struct LogParam {
     /// "uxsuccess". Also accepts "failing" (equivalent to failure+error+uxsuccess) and
     /// "passing" (equivalent to success+skip+xfail). If empty, shows all statuses.
     pub status_filter: Option<Vec<String>>,
+    /// Max number of results to return (default 20). Use a larger value when you need
+    /// the full list; the response reports `total` and `truncated` so you know if more exist.
+    pub limit: Option<usize>,
+    /// Include failure messages and full tracebacks in each result. Off by default to
+    /// keep responses small — enable when investigating a specific failure.
+    pub include_details: Option<bool>,
 }
 
 /// Parameters for the analyze-isolation tool.
@@ -170,6 +191,276 @@ fn duration_secs(d: Duration) -> f64 {
     d.as_secs_f64()
 }
 
+fn ok_json<T: Serialize>(value: &T) -> Result<CallToolResult, ErrorData> {
+    let text = serde_json::to_string(value)
+        .map_err(|e| ErrorData::internal_error(format!("serialize response: {}", e), None))?;
+    Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
+fn take_limited<T>(mut items: Vec<T>, limit: usize) -> (Vec<T>, usize) {
+    if items.len() <= limit {
+        (items, 0)
+    } else {
+        let extra = items.len() - limit;
+        items.truncate(limit);
+        (items, extra)
+    }
+}
+
+#[derive(Serialize)]
+struct RunSummary {
+    id: String,
+    total_tests: usize,
+    passed: usize,
+    failed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_secs: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct StatsResponse {
+    run_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_run: Option<RunSummary>,
+}
+
+#[derive(Serialize)]
+struct FailingResponse {
+    count: usize,
+    total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<usize>,
+    tests: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct LastResponse {
+    id: String,
+    timestamp: String,
+    total_tests: usize,
+    passed: usize,
+    failed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_secs: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failing_tests: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interruption: Option<String>,
+}
+
+#[derive(Serialize)]
+struct StatusChange {
+    test_id: String,
+    old_status: String,
+    new_status: String,
+}
+
+#[derive(Serialize)]
+struct DiffResponse {
+    run1: String,
+    run2: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    new_failures: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    new_passes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    status_changed: Vec<StatusChange>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    added_tests: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    removed_tests: Vec<String>,
+    #[serde(skip_serializing_if = "DiffTruncated::is_empty")]
+    truncated: DiffTruncated,
+}
+
+#[derive(Serialize, Default)]
+struct DiffTruncated {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_failures: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_passes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_changed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    added_tests: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    removed_tests: Option<usize>,
+}
+
+impl DiffTruncated {
+    fn is_empty(&self) -> bool {
+        self.new_failures.is_none()
+            && self.new_passes.is_none()
+            && self.status_changed.is_none()
+            && self.added_tests.is_none()
+            && self.removed_tests.is_none()
+    }
+}
+
+#[derive(Serialize)]
+struct SlowTest {
+    test_id: String,
+    duration_secs: f64,
+    percentage: f64,
+}
+
+#[derive(Serialize)]
+struct SlowestResponse {
+    total_time_secs: f64,
+    tests: Vec<SlowTest>,
+}
+
+#[derive(Serialize)]
+struct LogEntry {
+    test_id: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_secs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LogResponse {
+    run_id: String,
+    count: usize,
+    total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<usize>,
+    results: Vec<LogEntry>,
+}
+
+#[derive(Serialize)]
+struct RunResponse {
+    exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_tests: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    passed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_secs: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failing_tests: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interruption: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BackgroundStartedResponse {
+    status: &'static str,
+    run_id: String,
+}
+
+#[derive(Serialize)]
+struct ListTestsResponse {
+    count: usize,
+    total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<usize>,
+    tests: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct InfoResponse {
+    id: String,
+    timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_dirty: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    concurrency: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wall_duration_secs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+    total_tests: usize,
+    passed: usize,
+    failed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_test_time_secs: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct RunningEntry {
+    id: String,
+    total_tests: usize,
+    passed: usize,
+    failed: usize,
+    elapsed_secs: i64,
+}
+
+#[derive(Serialize)]
+struct RunningResponse {
+    count: usize,
+    runs: Vec<RunningEntry>,
+}
+
+#[derive(Serialize)]
+struct WaitMatchingTest {
+    test_id: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WaitResponse {
+    Completed {
+        status: &'static str,
+        message: &'static str,
+    },
+    EarlyReturn {
+        status: &'static str,
+        reason: &'static str,
+        run_id: String,
+        total_tests: usize,
+        passed: usize,
+        failed: usize,
+        matching_tests: Vec<WaitMatchingTest>,
+    },
+    Timeout {
+        status: &'static str,
+        message: String,
+        still_running: Vec<String>,
+    },
+}
+
+#[derive(Serialize)]
+struct CancelResponse {
+    status: &'static str,
+    run_id: String,
+}
+
+#[derive(Serialize)]
+struct InitResponse {
+    status: &'static str,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct AutoResponse {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AnalyzeIsolationResponse {
+    exit_code: i32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    output: Vec<String>,
+}
+
 /// Parse status filter strings into a set of TestStatus values.
 ///
 /// Accepts individual status names ("success", "failure", "error", "skip", "xfail", "uxsuccess")
@@ -221,42 +512,55 @@ impl InquestMcpService {
         let run_count = repo.count().map_err(to_mcp_err)?;
         let run_ids = repo.list_run_ids().map_err(to_mcp_err)?;
 
-        let mut result = serde_json::json!({
-            "run_count": run_count,
-        });
-
-        if !run_ids.is_empty() {
+        let latest_run = if run_ids.is_empty() {
+            None
+        } else {
             let latest = repo.get_latest_run().map_err(to_mcp_err)?;
-            let duration = latest.total_duration().map(duration_secs);
-            result["latest_run"] = serde_json::json!({
-                "id": latest.id,
-                "total_tests": latest.total_tests(),
-                "passed": latest.count_successes(),
-                "failed": latest.count_failures(),
-                "duration_secs": duration,
-            });
-        }
+            Some(RunSummary {
+                id: latest.id.as_str().to_string(),
+                total_tests: latest.total_tests(),
+                passed: latest.count_successes(),
+                failed: latest.count_failures(),
+                duration_secs: latest.total_duration().map(duration_secs),
+            })
+        };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
-        )]))
+        ok_json(&StatsResponse {
+            run_count,
+            latest_run,
+        })
     }
 
     /// List currently failing tests from the repository.
-    #[tool(description = "List currently failing tests from the repository")]
-    async fn inq_failing(&self) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "List currently failing tests from the repository. Paginated — default limit is 100."
+    )]
+    async fn inq_failing(
+        &self,
+        params: Parameters<ListParam>,
+    ) -> Result<CallToolResult, ErrorData> {
         let repo = self.open_repo()?;
         let failing = repo.get_failing_tests().map_err(to_mcp_err)?;
 
-        let test_ids: Vec<&str> = failing.iter().map(|id| id.as_str()).collect();
-        let result = serde_json::json!({
-            "count": test_ids.len(),
-            "tests": test_ids,
-        });
+        let total = failing.len();
+        let offset = params.0.offset.unwrap_or(0);
+        let limit = params.0.limit.unwrap_or(100);
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
-        )]))
+        let tests: Vec<String> = failing
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|id| id.as_str().to_string())
+            .collect();
+        let returned = tests.len();
+        let truncated = total.saturating_sub(offset + returned);
+
+        ok_json(&FailingResponse {
+            count: returned,
+            total,
+            truncated: (truncated > 0).then_some(truncated),
+            tests,
+        })
     }
 
     /// Show results from the last (or a specific) test run.
@@ -268,28 +572,20 @@ impl InquestMcpService {
         let run_id = resolve_run_id(&*repo, params.0.run_id.as_deref()).map_err(to_mcp_err)?;
         let test_run = repo.get_test_run(&run_id).map_err(to_mcp_err)?;
 
-        let failing_tests: Vec<&str> = test_run
-            .get_failing_tests()
-            .iter()
-            .map(|id| id.as_str())
-            .collect();
-
-        let duration = test_run.total_duration().map(duration_secs);
-        let interruption = test_run.interruption.as_ref().map(|i| i.to_string());
-        let result = serde_json::json!({
-            "id": test_run.id,
-            "timestamp": test_run.timestamp.to_rfc3339(),
-            "total_tests": test_run.total_tests(),
-            "passed": test_run.count_successes(),
-            "failed": test_run.count_failures(),
-            "duration_secs": duration,
-            "failing_tests": failing_tests,
-            "interruption": interruption,
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
-        )]))
+        ok_json(&LastResponse {
+            id: test_run.id.as_str().to_string(),
+            timestamp: test_run.timestamp.to_rfc3339(),
+            total_tests: test_run.total_tests(),
+            passed: test_run.count_successes(),
+            failed: test_run.count_failures(),
+            duration_secs: test_run.total_duration().map(duration_secs),
+            failing_tests: test_run
+                .get_failing_tests()
+                .iter()
+                .map(|id| id.as_str().to_string())
+                .collect(),
+            interruption: test_run.interruption.as_ref().map(|i| i.to_string()),
+        })
     }
 
     /// Compare two test runs and show what changed.
@@ -334,9 +630,9 @@ impl InquestMcpService {
         let ids1: BTreeSet<&crate::repository::TestId> = run1.results.keys().collect();
         let ids2: BTreeSet<&crate::repository::TestId> = run2.results.keys().collect();
 
-        let mut new_failures = Vec::new();
-        let mut new_passes = Vec::new();
-        let mut status_changed = Vec::new();
+        let mut new_failures: Vec<String> = Vec::new();
+        let mut new_passes: Vec<String> = Vec::new();
+        let mut status_changed: Vec<StatusChange> = Vec::new();
 
         for id in ids1.intersection(&ids2) {
             let r1 = &run1.results[*id];
@@ -345,34 +641,50 @@ impl InquestMcpService {
                 continue;
             }
             if r2.status.is_failure() && r1.status.is_success() {
-                new_failures.push(r2.test_id.as_str());
+                new_failures.push(r2.test_id.as_str().to_string());
             } else if r2.status.is_success() && r1.status.is_failure() {
-                new_passes.push(r2.test_id.as_str());
+                new_passes.push(r2.test_id.as_str().to_string());
             } else {
-                status_changed.push(serde_json::json!({
-                    "test_id": r2.test_id.as_str(),
-                    "old_status": r1.status.to_string(),
-                    "new_status": r2.status.to_string(),
-                }));
+                status_changed.push(StatusChange {
+                    test_id: r2.test_id.as_str().to_string(),
+                    old_status: r1.status.to_string(),
+                    new_status: r2.status.to_string(),
+                });
             }
         }
 
-        let added: Vec<&str> = ids2.difference(&ids1).map(|id| id.as_str()).collect();
-        let removed: Vec<&str> = ids1.difference(&ids2).map(|id| id.as_str()).collect();
+        let added: Vec<String> = ids2
+            .difference(&ids1)
+            .map(|id| id.as_str().to_string())
+            .collect();
+        let removed: Vec<String> = ids1
+            .difference(&ids2)
+            .map(|id| id.as_str().to_string())
+            .collect();
 
-        let result = serde_json::json!({
-            "run1": id1,
-            "run2": id2,
-            "new_failures": new_failures,
-            "new_passes": new_passes,
-            "status_changed": status_changed,
-            "added_tests": added,
-            "removed_tests": removed,
-        });
+        let limit = params.0.limit.unwrap_or(50);
+        let (new_failures, nf_extra) = take_limited(new_failures, limit);
+        let (new_passes, np_extra) = take_limited(new_passes, limit);
+        let (status_changed, sc_extra) = take_limited(status_changed, limit);
+        let (added_tests, ad_extra) = take_limited(added, limit);
+        let (removed_tests, rm_extra) = take_limited(removed, limit);
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
-        )]))
+        ok_json(&DiffResponse {
+            run1: id1.as_str().to_string(),
+            run2: id2.as_str().to_string(),
+            new_failures,
+            new_passes,
+            status_changed,
+            added_tests,
+            removed_tests,
+            truncated: DiffTruncated {
+                new_failures: (nf_extra > 0).then_some(nf_extra),
+                new_passes: (np_extra > 0).then_some(np_extra),
+                status_changed: (sc_extra > 0).then_some(sc_extra),
+                added_tests: (ad_extra > 0).then_some(ad_extra),
+                removed_tests: (rm_extra > 0).then_some(rm_extra),
+            },
+        })
     }
 
     /// Show the slowest tests from the last run.
@@ -398,32 +710,34 @@ impl InquestMcpService {
             .sum();
         let count = params.0.count.unwrap_or(10).min(tests_with_duration.len());
 
-        let slowest: Vec<serde_json::Value> = tests_with_duration
+        let tests: Vec<SlowTest> = tests_with_duration
             .iter()
             .take(count)
             .map(|&(id, dur)| {
                 let secs = dur.as_secs_f64();
-                serde_json::json!({
-                    "test_id": id,
-                    "duration_secs": secs,
-                    "percentage": if total_secs > 0.0 { (secs / total_secs) * 100.0 } else { 0.0 },
-                })
+                SlowTest {
+                    test_id: id.to_string(),
+                    duration_secs: secs,
+                    percentage: if total_secs > 0.0 {
+                        (secs / total_secs) * 100.0
+                    } else {
+                        0.0
+                    },
+                }
             })
             .collect();
 
-        let result = serde_json::json!({
-            "total_time_secs": total_secs,
-            "tests": slowest,
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
-        )]))
+        ok_json(&SlowestResponse {
+            total_time_secs: total_secs,
+            tests,
+        })
     }
 
     /// Show test details and tracebacks.
     #[tool(
-        description = "Show test details including status, duration, and tracebacks for matching tests"
+        description = "Show test details (status, duration) for matching tests. Paginated — \
+                        default limit is 20. Failure messages and tracebacks are omitted \
+                        unless include_details=true."
     )]
     async fn inq_log(&self, params: Parameters<LogParam>) -> Result<CallToolResult, ErrorData> {
         let repo = self.open_repo()?;
@@ -450,6 +764,8 @@ impl InquestMcpService {
             .map_err(|e| ErrorData::invalid_params(format!("Invalid glob pattern: {}", e), None))?;
 
         let status_filters = parse_status_filters(&params.0.status_filter.unwrap_or_default())?;
+        let limit = params.0.limit.unwrap_or(20);
+        let include_details = params.0.include_details.unwrap_or(false);
 
         let mut matching: Vec<_> = test_run
             .results
@@ -463,29 +779,36 @@ impl InquestMcpService {
             .collect();
         matching.sort_by(|a, b| a.test_id.as_str().cmp(b.test_id.as_str()));
 
-        let results: Vec<serde_json::Value> = matching
+        let total = matching.len();
+        let truncated = total.saturating_sub(limit);
+
+        let results: Vec<LogEntry> = matching
             .iter()
-            .map(|r| {
-                let dur = r.duration.map(duration_secs);
-                serde_json::json!({
-                    "test_id": r.test_id.as_str(),
-                    "status": r.status.to_string(),
-                    "duration_secs": dur,
-                    "message": r.message,
-                    "details": r.details,
-                })
+            .take(limit)
+            .map(|r| LogEntry {
+                test_id: r.test_id.as_str().to_string(),
+                status: r.status.to_string(),
+                duration_secs: r.duration.map(duration_secs),
+                message: if include_details {
+                    r.message.clone()
+                } else {
+                    None
+                },
+                details: if include_details {
+                    r.details.clone()
+                } else {
+                    None
+                },
             })
             .collect();
 
-        let result = serde_json::json!({
-            "run_id": run_id,
-            "count": results.len(),
-            "results": results,
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
-        )]))
+        ok_json(&LogResponse {
+            run_id: run_id.as_str().to_string(),
+            count: results.len(),
+            total,
+            truncated: (truncated > 0).then_some(truncated),
+            results,
+        })
     }
 
     /// Execute tests and return results.
@@ -530,13 +853,17 @@ impl InquestMcpService {
             let mut test_ids = if failing_only {
                 let failing = repo.get_failing_tests().map_err(to_mcp_err)?;
                 if failing.is_empty() {
-                    let result = serde_json::json!({
-                        "exit_code": 0,
-                        "message": "No failing tests to run",
+                    return ok_json(&RunResponse {
+                        exit_code: 0,
+                        message: Some("No failing tests to run".to_string()),
+                        id: None,
+                        total_tests: None,
+                        passed: None,
+                        failed: None,
+                        duration_secs: None,
+                        failing_tests: Vec::new(),
+                        interruption: None,
                     });
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        serde_json::to_string_pretty(&result).unwrap(),
-                    )]));
                 }
                 Some(failing)
             } else {
@@ -663,14 +990,10 @@ impl InquestMcpService {
                     .remove(&run_id_for_cleanup);
             });
 
-            let result = serde_json::json!({
-                "status": "started",
-                "run_id": run_id_for_response,
+            return ok_json(&BackgroundStartedResponse {
+                status: "started",
+                run_id: run_id_for_response.as_str().to_string(),
             });
-
-            return Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&result).unwrap(),
-            )]));
         }
 
         // Foreground execution
@@ -694,43 +1017,45 @@ impl InquestMcpService {
             let repo = self.open_repo()?;
             let test_run = repo.get_test_run(run_id).map_err(to_mcp_err)?;
 
-            let failing_tests: Vec<&str> = test_run
-                .get_failing_tests()
-                .iter()
-                .map(|id| id.as_str())
-                .collect();
-
-            let duration = test_run.total_duration().map(duration_secs);
-            let interruption = test_run.interruption.as_ref().map(|i| i.to_string());
-            let result = serde_json::json!({
-                "exit_code": cli_output.exit_code,
-                "id": run_id,
-                "total_tests": test_run.total_tests(),
-                "passed": test_run.count_successes(),
-                "failed": test_run.count_failures(),
-                "duration_secs": duration,
-                "failing_tests": failing_tests,
-                "interruption": interruption,
-            });
-
-            Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&result).unwrap(),
-            )]))
+            ok_json(&RunResponse {
+                exit_code: cli_output.exit_code,
+                id: Some(run_id.as_str().to_string()),
+                total_tests: Some(test_run.total_tests()),
+                passed: Some(test_run.count_successes()),
+                failed: Some(test_run.count_failures()),
+                duration_secs: test_run.total_duration().map(duration_secs),
+                failing_tests: test_run
+                    .get_failing_tests()
+                    .iter()
+                    .map(|id| id.as_str().to_string())
+                    .collect(),
+                interruption: test_run.interruption.as_ref().map(|i| i.to_string()),
+                message: None,
+            })
         } else {
-            let result = serde_json::json!({
-                "exit_code": cli_output.exit_code,
-                "message": "No tests were executed",
-            });
-
-            Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&result).unwrap(),
-            )]))
+            ok_json(&RunResponse {
+                exit_code: cli_output.exit_code,
+                id: None,
+                total_tests: None,
+                passed: None,
+                failed: None,
+                duration_secs: None,
+                failing_tests: Vec::new(),
+                interruption: None,
+                message: Some("No tests were executed".to_string()),
+            })
         }
     }
 
     /// List available tests.
-    #[tool(description = "List all available tests discovered by the test command")]
-    async fn inq_list_tests(&self) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "List all available tests discovered by the test command. \
+                        Paginated — default limit is 100."
+    )]
+    async fn inq_list_tests(
+        &self,
+        params: Parameters<ListParam>,
+    ) -> Result<CallToolResult, ErrorData> {
         let test_cmd = TestCommand::from_directory(&self.directory).map_err(|e| {
             ErrorData::internal_error(format!("Failed to load config: {}", e), None)
         })?;
@@ -739,15 +1064,24 @@ impl InquestMcpService {
             .list_tests()
             .map_err(|e| ErrorData::internal_error(format!("Failed to list tests: {}", e), None))?;
 
-        let ids: Vec<&str> = test_ids.iter().map(|id| id.as_str()).collect();
-        let result = serde_json::json!({
-            "count": ids.len(),
-            "tests": ids,
-        });
+        let total = test_ids.len();
+        let offset = params.0.offset.unwrap_or(0);
+        let limit = params.0.limit.unwrap_or(100);
+        let tests: Vec<String> = test_ids
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|id| id.as_str().to_string())
+            .collect();
+        let returned = tests.len();
+        let truncated = total.saturating_sub(offset + returned);
 
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
-        )]))
+        ok_json(&ListTestsResponse {
+            count: returned,
+            total,
+            truncated: (truncated > 0).then_some(truncated),
+            tests,
+        })
     }
 
     /// Show detailed information about a test run including metadata.
@@ -760,25 +1094,20 @@ impl InquestMcpService {
         let test_run = repo.get_test_run(&run_id).map_err(to_mcp_err)?;
         let metadata = repo.get_run_metadata(&run_id).map_err(to_mcp_err)?;
 
-        let duration = test_run.total_duration().map(duration_secs);
-        let result = serde_json::json!({
-            "id": run_id,
-            "timestamp": test_run.timestamp.to_rfc3339(),
-            "git_commit": metadata.git_commit,
-            "git_dirty": metadata.git_dirty,
-            "command": metadata.command,
-            "concurrency": metadata.concurrency,
-            "wall_duration_secs": metadata.duration_secs,
-            "exit_code": metadata.exit_code,
-            "total_tests": test_run.total_tests(),
-            "passed": test_run.count_successes(),
-            "failed": test_run.count_failures(),
-            "total_test_time_secs": duration,
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
-        )]))
+        ok_json(&InfoResponse {
+            id: run_id.as_str().to_string(),
+            timestamp: test_run.timestamp.to_rfc3339(),
+            git_commit: metadata.git_commit,
+            git_dirty: metadata.git_dirty,
+            command: metadata.command,
+            concurrency: metadata.concurrency,
+            wall_duration_secs: metadata.duration_secs,
+            exit_code: metadata.exit_code,
+            total_tests: test_run.total_tests(),
+            passed: test_run.count_successes(),
+            failed: test_run.count_failures(),
+            total_test_time_secs: test_run.total_duration().map(duration_secs),
+        })
     }
 
     /// Show currently in-progress test runs.
@@ -788,29 +1117,24 @@ impl InquestMcpService {
         let run_ids = repo.get_running_run_ids().map_err(to_mcp_err)?;
 
         let now = chrono::Utc::now();
-        let runs: Vec<serde_json::Value> = run_ids
+        let runs: Vec<RunningEntry> = run_ids
             .iter()
             .filter_map(|run_id| {
                 let test_run = repo.get_test_run(run_id).ok()?;
-                let elapsed_secs = (now - test_run.timestamp).num_seconds();
-                Some(serde_json::json!({
-                    "id": run_id,
-                    "total_tests": test_run.total_tests(),
-                    "passed": test_run.count_successes(),
-                    "failed": test_run.count_failures(),
-                    "elapsed_secs": elapsed_secs,
-                }))
+                Some(RunningEntry {
+                    id: run_id.as_str().to_string(),
+                    total_tests: test_run.total_tests(),
+                    passed: test_run.count_successes(),
+                    failed: test_run.count_failures(),
+                    elapsed_secs: (now - test_run.timestamp).num_seconds(),
+                })
             })
             .collect();
 
-        let result = serde_json::json!({
-            "count": runs.len(),
-            "runs": runs,
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
-        )]))
+        ok_json(&RunningResponse {
+            count: runs.len(),
+            runs,
+        })
     }
 
     /// Wait for background test runs to complete.
@@ -846,13 +1170,10 @@ impl InquestMcpService {
             };
 
             if !still_running {
-                let result = serde_json::json!({
-                    "status": "completed",
-                    "message": "No matching runs are in progress",
+                return ok_json(&WaitResponse::Completed {
+                    status: "completed",
+                    message: "No matching runs are in progress",
                 });
-                return Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&result).unwrap(),
-                )]));
             }
 
             if let Some(ref statuses) = status_filter {
@@ -863,30 +1184,25 @@ impl InquestMcpService {
                 };
                 for run_id in &ids_to_check {
                     if let Ok(test_run) = repo.get_test_run(run_id) {
-                        let matching: Vec<_> = test_run
+                        let matching: Vec<WaitMatchingTest> = test_run
                             .results
                             .iter()
                             .filter(|(_, r)| statuses.contains(&r.status))
-                            .map(|(id, r)| {
-                                serde_json::json!({
-                                    "test_id": id.as_str(),
-                                    "status": format!("{:?}", r.status),
-                                })
+                            .map(|(id, r)| WaitMatchingTest {
+                                test_id: id.as_str().to_string(),
+                                status: format!("{:?}", r.status),
                             })
                             .collect();
                         if !matching.is_empty() {
-                            let result = serde_json::json!({
-                                "status": "early_return",
-                                "reason": "Tests matching status filter found while run is still in progress",
-                                "run_id": run_id.as_str(),
-                                "total_tests": test_run.total_tests(),
-                                "passed": test_run.count_successes(),
-                                "failed": test_run.count_failures(),
-                                "matching_tests": matching,
+                            return ok_json(&WaitResponse::EarlyReturn {
+                                status: "early_return",
+                                reason: "Tests matching status filter found while run is still in progress",
+                                run_id: run_id.as_str().to_string(),
+                                total_tests: test_run.total_tests(),
+                                passed: test_run.count_successes(),
+                                failed: test_run.count_failures(),
+                                matching_tests: matching,
                             });
-                            return Ok(CallToolResult::success(vec![Content::text(
-                                serde_json::to_string_pretty(&result).unwrap(),
-                            )]));
                         }
                     }
                 }
@@ -895,14 +1211,17 @@ impl InquestMcpService {
             drop(repo);
 
             if start.elapsed() >= timeout {
-                let result = serde_json::json!({
-                    "status": "timeout",
-                    "message": format!("Timed out after {} seconds, runs still in progress", timeout.as_secs()),
-                    "still_running": running_ids.iter().map(|id| id.as_str().to_string()).collect::<Vec<_>>(),
+                return ok_json(&WaitResponse::Timeout {
+                    status: "timeout",
+                    message: format!(
+                        "Timed out after {} seconds, runs still in progress",
+                        timeout.as_secs()
+                    ),
+                    still_running: running_ids
+                        .iter()
+                        .map(|id| id.as_str().to_string())
+                        .collect(),
                 });
-                return Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&result).unwrap(),
-                )]));
             }
 
             tokio::time::sleep(poll_interval).await;
@@ -929,13 +1248,10 @@ impl InquestMcpService {
 
         if let Some(token) = token {
             token.cancel();
-            let result = serde_json::json!({
-                "status": "cancelling",
-                "run_id": run_id,
-            });
-            Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&result).unwrap(),
-            )]))
+            ok_json(&CancelResponse {
+                status: "cancelling",
+                run_id: run_id.clone(),
+            })
         } else {
             Err(ErrorData::invalid_params(
                 format!(
@@ -953,13 +1269,14 @@ impl InquestMcpService {
     async fn inq_init(&self) -> Result<CallToolResult, ErrorData> {
         let factory = InquestRepositoryFactory;
         match factory.initialise(&self.directory) {
-            Ok(_) => Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "status": "initialized",
-                    "path": self.directory.join(".inquest").to_string_lossy(),
-                }))
-                .unwrap(),
-            )])),
+            Ok(_) => ok_json(&InitResponse {
+                status: "initialized",
+                path: self
+                    .directory
+                    .join(".inquest")
+                    .to_string_lossy()
+                    .into_owned(),
+            }),
             Err(e) => Err(ErrorData::internal_error(
                 format!("Failed to initialize repository: {}", e),
                 None,
@@ -987,14 +1304,11 @@ impl InquestMcpService {
             return Err(ErrorData::internal_error(msg, None));
         }
 
-        let result = serde_json::json!({
-            "status": "created",
-            "message": ui.output.join("\n"),
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
-        )]))
+        let message = ui.output.join("\n");
+        ok_json(&AutoResponse {
+            status: "created",
+            message: (!message.is_empty()).then_some(message),
+        })
     }
 
     /// Analyze test isolation issues using bisection.
@@ -1014,14 +1328,10 @@ impl InquestMcpService {
 
         let mut all_output = ui.output;
         all_output.extend(ui.errors);
-        let result = serde_json::json!({
-            "exit_code": exit_code,
-            "output": all_output,
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
-        )]))
+        ok_json(&AnalyzeIsolationResponse {
+            exit_code,
+            output: all_output,
+        })
     }
 }
 
@@ -1108,10 +1418,14 @@ mod tests {
         let _repo = setup_repo_with_run(&temp);
         let service = InquestMcpService::new(temp.path().to_path_buf());
 
-        let result = service.inq_failing().await.unwrap();
+        let result = service
+            .inq_failing(Parameters(ListParam::default()))
+            .await
+            .unwrap();
         let json = parse_result(&result);
 
         assert_eq!(json["count"], 1);
+        assert_eq!(json["total"], 1);
         assert_eq!(json["tests"][0], "test_fail");
     }
 
@@ -1266,6 +1580,8 @@ mod tests {
                 run_id: None,
                 test_patterns: Some(vec!["test_fail".to_string()]),
                 status_filter: None,
+                limit: None,
+                include_details: None,
             }))
             .await
             .unwrap();
@@ -1288,6 +1604,8 @@ mod tests {
                 run_id: None,
                 test_patterns: None,
                 status_filter: Some(vec!["failure".to_string()]),
+                limit: None,
+                include_details: None,
             }))
             .await
             .unwrap();
@@ -1301,6 +1619,8 @@ mod tests {
                 run_id: None,
                 test_patterns: None,
                 status_filter: Some(vec!["success".to_string()]),
+                limit: None,
+                include_details: None,
             }))
             .await
             .unwrap();
@@ -1314,6 +1634,8 @@ mod tests {
                 run_id: None,
                 test_patterns: None,
                 status_filter: Some(vec!["failing".to_string()]),
+                limit: None,
+                include_details: None,
             }))
             .await
             .unwrap();
@@ -1333,6 +1655,8 @@ mod tests {
                 run_id: None,
                 test_patterns: None,
                 status_filter: Some(vec!["bogus".to_string()]),
+                limit: None,
+                include_details: None,
             }))
             .await;
         assert!(result.is_err());

@@ -50,7 +50,7 @@ pub fn partition_tests(
     }
 
     // Sort tests with durations from longest to shortest
-    with_duration.sort_by(|a, b| b.1.cmp(&a.1));
+    with_duration.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     // Initialize partitions with expected runtime tracking
     let mut partitions: Vec<(Vec<TestId>, Duration)> = (0..concurrency)
@@ -127,7 +127,7 @@ pub fn partition_tests_with_grouping(
         .collect();
 
     // Sort groups by duration (longest first)
-    group_durations.sort_by(|a, b| b.2.cmp(&a.2));
+    group_durations.sort_by_key(|b| std::cmp::Reverse(b.2));
 
     // Initialize partitions
     let mut partitions: Vec<(Vec<TestId>, Duration)> = (0..concurrency)
