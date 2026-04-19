@@ -87,7 +87,12 @@ impl InquestMcpService {
 /// Parameters for tools that accept an optional run ID.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RunIdParam {
-    /// Run ID to query (defaults to latest; supports negative indices like -1, -2)
+    /// Run ID to query. Defaults to the latest run when omitted.
+    ///
+    /// Accepts either an absolute ID (e.g. "0", "42") or a negative index:
+    /// "-1" = latest run, "-2" = second-to-latest, and so on. The absolute
+    /// ID "0" always refers to the first run ever recorded, never to the
+    /// latest — use "-1" for latest.
     pub run_id: Option<String>,
 }
 
@@ -128,9 +133,16 @@ pub struct LogParam {
     pub run_id: Option<String>,
     /// Test ID patterns to match (glob-style wildcards). If empty, shows all tests.
     pub test_patterns: Option<Vec<String>>,
-    /// Filter by test status. Valid values: "success", "failure", "error", "skip", "xfail",
-    /// "uxsuccess". Also accepts "failing" (equivalent to failure+error+uxsuccess) and
-    /// "passing" (equivalent to success+skip+xfail). If empty, shows all statuses.
+    /// Filter by test status. A test is included if its status matches **any**
+    /// entry in the array (OR semantics). Valid individual values: "success",
+    /// "failure", "error", "skip", "xfail", "uxsuccess". Two group aliases are
+    /// also accepted: "failing" expands to failure+error+uxsuccess, and
+    /// "passing" expands to success+skip+xfail.
+    ///
+    /// Examples: ["failing"] shows every test that failed in any way;
+    /// ["failure", "error"] shows only failures and errors (no uxsuccess);
+    /// ["failing", "skip"] shows every failure plus skipped tests. If empty
+    /// or omitted, shows all statuses.
     pub status_filter: Option<Vec<String>>,
     /// Max number of results to return (default 20). Use a larger value when you need
     /// the full list; the response reports `total` and `truncated` so you know if more exist.
@@ -158,8 +170,26 @@ pub struct FailureSummaryParam {
 /// Parameters for the single-test lookup tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct TestLookupParam {
-    /// The exact test ID to fetch (no globbing — use inq_log for pattern matching).
+    /// Exact test ID to fetch. Matched string-equal against stored IDs — no
+    /// globs, no regex, no prefix matching. If you need pattern matching,
+    /// use inq_log with `test_patterns` (glob) or inq_run with `test_filters`
+    /// (regex).
     pub test_id: String,
+    /// Run ID to query (defaults to latest; supports negative indices like -1, -2).
+    pub run_id: Option<String>,
+    /// Max lines for message/details fields. See inq_log's max_detail_lines for semantics.
+    /// Default 60. Set to 0 to receive the full content.
+    pub max_detail_lines: Option<usize>,
+}
+
+/// Parameters for the batch test lookup tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TestBatchLookupParam {
+    /// Exact test IDs to fetch. Each entry is matched string-equal against
+    /// stored IDs — no globs, no regex, no prefix matching. Duplicates are
+    /// de-duplicated in the response; unknown IDs are returned via `not_found`
+    /// rather than failing the whole call. For pattern matching use inq_log.
+    pub test_ids: Vec<String>,
     /// Run ID to query (defaults to latest; supports negative indices like -1, -2).
     pub run_id: Option<String>,
     /// Max lines for message/details fields. See inq_log's max_detail_lines for semantics.
@@ -201,10 +231,12 @@ pub struct CancelParam {
 pub struct WaitParam {
     /// Optional run ID to wait for. If not specified, waits for all running tests to complete.
     pub run_id: Option<String>,
-    /// Optional status filter. If specified, returns early when any test result matches
-    /// this status (e.g. "failing", "failure", "error"). Uses the same filter syntax as
-    /// other tools: "failing" = failure+error+uxsuccess, "passing" = success+skip+xfail,
-    /// or individual statuses like "failure", "error", "success", "skip", "xfail", "uxsuccess".
+    /// Optional status filter. If specified, returns early as soon as any test result
+    /// in the running run matches **any** entry in the array (OR semantics). Uses
+    /// the same syntax as inq_log's status_filter: individual values "success",
+    /// "failure", "error", "skip", "xfail", "uxsuccess", plus group aliases "failing"
+    /// (= failure+error+uxsuccess) and "passing" (= success+skip+xfail). Omit or
+    /// leave empty to wait for the run to complete normally.
     pub status_filter: Option<Vec<String>>,
     /// Maximum time to wait in seconds. Defaults to 600 (10 minutes).
     pub timeout_secs: Option<u64>,
@@ -510,6 +542,31 @@ struct TestLookupResponse {
     details: Option<String>,
 }
 
+/// One result in a batch lookup — same shape as the single-test response but
+/// without the shared `run_id` (it's reported once at the top level).
+#[derive(Serialize)]
+struct TestBatchEntry {
+    test_id: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_secs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TestBatchResponse {
+    run_id: String,
+    count: usize,
+    results: Vec<TestBatchEntry>,
+    /// Test IDs from the request that weren't present in this run. Omitted
+    /// when every requested ID was found.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    not_found: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct RunResponse {
     exit_code: i32,
@@ -704,7 +761,10 @@ fn parse_status_filters(filters: &[String]) -> Result<Vec<TestStatus>, ErrorData
 #[tool_router]
 impl InquestMcpService {
     /// Show repository statistics including run count and latest run summary.
-    #[tool(description = "Show repository statistics including run count and latest run summary")]
+    #[tool(
+        description = "Show repository statistics including run count and latest run summary",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn inq_stats(&self) -> Result<CallToolResult, ErrorData> {
         let repo = self.open_repo()?;
         let run_count = repo.count().map_err(to_mcp_err)?;
@@ -731,7 +791,8 @@ impl InquestMcpService {
 
     /// List currently failing tests from the repository.
     #[tool(
-        description = "List currently failing tests from the repository. Paginated — default limit is 100."
+        description = "List currently failing tests from the repository. Paginated — default limit is 100.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn inq_failing(
         &self,
@@ -763,7 +824,8 @@ impl InquestMcpService {
 
     /// Show results from the last (or a specific) test run.
     #[tool(
-        description = "Show results from the last (or a specific) test run including pass/fail counts, duration, and failing test details"
+        description = "Show results from the last (or a specific) test run including pass/fail counts, duration, and failing test details",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn inq_last(&self, params: Parameters<RunIdParam>) -> Result<CallToolResult, ErrorData> {
         let repo = self.open_repo()?;
@@ -792,7 +854,8 @@ impl InquestMcpService {
 
     /// Compare two test runs and show what changed.
     #[tool(
-        description = "Compare two test runs and show new failures, new passes, added/removed tests, and status changes"
+        description = "Compare two test runs and show new failures, new passes, added/removed tests, and status changes",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn inq_diff(&self, params: Parameters<DiffParam>) -> Result<CallToolResult, ErrorData> {
         let repo = self.open_repo()?;
@@ -890,7 +953,10 @@ impl InquestMcpService {
     }
 
     /// Show the slowest tests from the last run.
-    #[tool(description = "Show the slowest tests from the last run with timing information")]
+    #[tool(
+        description = "Show the slowest tests from the last run with timing information",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn inq_slowest(
         &self,
         params: Parameters<SlowestParam>,
@@ -939,7 +1005,8 @@ impl InquestMcpService {
     #[tool(
         description = "Show test details (status, duration) for matching tests. Paginated — \
                         default limit is 20. Failure messages and tracebacks are omitted \
-                        unless include_details=true."
+                        unless include_details=true.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn inq_log(&self, params: Parameters<LogParam>) -> Result<CallToolResult, ErrorData> {
         let repo = self.open_repo()?;
@@ -1022,7 +1089,8 @@ impl InquestMcpService {
     #[tool(
         description = "List a run's failing tests with the first line of each failure message. \
                         Default limit is 25. Use this for triage before drilling into a specific \
-                        failure with inq_test."
+                        failure with inq_test.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn inq_failure_summary(
         &self,
@@ -1066,7 +1134,8 @@ impl InquestMcpService {
     #[tool(
         description = "Fetch one test's status, duration, and (truncated) message/details by \
                         exact test ID. Typically used after inq_failure_summary surfaces a test \
-                        you want to investigate. Errors if the test ID isn't present in the run."
+                        you want to investigate. Errors if the test ID isn't present in the run.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn inq_test(
         &self,
@@ -1106,9 +1175,73 @@ impl InquestMcpService {
         })
     }
 
+    /// Fetch details for several tests from the same run in one call.
+    #[tool(
+        description = "Fetch status/duration/message/details for multiple tests from a single \
+                        run. Prefer this to calling inq_test in a loop when triaging several \
+                        failures. Unknown test IDs are reported in `not_found` instead of \
+                        failing the call; duplicate IDs are de-duplicated.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn inq_test_batch(
+        &self,
+        params: Parameters<TestBatchLookupParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let repo = self.open_repo()?;
+        let run_id = resolve_run_id(&*repo, params.0.run_id.as_deref()).map_err(to_mcp_err)?;
+        let test_run = repo.get_test_run(&run_id).map_err(to_mcp_err)?;
+
+        let max_detail_lines = params.0.max_detail_lines.unwrap_or(60);
+
+        // De-duplicate while preserving first-seen order so callers can reason
+        // about positional output even though we don't guarantee it.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut unique_ids: Vec<String> = Vec::with_capacity(params.0.test_ids.len());
+        for id in params.0.test_ids {
+            if seen.insert(id.clone()) {
+                unique_ids.push(id);
+            }
+        }
+
+        let mut results = Vec::new();
+        let mut not_found = Vec::new();
+        for id_str in unique_ids {
+            let test_id = crate::repository::TestId::new(&id_str);
+            match test_run.results.get(&test_id) {
+                Some(r) => results.push(TestBatchEntry {
+                    test_id: r.test_id.as_str().to_string(),
+                    status: r.status.to_string(),
+                    duration_secs: r.duration.map(duration_secs),
+                    message: r
+                        .message
+                        .as_ref()
+                        .map(|m| head_tail_truncate(m, max_detail_lines)),
+                    details: r
+                        .details
+                        .as_ref()
+                        .map(|d| head_tail_truncate(d, max_detail_lines)),
+                }),
+                None => not_found.push(id_str),
+            }
+        }
+
+        ok_json(&TestBatchResponse {
+            run_id: run_id.as_str().to_string(),
+            count: results.len(),
+            results,
+            not_found,
+        })
+    }
+
     /// Execute tests and return results.
     #[tool(
-        description = "Execute tests and return structured results. Requires a configuration file (inquest.toml or .testr.conf) in the project directory."
+        description = "Execute tests and return structured results. Requires a configuration file (inquest.toml or .testr.conf) in the project directory.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn inq_run(&self, params: Parameters<RunParam>) -> Result<CallToolResult, ErrorData> {
         let base = &self.directory;
@@ -1373,7 +1506,8 @@ impl InquestMcpService {
     /// List available tests.
     #[tool(
         description = "List all available tests discovered by the test command. \
-                        Paginated — default limit is 100."
+                        Paginated — default limit is 100.",
+        annotations(read_only_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
     async fn inq_list_tests(
         &self,
@@ -1409,7 +1543,8 @@ impl InquestMcpService {
 
     /// Show detailed information about a test run including metadata.
     #[tool(
-        description = "Show detailed information about a test run including git commit, command, concurrency, duration, and exit code"
+        description = "Show detailed information about a test run including git commit, command, concurrency, duration, and exit code",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn inq_info(&self, params: Parameters<RunIdParam>) -> Result<CallToolResult, ErrorData> {
         let repo = self.open_repo()?;
@@ -1434,7 +1569,14 @@ impl InquestMcpService {
     }
 
     /// Show currently in-progress test runs.
-    #[tool(description = "Show currently in-progress test runs with their status and progress")]
+    #[tool(
+        description = "Show currently in-progress test runs with their status and progress",
+        annotations(
+            read_only_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
     async fn inq_running(&self) -> Result<CallToolResult, ErrorData> {
         let repo = self.open_repo()?;
         let run_ids = repo.get_running_run_ids().map_err(to_mcp_err)?;
@@ -1476,7 +1618,12 @@ impl InquestMcpService {
     #[tool(
         description = "Wait for background test runs to complete. Returns when all runs finish, \
                         or early if status_filter is set and a running test matches that status \
-                        (e.g. \"failing\"). Much more efficient than polling inq_running in a loop."
+                        (e.g. \"failing\"). Much more efficient than polling inq_running in a loop.",
+        annotations(
+            read_only_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn inq_wait(&self, params: Parameters<WaitParam>) -> Result<CallToolResult, ErrorData> {
         let timeout = Duration::from_secs(params.0.timeout_secs.unwrap_or(600));
@@ -1564,7 +1711,13 @@ impl InquestMcpService {
 
     /// Cancel a running background test execution.
     #[tool(
-        description = "Cancel a background test run. Use inq_running to find the run ID of in-progress runs."
+        description = "Cancel a background test run. Use inq_running to find the run ID of in-progress runs.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn inq_cancel(
         &self,
@@ -1599,7 +1752,14 @@ impl InquestMcpService {
     }
 
     /// Initialize a new test repository.
-    #[tool(description = "Initialize a new .inquest test repository in the project directory")]
+    #[tool(
+        description = "Initialize a new .inquest test repository in the project directory",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
     async fn inq_init(&self) -> Result<CallToolResult, ErrorData> {
         let factory = InquestRepositoryFactory;
         match factory.initialise(&self.directory) {
@@ -1620,7 +1780,13 @@ impl InquestMcpService {
 
     /// Auto-detect project type and generate configuration.
     #[tool(
-        description = "Auto-detect project type (Cargo, pytest, unittest) and generate an inquest.toml configuration file"
+        description = "Auto-detect project type (Cargo, pytest, unittest) and generate an inquest.toml configuration file",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn inq_auto(&self) -> Result<CallToolResult, ErrorData> {
         let mut ui = CollectUI::new();
@@ -1647,7 +1813,13 @@ impl InquestMcpService {
 
     /// Analyze test isolation issues using bisection.
     #[tool(
-        description = "Analyze test isolation issues by bisecting the test suite to find which tests cause a target test to fail when run together but pass in isolation"
+        description = "Analyze test isolation issues by bisecting the test suite to find which tests cause a target test to fail when run together but pass in isolation",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn inq_analyze_isolation(
         &self,
@@ -2342,6 +2514,90 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_inq_test_batch_happy_path() {
+        let factory = InquestRepositoryFactory;
+        let temp = TempDir::new().unwrap();
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut run = TestRun::new(RunId::new("0"));
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::failure("a", "boom").with_details("AssertionError: a"));
+        run.add_result(TestResult::failure("b", "boom").with_details("AssertionError: b"));
+        run.add_result(TestResult::success("c"));
+        repo.insert_test_run(run).unwrap();
+        drop(repo);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_test_batch(Parameters(TestBatchLookupParam {
+                test_ids: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                run_id: None,
+                max_detail_lines: None,
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["count"], 3);
+        let results = json["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["test_id"], "a");
+        assert_eq!(results[1]["test_id"], "b");
+        assert_eq!(results[2]["test_id"], "c");
+        assert!(json.get("not_found").is_none() || json["not_found"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_inq_test_batch_partial_miss_and_dedup() {
+        let factory = InquestRepositoryFactory;
+        let temp = TempDir::new().unwrap();
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut run = TestRun::new(RunId::new("0"));
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::failure("a", "boom"));
+        repo.insert_test_run(run).unwrap();
+        drop(repo);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_test_batch(Parameters(TestBatchLookupParam {
+                // "a" is present, "ghost" is not, "a" again is a duplicate.
+                test_ids: vec!["a".to_string(), "ghost".to_string(), "a".to_string()],
+                run_id: None,
+                max_detail_lines: None,
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["results"][0]["test_id"], "a");
+        assert_eq!(json["not_found"].as_array().unwrap().len(), 1);
+        assert_eq!(json["not_found"][0], "ghost");
+    }
+
+    #[tokio::test]
+    async fn test_inq_test_batch_empty_input() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_test_batch(Parameters(TestBatchLookupParam {
+                test_ids: vec![],
+                run_id: None,
+                max_detail_lines: None,
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["count"], 0);
+        assert_eq!(json["results"].as_array().unwrap().len(), 0);
+        assert!(json.get("not_found").is_none() || json["not_found"].is_null());
     }
 
     fn setup_runnable_project(temp: &TempDir) {
