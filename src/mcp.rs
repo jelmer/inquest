@@ -655,6 +655,37 @@ struct InfoResponse {
     total_test_time_secs: Option<f64>,
 }
 
+/// Project-level test configuration as the MCP server sees it. Lets callers
+/// understand what inq_run will actually execute before triggering it.
+#[derive(Serialize)]
+struct ConfigResponse {
+    /// Absolute path of the config file the server loaded.
+    config_path: String,
+    /// Directory in which test commands execute (the project root).
+    working_dir: String,
+    /// Raw shell command that runs the tests, with $LISTOPT/$IDLIST
+    /// placeholders still present.
+    test_command: String,
+    /// When true, inq_list_tests and filtered inq_run can discover test IDs.
+    supports_listing: bool,
+    /// When true, inq_run can run a specific subset of tests by ID.
+    supports_targeted_runs: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_list_option: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_id_option: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_timeout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_duration: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    no_output_timeout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group_regex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_run_concurrency: Option<String>,
+}
+
 /// One row in the run-listing response. Compact — callers can fetch full
 /// metadata with inq_info if they want git_commit, command, etc.
 #[derive(Serialize)]
@@ -1633,6 +1664,38 @@ impl InquestMcpService {
             passed: test_run.count_successes(),
             failed: test_run.count_failures(),
             total_test_time_secs: test_run.total_duration().map(duration_secs),
+        })
+    }
+
+    /// Show the project's test command configuration.
+    #[tool(
+        description = "Show how inq_run will execute tests in this project: the resolved config \
+                        file path, test_command with substitution placeholders, and whether the \
+                        project supports test listing or targeted runs. Use this before calling \
+                        inq_run when you need to understand the runtime, or before inq_list_tests \
+                        to confirm the project exposes a listing option. Errors if no config \
+                        file (inquest.toml, .inquest.toml, .testr.conf) is present.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn inq_config(&self) -> Result<CallToolResult, ErrorData> {
+        let (config, config_path) = crate::config::TestrConfig::find_in_directory(&self.directory)
+            .map_err(|e| {
+                ErrorData::invalid_params(format!("Failed to load test config: {}", e), None)
+            })?;
+
+        ok_json(&ConfigResponse {
+            config_path: config_path.to_string_lossy().into_owned(),
+            working_dir: self.directory.to_string_lossy().into_owned(),
+            supports_listing: config.test_list_option.is_some(),
+            supports_targeted_runs: config.test_id_option.is_some(),
+            test_command: config.test_command,
+            test_list_option: config.test_list_option,
+            test_id_option: config.test_id_option,
+            test_timeout: config.test_timeout,
+            max_duration: config.max_duration,
+            no_output_timeout: config.no_output_timeout,
+            group_regex: config.group_regex,
+            test_run_concurrency: config.test_run_concurrency,
         })
     }
 
@@ -3193,5 +3256,64 @@ mod tests {
 
         assert_eq!(json["count"], 0);
         assert_eq!(json["history"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_inq_config_reports_loaded_config() {
+        let temp = TempDir::new().unwrap();
+        // Minimal config with listing and targeted-run support.
+        let toml = r#"
+test_command = "pytest $LISTOPT $IDLIST"
+test_list_option = "--collect-only -q"
+test_id_option = "-k"
+test_timeout = "5m"
+"#;
+        std::fs::write(temp.path().join("inquest.toml"), toml).unwrap();
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_config().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["test_command"], "pytest $LISTOPT $IDLIST");
+        assert_eq!(json["test_list_option"], "--collect-only -q");
+        assert_eq!(json["test_id_option"], "-k");
+        assert_eq!(json["test_timeout"], "5m");
+        assert_eq!(json["supports_listing"], true);
+        assert_eq!(json["supports_targeted_runs"], true);
+        assert!(json["config_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("inquest.toml"));
+        // Fields not set in the config should be omitted via skip_serializing_if.
+        assert!(json.get("max_duration").is_none() || json["max_duration"].is_null());
+        assert!(json.get("group_regex").is_none() || json["group_regex"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_inq_config_minimal_config_flags_false() {
+        let temp = TempDir::new().unwrap();
+        // No list/id options — advertise capabilities accordingly.
+        std::fs::write(
+            temp.path().join("inquest.toml"),
+            r#"test_command = "cargo test""#,
+        )
+        .unwrap();
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_config().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["test_command"], "cargo test");
+        assert_eq!(json["supports_listing"], false);
+        assert_eq!(json["supports_targeted_runs"], false);
+    }
+
+    #[tokio::test]
+    async fn test_inq_config_missing_errors_out() {
+        let temp = TempDir::new().unwrap();
+        // Deliberately no config file written.
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_config().await;
+        assert!(result.is_err());
     }
 }
