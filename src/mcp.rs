@@ -306,6 +306,38 @@ fn head_tail_truncate(s: &str, max_lines: usize) -> String {
     )
 }
 
+/// Derive progress estimates for an in-progress run from historical test times.
+///
+/// Returns `(total_expected, percent_complete, estimated_remaining_secs)`. Each
+/// element is `None` when it can't be estimated — specifically, all three are
+/// `None` when no historical data is available (first run in a new repo).
+///
+/// `percent_complete` is in `[0, 1]`. `estimated_remaining_secs` sums the
+/// historical durations of tests that haven't yet appeared in the run's
+/// observed results. It ignores tests currently executing — at worst the ETA
+/// is slightly pessimistic by one test's duration.
+fn estimate_progress(
+    historical: &std::collections::HashMap<crate::repository::TestId, Duration>,
+    test_run: &crate::repository::TestRun,
+) -> (Option<usize>, Option<f64>, Option<f64>) {
+    if historical.is_empty() {
+        return (None, None, None);
+    }
+    let total_expected = historical.len();
+    let observed = test_run.total_tests();
+    let percent = if total_expected > 0 {
+        Some((observed as f64 / total_expected as f64).min(1.0))
+    } else {
+        None
+    };
+    let remaining: Duration = historical
+        .iter()
+        .filter(|(id, _)| !test_run.results.contains_key(*id))
+        .map(|(_, d)| *d)
+        .sum();
+    (Some(total_expected), percent, Some(remaining.as_secs_f64()))
+}
+
 /// Extract the first non-empty line of a message, trimmed and capped at
 /// `SUMMARY_FIRST_LINE_CHARS`. Returns `None` if no non-empty line exists.
 /// Used by inq_failure_summary to offer a signal-rich one-liner per failure
@@ -552,6 +584,16 @@ struct RunningEntry {
     passed: usize,
     failed: usize,
     elapsed_secs: i64,
+    /// Historical test count. Omitted when no history is available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_expected: Option<usize>,
+    /// Fraction complete in [0, 1]. Omitted when total_expected is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    percent_complete: Option<f64>,
+    /// Rough ETA in seconds, from the historical durations of tests not yet
+    /// observed in this run. Omitted when historical data is thin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estimated_remaining_secs: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -1397,17 +1439,29 @@ impl InquestMcpService {
         let repo = self.open_repo()?;
         let run_ids = repo.get_running_run_ids().map_err(to_mcp_err)?;
 
+        // Historical test durations; used to derive total_expected and an ETA.
+        // Empty map is fine — the helper below falls back to emitting None.
+        let historical = repo.get_test_times().unwrap_or_default();
+
         let now = chrono::Utc::now();
         let runs: Vec<RunningEntry> = run_ids
             .iter()
             .filter_map(|run_id| {
                 let test_run = repo.get_test_run(run_id).ok()?;
+                let observed = test_run.total_tests();
+
+                let (total_expected, percent_complete, estimated_remaining_secs) =
+                    estimate_progress(&historical, &test_run);
+
                 Some(RunningEntry {
                     id: run_id.as_str().to_string(),
-                    total_tests: test_run.total_tests(),
+                    total_tests: observed,
                     passed: test_run.count_successes(),
                     failed: test_run.count_failures(),
                     elapsed_secs: (now - test_run.timestamp).num_seconds(),
+                    total_expected,
+                    percent_complete,
+                    estimated_remaining_secs,
                 })
             })
             .collect();
@@ -1801,6 +1855,81 @@ mod tests {
 
         assert_eq!(json["count"], 0);
         assert_eq!(json["runs"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_inq_running_progress_estimate() {
+        use crate::subunit_stream;
+        let factory = InquestRepositoryFactory;
+        let temp = TempDir::new().unwrap();
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        // Seed historical test times for 4 tests, 2s each.
+        let mut times = std::collections::HashMap::new();
+        for i in 0..4 {
+            times.insert(
+                crate::repository::TestId::new(format!("test_{i}")),
+                std::time::Duration::from_secs(2),
+            );
+        }
+        repo.update_test_times(&times).unwrap();
+
+        // Start an in-progress run with 1 of 4 tests observed (test_0 passed).
+        let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
+        let mut run = TestRun::new(run_id.clone());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::success("test_0"));
+        subunit_stream::write_stream(&run, &mut writer).unwrap();
+        use std::io::Write;
+        writer.flush().unwrap();
+        drop(repo);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_running().await.unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["count"], 1);
+        let entry = &json["runs"][0];
+        assert_eq!(entry["total_expected"], 4);
+        // 1/4 observed → 0.25.
+        let pct = entry["percent_complete"].as_f64().unwrap();
+        assert!((pct - 0.25).abs() < 1e-6, "got {}", pct);
+        // 3 tests not yet observed × 2s each = 6s remaining.
+        let eta = entry["estimated_remaining_secs"].as_f64().unwrap();
+        assert!((eta - 6.0).abs() < 1e-6, "got {}", eta);
+
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn test_inq_running_omits_estimate_without_history() {
+        use crate::subunit_stream;
+        let factory = InquestRepositoryFactory;
+        let temp = TempDir::new().unwrap();
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        // No historical times — fields should be omitted.
+        let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
+        let run = TestRun::new(run_id.clone());
+        subunit_stream::write_stream(&run, &mut writer).unwrap();
+        use std::io::Write;
+        writer.flush().unwrap();
+        drop(repo);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service.inq_running().await.unwrap();
+        let json = parse_result(&result);
+
+        let entry = &json["runs"][0];
+        assert!(
+            entry.get("total_expected").is_none(),
+            "total_expected should be omitted: {:?}",
+            entry
+        );
+        assert!(entry.get("percent_complete").is_none());
+        assert!(entry.get("estimated_remaining_secs").is_none());
+
+        drop(writer);
     }
 
     #[tokio::test]
