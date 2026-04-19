@@ -48,6 +48,16 @@ fn detect_project(base: &Path) -> Vec<Detection> {
         });
     }
 
+    // Perl project using prove + tap2subunit (via prove-subunit wrapper)
+    if has_perl(base) {
+        detections.push(Detection {
+            name: "prove (Perl)",
+            test_command: "prove-subunit",
+            test_id_option: None,
+            test_list_option: None,
+        });
+    }
+
     detections
 }
 
@@ -83,6 +93,30 @@ fn has_python_unittest(base: &Path) -> bool {
     for name in &["setup.py", "setup.cfg", "pyproject.toml"] {
         if base.join(name).exists() {
             return true;
+        }
+    }
+
+    false
+}
+
+/// Check if the project is a Perl project with a test suite.
+fn has_perl(base: &Path) -> bool {
+    // Standard Perl build/metadata files
+    for name in &["cpanfile", "Makefile.PL", "Build.PL", "dist.ini"] {
+        if base.join(name).exists() {
+            return true;
+        }
+    }
+
+    // t/ directory with .t files is the conventional Perl test layout
+    let t_dir = base.join("t");
+    if t_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&t_dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().is_some_and(|e| e == "t") {
+                    return true;
+                }
+            }
         }
     }
 
@@ -139,7 +173,7 @@ impl Command for AutoCommand {
         if detections.is_empty() {
             ui.error("Could not detect project type")?;
             ui.error(
-                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python)",
+                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), prove (Perl)",
             )?;
             return Ok(1);
         }
@@ -328,9 +362,67 @@ mod tests {
             ui.errors,
             vec![
                 "Could not detect project type",
-                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python)",
+                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), prove (Perl)",
             ]
         );
+    }
+
+    #[test]
+    fn test_auto_detect_perl_cpanfile() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("cpanfile"), "requires 'Test::More';\n").unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ui.output,
+            vec![format!(
+                "Detected prove (Perl) project, wrote {}",
+                temp.path().join("inquest.toml").display()
+            )]
+        );
+
+        let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
+        assert_eq!(content, "test_command = \"prove-subunit\"\n");
+    }
+
+    #[test]
+    fn test_auto_detect_perl_t_directory() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join("t")).unwrap();
+        std::fs::write(
+            temp.path().join("t").join("basic.t"),
+            "use Test::More tests => 1;\nok(1);\n",
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ui.output,
+            vec![format!(
+                "Detected prove (Perl) project, wrote {}",
+                temp.path().join("inquest.toml").display()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_auto_detect_perl_empty_t_directory() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join("t")).unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 1);
     }
 
     #[test]
