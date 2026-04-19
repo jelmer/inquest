@@ -146,6 +146,10 @@ pub struct TestExecutorConfig {
     /// Maximum number of test process restarts on timeout or crash.
     /// `None` falls back to [`MAX_TEST_RESTARTS`].
     pub max_restarts: Option<usize>,
+    /// Optional shared buffer to capture child-process stderr in addition to
+    /// the usual forwarding. Used by the MCP server to surface stderr on the
+    /// response when a run fails to produce subunit output.
+    pub stderr_capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 }
 
 impl TestExecutorConfig {
@@ -369,6 +373,7 @@ impl<'a> TestExecutor<'a> {
                 tx,
                 activity_tracker.as_ref(),
                 progress_bar.clone(),
+                self.config.stderr_capture.clone(),
             );
 
             // Always construct the watchdog so crash attribution works even
@@ -805,6 +810,7 @@ impl<'a> TestExecutor<'a> {
                     tx,
                     worker_activity.as_ref(),
                     worker_bar.clone(),
+                    self.config.stderr_capture.clone(),
                 );
 
                 let channel_reader = crate::test_runner::ChannelReader::new(rx);
@@ -1217,13 +1223,15 @@ impl IoThreads {
         tx: std::sync::mpsc::SyncSender<Vec<u8>>,
         activity_tracker: Option<&crate::test_runner::ActivityTracker>,
         progress_bar: ProgressBar,
+        stderr_capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
     ) -> Self {
         let tee = if let Some(tracker) = activity_tracker {
             crate::test_runner::spawn_stdout_tee_tracked(stdout, raw_writer, tx, tracker.clone())
         } else {
             crate::test_runner::spawn_stdout_tee(stdout, raw_writer, tx)
         };
-        let stderr = crate::test_runner::spawn_stderr_forwarder(stderr, progress_bar);
+        let stderr =
+            crate::test_runner::spawn_stderr_forwarder(stderr, progress_bar, stderr_capture);
         IoThreads { tee, stderr }
     }
 

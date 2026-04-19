@@ -60,6 +60,10 @@ pub struct RunCommand {
     pub no_output_timeout: Option<Duration>,
     /// Maximum number of restarts on timeout or crash (None = default).
     pub max_restarts: Option<usize>,
+    /// Optional shared buffer for capturing child-process stderr in addition
+    /// to terminal forwarding. Used by the MCP server to surface stderr in
+    /// the failure response.
+    pub stderr_capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 }
 
 impl RunCommand {
@@ -88,6 +92,7 @@ impl RunCommand {
             test_args: self.test_args.clone(),
             cancellation_token: None,
             max_restarts: self.max_restarts,
+            stderr_capture: self.stderr_capture.clone(),
         }
     }
 }

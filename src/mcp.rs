@@ -138,6 +138,11 @@ pub struct LogParam {
     /// Include failure messages and full tracebacks in each result. Off by default to
     /// keep responses small — enable when investigating a specific failure.
     pub include_details: Option<bool>,
+    /// Max lines per message/details field when include_details=true. Long values
+    /// are shortened by keeping the head and tail lines and eliding the middle.
+    /// Individual lines are also capped at 500 characters. Default 60. Set to 0
+    /// to disable truncation and receive the full content.
+    pub max_detail_lines: Option<usize>,
 }
 
 /// Parameters for the analyze-isolation tool.
@@ -207,6 +212,69 @@ fn take_limited<T>(mut items: Vec<T>, limit: usize) -> (Vec<T>, usize) {
     }
 }
 
+/// Hard cap on characters per individual line when truncating tracebacks.
+/// Protects against tests that dump a single giant blob on one line.
+const MAX_LINE_CHARS: usize = 500;
+
+/// Default cap for `failing_tests` arrays in responses (inq_last, inq_run).
+/// A broken run with thousands of failing tests shouldn't produce a single
+/// giant response.
+const FAILING_LIST_LIMIT: usize = 100;
+
+/// Default cap for `matching_tests` in inq_wait early-return responses.
+const MATCHING_LIST_LIMIT: usize = 50;
+
+/// Line budget for the `error_output` field on a failed inq_run response.
+/// Matches the default for inq_log's traceback truncation.
+const ERROR_OUTPUT_LINE_BUDGET: usize = 60;
+
+/// Shorten a single line to at most `MAX_LINE_CHARS` characters (head + ellipsis).
+/// Operates on char boundaries so UTF-8 sequences are never split.
+fn truncate_line(line: &str) -> String {
+    if line.chars().count() <= MAX_LINE_CHARS {
+        return line.to_string();
+    }
+    let head: String = line.chars().take(MAX_LINE_CHARS).collect();
+    let omitted = line.chars().count() - MAX_LINE_CHARS;
+    format!("{head}…({omitted} chars omitted)")
+}
+
+/// Truncate a multi-line string to roughly `max_lines` lines by keeping the head
+/// and tail and eliding the middle. Each surviving line is also capped at
+/// `MAX_LINE_CHARS` so a single pathological line can't dominate the output.
+/// Returns the input unchanged when `max_lines` is 0. Preserves UTF-8 boundaries.
+fn head_tail_truncate(s: &str, max_lines: usize) -> String {
+    if max_lines == 0 {
+        return s.to_string();
+    }
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= max_lines {
+        return lines
+            .iter()
+            .map(|l| truncate_line(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    let head_count = (max_lines * 2) / 3;
+    let tail_count = max_lines - head_count;
+    let omitted = lines.len() - head_count - tail_count;
+    let head: Vec<String> = lines
+        .iter()
+        .take(head_count)
+        .map(|l| truncate_line(l))
+        .collect();
+    let tail: Vec<String> = lines
+        .iter()
+        .skip(lines.len() - tail_count)
+        .map(|l| truncate_line(l))
+        .collect();
+    format!(
+        "{}\n…({omitted} lines omitted)…\n{}",
+        head.join("\n"),
+        tail.join("\n")
+    )
+}
+
 #[derive(Serialize)]
 struct RunSummary {
     id: String,
@@ -244,6 +312,8 @@ struct LastResponse {
     duration_secs: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     failing_tests: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failing_truncated: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     interruption: Option<String>,
 }
@@ -348,9 +418,17 @@ struct RunResponse {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     failing_tests: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    failing_truncated: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     interruption: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    /// Captured child-process stderr, truncated head+tail. Populated only when
+    /// `exit_code != 0` and stderr was non-empty — typically indicates a
+    /// failure outside the subunit stream (compile error, collection error,
+    /// pre-test panic).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_output: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -427,6 +505,8 @@ enum WaitResponse {
         passed: usize,
         failed: usize,
         matching_tests: Vec<WaitMatchingTest>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        matching_truncated: Option<usize>,
     },
     Timeout {
         status: &'static str,
@@ -572,6 +652,13 @@ impl InquestMcpService {
         let run_id = resolve_run_id(&*repo, params.0.run_id.as_deref()).map_err(to_mcp_err)?;
         let test_run = repo.get_test_run(&run_id).map_err(to_mcp_err)?;
 
+        let all_failing: Vec<String> = test_run
+            .get_failing_tests()
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        let (failing_tests, failing_extra) = take_limited(all_failing, FAILING_LIST_LIMIT);
+
         ok_json(&LastResponse {
             id: test_run.id.as_str().to_string(),
             timestamp: test_run.timestamp.to_rfc3339(),
@@ -579,11 +666,8 @@ impl InquestMcpService {
             passed: test_run.count_successes(),
             failed: test_run.count_failures(),
             duration_secs: test_run.total_duration().map(duration_secs),
-            failing_tests: test_run
-                .get_failing_tests()
-                .iter()
-                .map(|id| id.as_str().to_string())
-                .collect(),
+            failing_tests,
+            failing_truncated: (failing_extra > 0).then_some(failing_extra),
             interruption: test_run.interruption.as_ref().map(|i| i.to_string()),
         })
     }
@@ -766,6 +850,7 @@ impl InquestMcpService {
         let status_filters = parse_status_filters(&params.0.status_filter.unwrap_or_default())?;
         let limit = params.0.limit.unwrap_or(20);
         let include_details = params.0.include_details.unwrap_or(false);
+        let max_detail_lines = params.0.max_detail_lines.unwrap_or(60);
 
         let mut matching: Vec<_> = test_run
             .results
@@ -790,12 +875,16 @@ impl InquestMcpService {
                 status: r.status.to_string(),
                 duration_secs: r.duration.map(duration_secs),
                 message: if include_details {
-                    r.message.clone()
+                    r.message
+                        .as_ref()
+                        .map(|m| head_tail_truncate(m, max_detail_lines))
                 } else {
                     None
                 },
                 details: if include_details {
-                    r.details.clone()
+                    r.details
+                        .as_ref()
+                        .map(|d| head_tail_truncate(d, max_detail_lines))
                 } else {
                     None
                 },
@@ -862,7 +951,9 @@ impl InquestMcpService {
                         failed: None,
                         duration_secs: None,
                         failing_tests: Vec::new(),
+                        failing_truncated: None,
                         interruption: None,
+                        error_output: None,
                     });
                 }
                 Some(failing)
@@ -920,6 +1011,7 @@ impl InquestMcpService {
                     test_args: None,
                     cancellation_token: Some(cancel_token),
                     max_restarts: None,
+                    stderr_capture: None,
                 };
                 let executor = crate::test_executor::TestExecutor::new(&config);
 
@@ -999,6 +1091,8 @@ impl InquestMcpService {
         // Foreground execution
         let mut ui = NullUI;
 
+        let stderr_capture = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+
         let cmd = crate::commands::RunCommand {
             base_path: Some(base.to_string_lossy().to_string()),
             partial,
@@ -1006,6 +1100,7 @@ impl InquestMcpService {
             force_init: true,
             concurrency: params.0.concurrency,
             test_filters,
+            stderr_capture: Some(stderr_capture.clone()),
             ..Default::default()
         };
 
@@ -1013,9 +1108,31 @@ impl InquestMcpService {
             ErrorData::internal_error(format!("Test execution failed: {}", e), None)
         })?;
 
+        // Pull out captured stderr once. Exposed only when the run failed —
+        // a successful run's noisy stderr is rarely useful and would just
+        // balloon the response.
+        let error_output = if cli_output.exit_code != 0 {
+            let bytes = stderr_capture.lock().map(|g| g.clone()).unwrap_or_default();
+            if bytes.is_empty() {
+                None
+            } else {
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                Some(head_tail_truncate(&text, ERROR_OUTPUT_LINE_BUDGET))
+            }
+        } else {
+            None
+        };
+
         if let Some(ref run_id) = cli_output.run_id {
             let repo = self.open_repo()?;
             let test_run = repo.get_test_run(run_id).map_err(to_mcp_err)?;
+
+            let all_failing: Vec<String> = test_run
+                .get_failing_tests()
+                .iter()
+                .map(|id| id.as_str().to_string())
+                .collect();
+            let (failing_tests, failing_extra) = take_limited(all_failing, FAILING_LIST_LIMIT);
 
             ok_json(&RunResponse {
                 exit_code: cli_output.exit_code,
@@ -1024,13 +1141,11 @@ impl InquestMcpService {
                 passed: Some(test_run.count_successes()),
                 failed: Some(test_run.count_failures()),
                 duration_secs: test_run.total_duration().map(duration_secs),
-                failing_tests: test_run
-                    .get_failing_tests()
-                    .iter()
-                    .map(|id| id.as_str().to_string())
-                    .collect(),
+                failing_tests,
+                failing_truncated: (failing_extra > 0).then_some(failing_extra),
                 interruption: test_run.interruption.as_ref().map(|i| i.to_string()),
                 message: None,
+                error_output,
             })
         } else {
             ok_json(&RunResponse {
@@ -1041,8 +1156,10 @@ impl InquestMcpService {
                 failed: None,
                 duration_secs: None,
                 failing_tests: Vec::new(),
+                failing_truncated: None,
                 interruption: None,
                 message: Some("No tests were executed".to_string()),
+                error_output,
             })
         }
     }
@@ -1145,11 +1262,7 @@ impl InquestMcpService {
     )]
     async fn inq_wait(&self, params: Parameters<WaitParam>) -> Result<CallToolResult, ErrorData> {
         let timeout = Duration::from_secs(params.0.timeout_secs.unwrap_or(600));
-        let target_run_id = params
-            .0
-            .run_id
-            .as_ref()
-            .map(|id| crate::repository::RunId::new(id));
+        let target_run_id = params.0.run_id.as_ref().map(crate::repository::RunId::new);
         let status_filter = if let Some(ref filters) = params.0.status_filter {
             Some(parse_status_filters(filters)?)
         } else {
@@ -1184,7 +1297,7 @@ impl InquestMcpService {
                 };
                 for run_id in &ids_to_check {
                     if let Ok(test_run) = repo.get_test_run(run_id) {
-                        let matching: Vec<WaitMatchingTest> = test_run
+                        let all_matching: Vec<WaitMatchingTest> = test_run
                             .results
                             .iter()
                             .filter(|(_, r)| statuses.contains(&r.status))
@@ -1193,7 +1306,9 @@ impl InquestMcpService {
                                 status: format!("{:?}", r.status),
                             })
                             .collect();
-                        if !matching.is_empty() {
+                        if !all_matching.is_empty() {
+                            let (matching_tests, matching_extra) =
+                                take_limited(all_matching, MATCHING_LIST_LIMIT);
                             return ok_json(&WaitResponse::EarlyReturn {
                                 status: "early_return",
                                 reason: "Tests matching status filter found while run is still in progress",
@@ -1201,7 +1316,8 @@ impl InquestMcpService {
                                 total_tests: test_run.total_tests(),
                                 passed: test_run.count_successes(),
                                 failed: test_run.count_failures(),
-                                matching_tests: matching,
+                                matching_tests,
+                                matching_truncated: (matching_extra > 0).then_some(matching_extra),
                             });
                         }
                     }
@@ -1582,6 +1698,7 @@ mod tests {
                 status_filter: None,
                 limit: None,
                 include_details: None,
+                max_detail_lines: None,
             }))
             .await
             .unwrap();
@@ -1606,6 +1723,7 @@ mod tests {
                 status_filter: Some(vec!["failure".to_string()]),
                 limit: None,
                 include_details: None,
+                max_detail_lines: None,
             }))
             .await
             .unwrap();
@@ -1621,6 +1739,7 @@ mod tests {
                 status_filter: Some(vec!["success".to_string()]),
                 limit: None,
                 include_details: None,
+                max_detail_lines: None,
             }))
             .await
             .unwrap();
@@ -1636,6 +1755,7 @@ mod tests {
                 status_filter: Some(vec!["failing".to_string()]),
                 limit: None,
                 include_details: None,
+                max_detail_lines: None,
             }))
             .await
             .unwrap();
@@ -1657,9 +1777,126 @@ mod tests {
                 status_filter: Some(vec!["bogus".to_string()]),
                 limit: None,
                 include_details: None,
+                max_detail_lines: None,
             }))
             .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_head_tail_truncate_short_input() {
+        // Short input: returned unchanged (apart from per-line trim, but no line is long).
+        assert_eq!(head_tail_truncate("one\ntwo\nthree", 10), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn test_head_tail_truncate_elides_middle() {
+        let input: String = (1..=20)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = head_tail_truncate(&input, 6);
+        // With max_lines=6 → head 4, tail 2, 14 omitted.
+        assert!(out.contains("line1"));
+        assert!(out.contains("line4"));
+        assert!(!out.contains("line5"));
+        assert!(!out.contains("line18"));
+        assert!(out.contains("line19"));
+        assert!(out.contains("line20"));
+        assert!(out.contains("14 lines omitted"));
+    }
+
+    #[test]
+    fn test_head_tail_truncate_zero_disables() {
+        let input: String = (1..=200)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(head_tail_truncate(&input, 0), input);
+    }
+
+    #[test]
+    fn test_head_tail_truncate_caps_long_line() {
+        // A single line longer than MAX_LINE_CHARS (500) gets trimmed even when under max_lines.
+        let long_line = "x".repeat(1000);
+        let out = head_tail_truncate(&long_line, 10);
+        assert!(out.contains("chars omitted"));
+        assert!(out.chars().count() < 700);
+    }
+
+    #[tokio::test]
+    async fn test_inq_log_truncates_details() {
+        let factory = InquestRepositoryFactory;
+        let temp = TempDir::new().unwrap();
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let long_traceback: String = (1..=200)
+            .map(|i| format!("  at frame {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut run = TestRun::new(RunId::new("0"));
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(
+            TestResult::failure("test_fail", "boom").with_details(long_traceback.clone()),
+        );
+        repo.insert_test_run(run).unwrap();
+        drop(repo);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_log(Parameters(LogParam {
+                run_id: None,
+                test_patterns: None,
+                status_filter: None,
+                limit: None,
+                include_details: Some(true),
+                max_detail_lines: None, // default 60
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+        let details = json["results"][0]["details"].as_str().unwrap();
+        // 200 lines truncated to 60 → 140 elided.
+        assert!(details.contains("lines omitted"));
+        // Confirm output is substantially shorter than input.
+        assert!(details.lines().count() < 200);
+        assert!(details.lines().count() <= 62); // 60 kept lines + elision marker lines
+    }
+
+    #[tokio::test]
+    async fn test_inq_log_truncation_opt_out() {
+        let factory = InquestRepositoryFactory;
+        let temp = TempDir::new().unwrap();
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let long_traceback: String = (1..=200)
+            .map(|i| format!("  at frame {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut run = TestRun::new(RunId::new("0"));
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(
+            TestResult::failure("test_fail", "boom").with_details(long_traceback.clone()),
+        );
+        repo.insert_test_run(run).unwrap();
+        drop(repo);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_log(Parameters(LogParam {
+                run_id: None,
+                test_patterns: None,
+                status_filter: None,
+                limit: None,
+                include_details: Some(true),
+                max_detail_lines: Some(0), // opt out
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+        let details = json["results"][0]["details"].as_str().unwrap();
+        assert!(!details.contains("lines omitted"));
+        assert_eq!(details.lines().count(), 200);
     }
 
     fn setup_runnable_project(temp: &TempDir) {
@@ -1691,6 +1928,44 @@ mod tests {
 
         assert!(json.get("exit_code").is_some());
         assert!(json.get("id").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_inq_run_captures_stderr_on_failure() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        factory.initialise(temp.path()).unwrap();
+
+        // A test command that succeeds at listing (empty output = 0 tests) but
+        // fails during execution by writing to stderr and exiting non-zero.
+        // This lands in the "exit_code != 0, stderr non-empty" branch that
+        // error_output was designed to surface.
+        let config = "test_command = \"sh -c 'if [ -n \\\"$LISTOPT\\\" ]; then \
+             exit 0; else echo boom-from-stderr 1>&2; exit 3; fi' -- $LISTOPT\"\n\
+             test_list_option = \"--list\"\n";
+        std::fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_run(Parameters(RunParam {
+                failing_only: None,
+                concurrency: None,
+                test_filters: None,
+                background: None,
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_ne!(json["exit_code"].as_i64().unwrap(), 0);
+        let error_output = json["error_output"]
+            .as_str()
+            .expect("error_output should be populated on non-zero exit with stderr");
+        assert!(
+            error_output.contains("boom-from-stderr"),
+            "expected error_output to contain stderr, got: {:?}",
+            error_output
+        );
     }
 
     #[tokio::test]
@@ -1816,6 +2091,76 @@ mod tests {
             .unwrap();
         let wait_json = parse_result(&wait_result);
         assert_eq!(wait_json["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn test_inq_wait_truncates_matching_tests() {
+        use crate::subunit_stream;
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        // Seed a run with 150 failing tests and keep the writer alive so the lock
+        // file stays — this makes the run appear "in progress" to inq_wait.
+        let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
+        let mut run = TestRun::new(run_id.clone());
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        for i in 0..150 {
+            run.add_result(TestResult::failure(format!("test_{i}"), "boom"));
+        }
+        subunit_stream::write_stream(&run, &mut writer).unwrap();
+        use std::io::Write;
+        writer.flush().unwrap();
+        // Hold the writer (and therefore the lock file) for the duration of the test.
+        drop(repo);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let wait_result = service
+            .inq_wait(Parameters(WaitParam {
+                run_id: Some(run_id.as_str().to_string()),
+                status_filter: Some(vec!["failing".to_string()]),
+                timeout_secs: Some(5),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&wait_result);
+        assert_eq!(json["status"], "early_return");
+        let matching = json["matching_tests"].as_array().unwrap();
+        assert_eq!(matching.len(), MATCHING_LIST_LIMIT);
+        assert_eq!(
+            json["matching_truncated"].as_u64().unwrap() as usize,
+            150 - MATCHING_LIST_LIMIT
+        );
+
+        drop(writer); // release lock
+    }
+
+    #[tokio::test]
+    async fn test_inq_last_truncates_failing_tests() {
+        let factory = InquestRepositoryFactory;
+        let temp = TempDir::new().unwrap();
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut run = TestRun::new(RunId::new("0"));
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        for i in 0..150 {
+            run.add_result(TestResult::failure(format!("test_{i:03}"), "boom"));
+        }
+        repo.insert_test_run(run).unwrap();
+        drop(repo);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_last(Parameters(RunIdParam { run_id: None }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+        let failing = json["failing_tests"].as_array().unwrap();
+        assert_eq!(failing.len(), FAILING_LIST_LIMIT);
+        assert_eq!(
+            json["failing_truncated"].as_u64().unwrap() as usize,
+            150 - FAILING_LIST_LIMIT
+        );
     }
 
     #[tokio::test]

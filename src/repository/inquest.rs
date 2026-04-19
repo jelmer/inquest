@@ -996,15 +996,16 @@ mod tests {
         // Verify metadata was stored (open as new connection to verify)
         let db_path = temp.path().join(REPO_DIR).join("metadata.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        let (git_commit, git_dirty, command, concurrency, duration_secs, exit_code): (
+        type MetadataRow = (
             Option<String>,
             Option<bool>,
             Option<String>,
             Option<i64>,
             Option<f64>,
             Option<i32>,
-        ) = conn
-            .query_row(
+        );
+        let (git_commit, git_dirty, command, concurrency, duration_secs, exit_code): MetadataRow =
+            conn.query_row(
                 "SELECT git_commit, git_dirty, command, concurrency, duration_secs, exit_code FROM runs WHERE id = ?",
                 [run_id.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
