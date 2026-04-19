@@ -197,6 +197,27 @@ pub struct TestBatchLookupParam {
     pub max_detail_lines: Option<usize>,
 }
 
+/// Parameters for the run-listing tool.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListRunsParam {
+    /// Max number of runs to return (default 20). The response reports `total`
+    /// and `truncated` so you know if more exist.
+    pub limit: Option<usize>,
+    /// Number of runs to skip before returning results (default 0). Use with
+    /// `limit` to page through history. Offsets count from the newest run.
+    pub offset: Option<usize>,
+}
+
+/// Parameters for the per-test history tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TestHistoryParam {
+    /// Exact test ID to look up across runs. Matched string-equal — no globs.
+    pub test_id: String,
+    /// Max number of runs (newest first) to scan. Default 20. Runs where the
+    /// test wasn't recorded are skipped and don't count against the limit.
+    pub limit: Option<usize>,
+}
+
 /// Parameters for the analyze-isolation tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AnalyzeIsolationParam {
@@ -632,6 +653,53 @@ struct InfoResponse {
     failed: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     total_test_time_secs: Option<f64>,
+}
+
+/// One row in the run-listing response. Compact — callers can fetch full
+/// metadata with inq_info if they want git_commit, command, etc.
+#[derive(Serialize)]
+struct RunListEntry {
+    id: String,
+    timestamp: String,
+    total_tests: usize,
+    passed: usize,
+    failed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_secs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+}
+
+#[derive(Serialize)]
+struct ListRunsResponse {
+    count: usize,
+    total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<usize>,
+    runs: Vec<RunListEntry>,
+}
+
+/// One row in the per-test history response.
+#[derive(Serialize)]
+struct TestHistoryEntry {
+    run_id: String,
+    timestamp: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_secs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_first_line: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TestHistoryResponse {
+    test_id: String,
+    /// Number of runs inspected (may be less than `limit` when the repository
+    /// has fewer runs). Runs where the test was absent are skipped and **not**
+    /// counted here.
+    count: usize,
+    /// Newest run first.
+    history: Vec<TestHistoryEntry>,
 }
 
 #[derive(Serialize)]
@@ -1565,6 +1633,99 @@ impl InquestMcpService {
             passed: test_run.count_successes(),
             failed: test_run.count_failures(),
             total_test_time_secs: test_run.total_duration().map(duration_secs),
+        })
+    }
+
+    /// List recent test runs with compact per-run summaries.
+    #[tool(
+        description = "List recent test runs (newest first) with timestamp, pass/fail counts, \
+                        duration, and exit code. Paginated — default limit is 20. Use inq_info \
+                        to fetch full per-run metadata (git commit, command, etc.).",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn inq_list_runs(
+        &self,
+        params: Parameters<ListRunsParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let repo = self.open_repo()?;
+        let mut run_ids = repo.list_run_ids().map_err(to_mcp_err)?;
+        // Repository returns oldest-first; callers almost always want newest.
+        run_ids.reverse();
+
+        let total = run_ids.len();
+        let offset = params.0.offset.unwrap_or(0);
+        let limit = params.0.limit.unwrap_or(20);
+
+        let runs: Vec<RunListEntry> = run_ids
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .filter_map(|run_id| {
+                let test_run = repo.get_test_run(run_id).ok()?;
+                // Metadata is optional for legacy repos — fall back to None fields.
+                let metadata = repo.get_run_metadata(run_id).unwrap_or_default();
+                Some(RunListEntry {
+                    id: run_id.as_str().to_string(),
+                    timestamp: test_run.timestamp.to_rfc3339(),
+                    total_tests: test_run.total_tests(),
+                    passed: test_run.count_successes(),
+                    failed: test_run.count_failures(),
+                    duration_secs: test_run.total_duration().map(duration_secs),
+                    exit_code: metadata.exit_code,
+                })
+            })
+            .collect();
+
+        let returned = runs.len();
+        let truncated = total.saturating_sub(offset + returned);
+
+        ok_json(&ListRunsResponse {
+            count: returned,
+            total,
+            truncated: (truncated > 0).then_some(truncated),
+            runs,
+        })
+    }
+
+    /// Show the per-run history of a single test.
+    #[tool(
+        description = "Walk recent runs (newest first) and report this test's status in each. \
+                        Useful for questions like 'when did test X start failing?'. Runs where \
+                        the test wasn't recorded are skipped. Default limit scans the last 20 \
+                        runs; unscanned older runs are not counted.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn inq_test_history(
+        &self,
+        params: Parameters<TestHistoryParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let repo = self.open_repo()?;
+        let mut run_ids = repo.list_run_ids().map_err(to_mcp_err)?;
+        run_ids.reverse();
+
+        let limit = params.0.limit.unwrap_or(20);
+        let test_id = crate::repository::TestId::new(&params.0.test_id);
+
+        let history: Vec<TestHistoryEntry> = run_ids
+            .iter()
+            .take(limit)
+            .filter_map(|run_id| {
+                let test_run = repo.get_test_run(run_id).ok()?;
+                let result = test_run.results.get(&test_id)?;
+                Some(TestHistoryEntry {
+                    run_id: run_id.as_str().to_string(),
+                    timestamp: test_run.timestamp.to_rfc3339(),
+                    status: result.status.to_string(),
+                    duration_secs: result.duration.map(duration_secs),
+                    message_first_line: result.message.as_deref().and_then(first_nonempty_line),
+                })
+            })
+            .collect();
+
+        ok_json(&TestHistoryResponse {
+            test_id: params.0.test_id,
+            count: history.len(),
+            history,
         })
     }
 
@@ -2876,5 +3037,161 @@ mod tests {
 
         assert_eq!(json["run_count"], 0);
         assert!(json.get("latest_run").is_none());
+    }
+
+    /// Helper: seed a repo with `n` sequential runs, each containing the tests
+    /// produced by `per_run_tests(run_index)`. Returns the opened repo closed
+    /// for further writes.
+    fn seed_repo_with_runs<F>(temp: &TempDir, n: usize, per_run_tests: F)
+    where
+        F: Fn(usize) -> Vec<TestResult>,
+    {
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+        for i in 0..n {
+            let run_id = RunId::new(i.to_string());
+            let mut run = TestRun::new(run_id.clone());
+            // Distinct timestamps so newest-first ordering is observable.
+            run.timestamp =
+                chrono::DateTime::from_timestamp(1_000_000_000 + i as i64 * 3600, 0).unwrap();
+            for r in per_run_tests(i) {
+                run.add_result(r);
+            }
+            repo.insert_test_run(run).unwrap();
+            repo.set_run_metadata(
+                &run_id,
+                RunMetadata {
+                    exit_code: Some(if i % 2 == 0 { 1 } else { 0 }),
+                    ..RunMetadata::default()
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_inq_list_runs_newest_first() {
+        let temp = TempDir::new().unwrap();
+        seed_repo_with_runs(&temp, 3, |_| vec![TestResult::success("a")]);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_list_runs(Parameters(ListRunsParam::default()))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["total"], 3);
+        assert_eq!(json["count"], 3);
+        assert!(json.get("truncated").is_none() || json["truncated"].is_null());
+        let runs = json["runs"].as_array().unwrap();
+        // Newest first: ids 2, 1, 0.
+        assert_eq!(runs[0]["id"], "2");
+        assert_eq!(runs[1]["id"], "1");
+        assert_eq!(runs[2]["id"], "0");
+        // exit_code from metadata comes through.
+        assert_eq!(runs[0]["exit_code"], 1); // index 2 → even → exit 1
+        assert_eq!(runs[1]["exit_code"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_inq_list_runs_pagination() {
+        let temp = TempDir::new().unwrap();
+        seed_repo_with_runs(&temp, 5, |_| vec![TestResult::success("a")]);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_list_runs(Parameters(ListRunsParam {
+                limit: Some(2),
+                offset: Some(1),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["total"], 5);
+        assert_eq!(json["count"], 2);
+        // Newest is id 4; offset 1 skips it; limit 2 takes ids 3 and 2.
+        assert_eq!(json["runs"][0]["id"], "3");
+        assert_eq!(json["runs"][1]["id"], "2");
+        // 5 total - 1 offset - 2 returned = 2 remaining.
+        assert_eq!(json["truncated"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_inq_test_history_tracks_status_changes() {
+        let temp = TempDir::new().unwrap();
+        // Run 0: passes. Run 1: fails. Run 2: passes. Run 3: test absent.
+        // Note: the subunit roundtrip only preserves the `details` attachment,
+        // so attach the message as details to make it observable in the response.
+        seed_repo_with_runs(&temp, 4, |i| match i {
+            0 => vec![TestResult::success("pkg::flaky")],
+            1 => vec![TestResult::failure("pkg::flaky", "sometimes fails")
+                .with_details("sometimes fails")],
+            2 => vec![TestResult::success("pkg::flaky")],
+            3 => vec![TestResult::success("other")],
+            _ => vec![],
+        });
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_test_history(Parameters(TestHistoryParam {
+                test_id: "pkg::flaky".to_string(),
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        // Run 3 is skipped (test absent); remaining history has 3 entries, newest first.
+        assert_eq!(json["count"], 3);
+        let history = json["history"].as_array().unwrap();
+        assert_eq!(history[0]["run_id"], "2");
+        assert_eq!(history[0]["status"], "success");
+        assert_eq!(history[1]["run_id"], "1");
+        assert_eq!(history[1]["status"], "failure");
+        assert_eq!(history[1]["message_first_line"], "sometimes fails");
+        assert_eq!(history[2]["run_id"], "0");
+        assert_eq!(history[2]["status"], "success");
+    }
+
+    #[tokio::test]
+    async fn test_inq_test_history_respects_limit() {
+        let temp = TempDir::new().unwrap();
+        seed_repo_with_runs(&temp, 10, |_| vec![TestResult::success("t")]);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_test_history(Parameters(TestHistoryParam {
+                test_id: "t".to_string(),
+                limit: Some(3),
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["count"], 3);
+        // Newest three: 9, 8, 7.
+        assert_eq!(json["history"][0]["run_id"], "9");
+        assert_eq!(json["history"][2]["run_id"], "7");
+    }
+
+    #[tokio::test]
+    async fn test_inq_test_history_unknown_test() {
+        let temp = TempDir::new().unwrap();
+        seed_repo_with_runs(&temp, 3, |_| vec![TestResult::success("real_test")]);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_test_history(Parameters(TestHistoryParam {
+                test_id: "never_seen".to_string(),
+                limit: None,
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["count"], 0);
+        assert_eq!(json["history"].as_array().unwrap().len(), 0);
     }
 }
