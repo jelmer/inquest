@@ -1247,6 +1247,7 @@ fn test_serial_run_with_cancellation() {
         test_args: None,
         cancellation_token: Some(token),
         max_restarts: None,
+        stderr_capture: None,
     };
     let executor = TestExecutor::new(&exec_config);
 
@@ -1312,6 +1313,7 @@ fn test_isolated_run_with_cancellation() {
         test_args: None,
         cancellation_token: Some(token),
         max_restarts: None,
+        stderr_capture: None,
     };
     let executor = TestExecutor::new(&exec_config);
 

@@ -142,10 +142,15 @@ impl Read for ChannelReader {
     }
 }
 
-/// Spawn a thread to forward stderr to the terminal via progress bar suspension
+/// Spawn a thread to forward stderr to the terminal via progress bar suspension.
+///
+/// When `capture` is `Some`, each chunk read from stderr is also appended to the
+/// shared buffer so the caller can recover the output after the child exits.
+/// The terminal forwarding happens regardless.
 pub fn spawn_stderr_forwarder<R: Read + Send + 'static>(
     mut stderr: R,
     progress_bar: ProgressBar,
+    capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 ) -> std::thread::JoinHandle<std::io::Result<()>> {
     std::thread::spawn(move || -> std::io::Result<()> {
         use std::io::Write;
@@ -159,6 +164,11 @@ pub fn spawn_stderr_forwarder<R: Read + Send + 'static>(
                         let _ = std::io::stderr().write_all(&buffer[..n]);
                         let _ = std::io::stderr().flush();
                     });
+                    if let Some(ref cap) = capture {
+                        if let Ok(mut buf) = cap.lock() {
+                            buf.extend_from_slice(&buffer[..n]);
+                        }
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -317,8 +327,24 @@ mod tests {
         let input = b"stderr data";
         let progress_bar = ProgressBar::hidden();
 
-        let handle = spawn_stderr_forwarder(&input[..], progress_bar);
+        let handle = spawn_stderr_forwarder(&input[..], progress_bar, None);
         assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn test_spawn_stderr_forwarder_capture() {
+        use indicatif::ProgressBar;
+        use std::sync::{Arc, Mutex};
+
+        let input = b"captured stderr line\nsecond line\n";
+        let progress_bar = ProgressBar::hidden();
+        let capture = Arc::new(Mutex::new(Vec::new()));
+
+        let handle = spawn_stderr_forwarder(&input[..], progress_bar, Some(capture.clone()));
+        assert!(handle.join().unwrap().is_ok());
+
+        let captured = capture.lock().unwrap().clone();
+        assert_eq!(captured, input);
     }
 
     #[test]
