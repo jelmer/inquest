@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::commands::utils::{open_or_init_repository, open_repository, resolve_run_id};
 use crate::repository::inquest::InquestRepositoryFactory;
-use crate::repository::{Repository, RepositoryFactory, TestStatus};
+use crate::repository::{Repository, RepositoryFactory, TestResult, TestStatus};
 use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 
@@ -145,6 +145,28 @@ pub struct LogParam {
     pub max_detail_lines: Option<usize>,
 }
 
+/// Parameters for the failure-summary tool.
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct FailureSummaryParam {
+    /// Run ID to summarise (defaults to latest; supports negative indices like -1, -2).
+    pub run_id: Option<String>,
+    /// Max number of failures to return (default 25). The response reports
+    /// `total_failing` and `truncated` so you know if more exist.
+    pub limit: Option<usize>,
+}
+
+/// Parameters for the single-test lookup tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TestLookupParam {
+    /// The exact test ID to fetch (no globbing — use inq_log for pattern matching).
+    pub test_id: String,
+    /// Run ID to query (defaults to latest; supports negative indices like -1, -2).
+    pub run_id: Option<String>,
+    /// Max lines for message/details fields. See inq_log's max_detail_lines for semantics.
+    /// Default 60. Set to 0 to receive the full content.
+    pub max_detail_lines: Option<usize>,
+}
+
 /// Parameters for the analyze-isolation tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AnalyzeIsolationParam {
@@ -228,6 +250,15 @@ const MATCHING_LIST_LIMIT: usize = 50;
 /// Matches the default for inq_log's traceback truncation.
 const ERROR_OUTPUT_LINE_BUDGET: usize = 60;
 
+/// Default number of failures returned by inq_failure_summary. Failures
+/// cluster; 25 is usually enough to see the pattern.
+const FAILURE_SUMMARY_LIMIT: usize = 25;
+
+/// Max characters kept from the first line of a failure message in
+/// inq_failure_summary. Long first lines (giant assertion diffs) are trimmed
+/// with an ellipsis; the full message remains available via inq_test.
+const SUMMARY_FIRST_LINE_CHARS: usize = 200;
+
 /// Shorten a single line to at most `MAX_LINE_CHARS` characters (head + ellipsis).
 /// Operates on char boundaries so UTF-8 sequences are never split.
 fn truncate_line(line: &str) -> String {
@@ -273,6 +304,20 @@ fn head_tail_truncate(s: &str, max_lines: usize) -> String {
         head.join("\n"),
         tail.join("\n")
     )
+}
+
+/// Extract the first non-empty line of a message, trimmed and capped at
+/// `SUMMARY_FIRST_LINE_CHARS`. Returns `None` if no non-empty line exists.
+/// Used by inq_failure_summary to offer a signal-rich one-liner per failure
+/// without dragging the full traceback into the response.
+fn first_nonempty_line(s: &str) -> Option<String> {
+    let line = s.lines().map(str::trim).find(|l| !l.is_empty())?;
+    if line.chars().count() <= SUMMARY_FIRST_LINE_CHARS {
+        Some(line.to_string())
+    } else {
+        let head: String = line.chars().take(SUMMARY_FIRST_LINE_CHARS).collect();
+        Some(format!("{head}…"))
+    }
 }
 
 #[derive(Serialize)]
@@ -400,6 +445,37 @@ struct LogResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     truncated: Option<usize>,
     results: Vec<LogEntry>,
+}
+
+#[derive(Serialize)]
+struct FailureSummaryEntry {
+    test_id: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_first_line: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FailureSummaryResponse {
+    run_id: String,
+    total_failing: usize,
+    count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<usize>,
+    failures: Vec<FailureSummaryEntry>,
+}
+
+#[derive(Serialize)]
+struct TestLookupResponse {
+    run_id: String,
+    test_id: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_secs: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -897,6 +973,94 @@ impl InquestMcpService {
             total,
             truncated: (truncated > 0).then_some(truncated),
             results,
+        })
+    }
+
+    /// Concise triage view of a run's failures.
+    #[tool(
+        description = "List a run's failing tests with the first line of each failure message. \
+                        Default limit is 25. Use this for triage before drilling into a specific \
+                        failure with inq_test."
+    )]
+    async fn inq_failure_summary(
+        &self,
+        params: Parameters<FailureSummaryParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let repo = self.open_repo()?;
+        let run_id = resolve_run_id(&*repo, params.0.run_id.as_deref()).map_err(to_mcp_err)?;
+        let test_run = repo.get_test_run(&run_id).map_err(to_mcp_err)?;
+
+        let mut failing: Vec<&TestResult> = test_run
+            .results
+            .values()
+            .filter(|r| r.status.is_failure())
+            .collect();
+        failing.sort_by(|a, b| a.test_id.as_str().cmp(b.test_id.as_str()));
+        let total_failing = failing.len();
+
+        let limit = params.0.limit.unwrap_or(FAILURE_SUMMARY_LIMIT);
+        let truncated = total_failing.saturating_sub(limit);
+
+        let failures: Vec<FailureSummaryEntry> = failing
+            .iter()
+            .take(limit)
+            .map(|r| FailureSummaryEntry {
+                test_id: r.test_id.as_str().to_string(),
+                status: r.status.to_string(),
+                message_first_line: r.message.as_deref().and_then(first_nonempty_line),
+            })
+            .collect();
+
+        ok_json(&FailureSummaryResponse {
+            run_id: run_id.as_str().to_string(),
+            total_failing,
+            count: failures.len(),
+            truncated: (truncated > 0).then_some(truncated),
+            failures,
+        })
+    }
+
+    /// Fetch the full detail of a single test from a run.
+    #[tool(
+        description = "Fetch one test's status, duration, and (truncated) message/details by \
+                        exact test ID. Typically used after inq_failure_summary surfaces a test \
+                        you want to investigate. Errors if the test ID isn't present in the run."
+    )]
+    async fn inq_test(
+        &self,
+        params: Parameters<TestLookupParam>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let repo = self.open_repo()?;
+        let run_id = resolve_run_id(&*repo, params.0.run_id.as_deref()).map_err(to_mcp_err)?;
+        let test_run = repo.get_test_run(&run_id).map_err(to_mcp_err)?;
+
+        let test_id = crate::repository::TestId::new(&params.0.test_id);
+        let result = test_run.results.get(&test_id).ok_or_else(|| {
+            ErrorData::invalid_params(
+                format!(
+                    "Test '{}' not found in run '{}'",
+                    params.0.test_id,
+                    run_id.as_str()
+                ),
+                None,
+            )
+        })?;
+
+        let max_detail_lines = params.0.max_detail_lines.unwrap_or(60);
+
+        ok_json(&TestLookupResponse {
+            run_id: run_id.as_str().to_string(),
+            test_id: result.test_id.as_str().to_string(),
+            status: result.status.to_string(),
+            duration_secs: result.duration.map(duration_secs),
+            message: result
+                .message
+                .as_ref()
+                .map(|m| head_tail_truncate(m, max_detail_lines)),
+            details: result
+                .details
+                .as_ref()
+                .map(|d| head_tail_truncate(d, max_detail_lines)),
         })
     }
 
@@ -1458,7 +1622,11 @@ impl ServerHandler for InquestMcpService {
             .with_server_info(Implementation::new("inquest", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "Inquest test repository server. Provides access to test results, \
-             failing tests, statistics, and test execution."
+                 failing tests, statistics, and test execution. \
+                 For failure triage, prefer inq_failure_summary to get a compact \
+                 list of failing tests with a one-line message each, then inq_test \
+                 to expand a specific failure's full (truncated) traceback. Use \
+                 inq_log only when you need pattern-based search across a run."
                     .to_string(),
             )
     }
@@ -1897,6 +2065,154 @@ mod tests {
         let details = json["results"][0]["details"].as_str().unwrap();
         assert!(!details.contains("lines omitted"));
         assert_eq!(details.lines().count(), 200);
+    }
+
+    #[test]
+    fn test_first_nonempty_line_skips_blank_prefix() {
+        assert_eq!(
+            first_nonempty_line("\n\n  first real line\nsecond\n"),
+            Some("first real line".to_string())
+        );
+    }
+
+    #[test]
+    fn test_first_nonempty_line_truncates_long() {
+        let long = "x".repeat(500);
+        let out = first_nonempty_line(&long).unwrap();
+        assert!(out.chars().count() <= SUMMARY_FIRST_LINE_CHARS + 1);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn test_first_nonempty_line_all_blank() {
+        assert_eq!(first_nonempty_line("\n\n   \n"), None);
+    }
+
+    #[tokio::test]
+    async fn test_inq_failure_summary_lists_failing_only() {
+        let factory = InquestRepositoryFactory;
+        let temp = TempDir::new().unwrap();
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut run = TestRun::new(RunId::new("0"));
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::success("test_pass"));
+        run.add_result(
+            TestResult::failure("test_boom", "boom")
+                .with_details("AssertionError: expected 1 got 2\n  at frame 1\n  at frame 2"),
+        );
+        run.add_result(
+            TestResult::failure("test_other", "nope")
+                .with_details("TypeError: cannot add int to str"),
+        );
+        repo.insert_test_run(run).unwrap();
+        drop(repo);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_failure_summary(Parameters(FailureSummaryParam::default()))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["total_failing"], 2);
+        assert_eq!(json["count"], 2);
+        assert!(json.get("truncated").is_none() || json["truncated"].is_null());
+        let failures = json["failures"].as_array().unwrap();
+        // Sorted by test_id.
+        assert_eq!(failures[0]["test_id"], "test_boom");
+        assert_eq!(failures[0]["status"], "failure");
+        assert_eq!(
+            failures[0]["message_first_line"],
+            "AssertionError: expected 1 got 2"
+        );
+        assert_eq!(failures[1]["test_id"], "test_other");
+        assert_eq!(
+            failures[1]["message_first_line"],
+            "TypeError: cannot add int to str"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inq_failure_summary_truncates() {
+        let factory = InquestRepositoryFactory;
+        let temp = TempDir::new().unwrap();
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut run = TestRun::new(RunId::new("0"));
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        for i in 0..100 {
+            run.add_result(
+                TestResult::failure(format!("test_{i:03}"), "boom").with_details("E: boom"),
+            );
+        }
+        repo.insert_test_run(run).unwrap();
+        drop(repo);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_failure_summary(Parameters(FailureSummaryParam {
+                run_id: None,
+                limit: None, // default 25
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["total_failing"], 100);
+        assert_eq!(json["count"], FAILURE_SUMMARY_LIMIT);
+        assert_eq!(
+            json["truncated"].as_u64().unwrap() as usize,
+            100 - FAILURE_SUMMARY_LIMIT
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inq_test_hit() {
+        let factory = InquestRepositoryFactory;
+        let temp = TempDir::new().unwrap();
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut run = TestRun::new(RunId::new("0"));
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(
+            TestResult::failure("pkg::test_x", "boom")
+                .with_duration(std::time::Duration::from_millis(500))
+                .with_details("AssertionError: line 1\nline 2\nline 3"),
+        );
+        repo.insert_test_run(run).unwrap();
+        drop(repo);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_test(Parameters(TestLookupParam {
+                test_id: "pkg::test_x".to_string(),
+                run_id: None,
+                max_detail_lines: None,
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["test_id"], "pkg::test_x");
+        assert_eq!(json["status"], "failure");
+        assert!(json["duration_secs"].as_f64().unwrap() > 0.4);
+        assert!(json["details"].as_str().unwrap().contains("AssertionError"));
+    }
+
+    #[tokio::test]
+    async fn test_inq_test_miss() {
+        let temp = TempDir::new().unwrap();
+        let _repo = setup_repo_with_run(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_test(Parameters(TestLookupParam {
+                test_id: "does_not_exist".to_string(),
+                run_id: None,
+                max_detail_lines: None,
+            }))
+            .await;
+        assert!(result.is_err());
     }
 
     fn setup_runnable_project(temp: &TempDir) {
