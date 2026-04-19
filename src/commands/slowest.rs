@@ -54,7 +54,7 @@ impl Command for SlowestCommand {
         }
 
         // Sort by duration (slowest first)
-        tests_with_duration.sort_by(|a, b| b.1.cmp(&a.1));
+        tests_with_duration.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         // Calculate total time
         let total_time: std::time::Duration = tests_with_duration.iter().map(|(_, dur)| *dur).sum();

@@ -244,7 +244,7 @@ pub fn warn_slow_tests(
         return Ok(());
     }
 
-    slow_tests.sort_by(|a, b| b.1.cmp(&a.1));
+    slow_tests.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     ui.output(&format!(
         "\n  {} test(s) ran significantly slower than historical average ({:.0}x threshold):",
