@@ -2004,7 +2004,7 @@ impl InquestMcpService {
 
     /// Auto-detect project type and generate configuration.
     #[tool(
-        description = "Auto-detect project type (Cargo, pytest, unittest) and generate an inquest.toml configuration file",
+        description = "Auto-detect project type (Cargo, pytest, unittest, Perl/prove) and generate an inquest.toml configuration file",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
