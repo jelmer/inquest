@@ -3,12 +3,12 @@
 //! Provides structured JSON access to test repository data via the MCP protocol.
 //! Start with `inq mcp` to run the server over stdio.
 
-use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, ErrorData, Implementation, ServerCapabilities, ServerInfo,
+    CallToolResult, Content, ErrorData, Implementation, Meta, ProgressNotificationParam,
+    ProgressToken, ServerCapabilities, ServerInfo,
 };
-use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use rmcp::{tool, tool_handler, tool_router, Peer, RoleServer, ServerHandler};
 use serde::Serialize;
 
 use crate::commands::utils::{open_or_init_repository, open_repository, resolve_run_id};
@@ -58,7 +58,6 @@ impl crate::ui::UI for CollectUI {
 #[derive(Debug, Clone)]
 pub struct InquestMcpService {
     directory: PathBuf,
-    tool_router: ToolRouter<Self>,
     /// Cancellation tokens for background runs, keyed by run ID.
     cancel_tokens: Arc<Mutex<HashMap<crate::repository::RunId, CancellationToken>>>,
 }
@@ -68,7 +67,6 @@ impl InquestMcpService {
     pub fn new(directory: PathBuf) -> Self {
         Self {
             directory,
-            tool_router: Self::tool_router(),
             cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -237,6 +235,14 @@ pub struct RunParam {
     /// Run tests in the background. Returns immediately with the run ID.
     /// Use inq_wait to block until the run completes, or inq_running to check
     /// progress. Use inq_last or inq_log to see results when done.
+    ///
+    /// Recommended for suites that may exceed the client's MCP tool-call
+    /// timeout (Claude Code defaults to 2 minutes, configurable via
+    /// MCP_TOOL_TIMEOUT). Foreground runs also emit periodic
+    /// notifications/progress messages when the client supplies a
+    /// progressToken in the request's _meta, which most compliant clients
+    /// use to reset their timer — but background mode is the portable
+    /// choice.
     pub background: Option<bool>,
 }
 
@@ -284,6 +290,107 @@ fn take_limited<T>(mut items: Vec<T>, limit: usize) -> (Vec<T>, usize) {
         let extra = items.len() - limit;
         items.truncate(limit);
         (items, extra)
+    }
+}
+
+/// Interval between MCP progress notifications during long-running tools.
+///
+/// Well under Claude Code's default MCP tool-call timeout (~2 minutes) so a
+/// single notification always lands inside the window. MCP clients that reset
+/// their tool-call timer on `notifications/progress` will keep the request
+/// alive as long as these keep arriving.
+const PROGRESS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
+
+/// Send MCP progress notifications for the currently in-flight tool request.
+///
+/// Only constructed when the client opts in by attaching a `progressToken`
+/// to the request's `_meta`. Handlers that don't receive one skip
+/// reporting entirely. Cloneable so the ticker task and the handler itself
+/// can each hold a copy.
+#[derive(Clone)]
+struct ProgressReporter {
+    peer: Peer<RoleServer>,
+    token: ProgressToken,
+}
+
+impl ProgressReporter {
+    fn from_meta(peer: &Peer<RoleServer>, meta: &Meta) -> Option<Self> {
+        meta.get_progress_token().map(|token| Self {
+            peer: peer.clone(),
+            token,
+        })
+    }
+
+    async fn notify(&self, progress: u64, message: String) {
+        let param = ProgressNotificationParam::new(self.token.clone(), progress as f64)
+            .with_message(message);
+        if let Err(e) = self.peer.notify_progress(param).await {
+            tracing::debug!("progress notification failed: {e}");
+        }
+    }
+}
+
+/// Run `work` on a blocking thread while emitting MCP progress notifications
+/// for the in-flight request at a regular cadence, so the client's tool-call
+/// timer doesn't fire.
+///
+/// If `reporter` is `None` (the client didn't opt in to progress reporting),
+/// no notifications are sent.
+///
+/// `message` is included in each notification for observability. Elapsed
+/// seconds are appended automatically.
+async fn run_blocking_with_progress<F, T>(
+    reporter: Option<ProgressReporter>,
+    message: &'static str,
+    work: F,
+) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let keepalive = reporter.map(|r| tokio::spawn(progress_keepalive_loop(r, stop_rx, message)));
+
+    let result = tokio::task::spawn_blocking(work).await;
+
+    // Signal the keepalive task to stop and wait for it to exit. Ignoring both
+    // errors is intentional: the keepalive may have already exited (e.g. the
+    // transport broke and it returned early), or the receiver was dropped.
+    let _ = stop_tx.send(());
+    if let Some(handle) = keepalive {
+        let _ = handle.await;
+    }
+
+    result
+}
+
+async fn progress_keepalive_loop(
+    reporter: ProgressReporter,
+    stop: tokio::sync::oneshot::Receiver<()>,
+    message: &'static str,
+) {
+    let start = std::time::Instant::now();
+    let mut progress: u64 = 0;
+    let mut ticker = tokio::time::interval(PROGRESS_KEEPALIVE_INTERVAL);
+    // If the loop falls behind (e.g. the runtime stalls), catch up with a
+    // single tick instead of firing a burst of backlogged notifications.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Consume the immediate first tick so we don't send a spurious 0-second
+    // notification the moment the request starts.
+    ticker.tick().await;
+
+    tokio::pin!(stop);
+    loop {
+        tokio::select! {
+            _ = &mut stop => return,
+            _ = ticker.tick() => {
+                progress += 1;
+                let elapsed = start.elapsed().as_secs();
+                reporter
+                    .notify(progress, format!("{message} (elapsed: {elapsed}s)"))
+                    .await;
+            }
+        }
     }
 }
 
@@ -1334,7 +1441,13 @@ impl InquestMcpService {
 
     /// Execute tests and return results.
     #[tool(
-        description = "Execute tests and return structured results. Requires a configuration file (inquest.toml or .testr.conf) in the project directory.",
+        description = "Execute tests and return structured results. Requires a configuration file (inquest.toml or .testr.conf) in the project directory. \
+                        \n\n\
+                        Long-running runs: when the client attaches a progressToken to the request's _meta, the server emits periodic notifications/progress \
+                        messages so compliant MCP clients reset their tool-call timer — this keeps foreground runs alive past the default timeout. \
+                        If you can't rely on the client handling progress notifications (Claude Code's MCP_TOOL_TIMEOUT defaults to 2 minutes), \
+                        use background=true instead: the call returns immediately with a run ID, and you can poll with inq_wait / inq_running and read \
+                        results with inq_last / inq_log.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1342,7 +1455,21 @@ impl InquestMcpService {
             open_world_hint = true
         )
     )]
-    async fn inq_run(&self, params: Parameters<RunParam>) -> Result<CallToolResult, ErrorData> {
+    async fn inq_run(
+        &self,
+        params: Parameters<RunParam>,
+        peer: Peer<RoleServer>,
+        meta: Meta,
+    ) -> Result<CallToolResult, ErrorData> {
+        let reporter = ProgressReporter::from_meta(&peer, &meta);
+        self.inq_run_impl(params.0, reporter).await
+    }
+
+    async fn inq_run_impl(
+        &self,
+        params: RunParam,
+        reporter: Option<ProgressReporter>,
+    ) -> Result<CallToolResult, ErrorData> {
         let base = &self.directory;
 
         struct NullUI;
@@ -1358,10 +1485,10 @@ impl InquestMcpService {
             }
         }
 
-        let failing_only = params.0.failing_only.unwrap_or(false);
+        let failing_only = params.failing_only.unwrap_or(false);
         let partial = failing_only;
-        let test_filters = params.0.test_filters.filter(|f| !f.is_empty());
-        let background = params.0.background.unwrap_or(false);
+        let test_filters = params.test_filters.filter(|f| !f.is_empty());
+        let background = params.background.unwrap_or(false);
 
         if background {
             let mut repo = open_or_init_repository(Some(&self.dir_str()), true, &mut NullUI)
@@ -1422,7 +1549,7 @@ impl InquestMcpService {
                 );
             }
 
-            let concurrency = params.0.concurrency.unwrap_or(1);
+            let concurrency = params.concurrency.unwrap_or(1);
 
             // Pre-allocate the run — this creates the lock file so inq_running sees it
             let (run_id, writer) = repo.begin_test_run_raw().map_err(to_mcp_err)?;
@@ -1526,25 +1653,33 @@ impl InquestMcpService {
             });
         }
 
-        // Foreground execution
-        let mut ui = NullUI;
-
+        // Foreground execution. Blocking work lives on a dedicated thread so
+        // the MCP service loop can still handle pings, cancellations, and
+        // other tool calls while a long suite runs. When the client attaches
+        // a progressToken, `run_blocking_with_progress` also keeps the
+        // client's tool-call timer alive with periodic progress notifications.
         let stderr_capture = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let stderr_capture_for_task = stderr_capture.clone();
+        let base_path = base.to_string_lossy().to_string();
+        let concurrency = params.concurrency;
 
-        let cmd = crate::commands::RunCommand {
-            base_path: Some(base.to_string_lossy().to_string()),
-            partial,
-            failing_only,
-            force_init: true,
-            concurrency: params.0.concurrency,
-            test_filters,
-            stderr_capture: Some(stderr_capture.clone()),
-            ..Default::default()
-        };
-
-        let cli_output = cmd.execute_returning_run_id(&mut ui).map_err(|e| {
-            ErrorData::internal_error(format!("Test execution failed: {}", e), None)
-        })?;
+        let cli_output = run_blocking_with_progress(reporter, "running tests", move || {
+            let mut ui = NullUI;
+            let cmd = crate::commands::RunCommand {
+                base_path: Some(base_path),
+                partial,
+                failing_only,
+                force_init: true,
+                concurrency,
+                test_filters,
+                stderr_capture: Some(stderr_capture_for_task),
+                ..Default::default()
+            };
+            cmd.execute_returning_run_id(&mut ui)
+        })
+        .await
+        .map_err(|e| ErrorData::internal_error(format!("Test execution panicked: {}", e), None))?
+        .map_err(|e| ErrorData::internal_error(format!("Test execution failed: {}", e), None))?;
 
         // Pull out captured stderr once. Exposed only when the run failed —
         // a successful run's noisy stderr is rarely useful and would just
@@ -1842,17 +1977,33 @@ impl InquestMcpService {
     #[tool(
         description = "Wait for background test runs to complete. Returns when all runs finish, \
                         or early if status_filter is set and a running test matches that status \
-                        (e.g. \"failing\"). Much more efficient than polling inq_running in a loop.",
+                        (e.g. \"failing\"). Much more efficient than polling inq_running in a loop. \
+                        Emits notifications/progress periodically when the client supplies a \
+                        progressToken, so long waits don't trip the client's tool-call timeout.",
         annotations(
             read_only_hint = true,
             idempotent_hint = false,
             open_world_hint = false
         )
     )]
-    async fn inq_wait(&self, params: Parameters<WaitParam>) -> Result<CallToolResult, ErrorData> {
-        let timeout = Duration::from_secs(params.0.timeout_secs.unwrap_or(600));
-        let target_run_id = params.0.run_id.as_ref().map(crate::repository::RunId::new);
-        let status_filter = if let Some(ref filters) = params.0.status_filter {
+    async fn inq_wait(
+        &self,
+        params: Parameters<WaitParam>,
+        peer: Peer<RoleServer>,
+        meta: Meta,
+    ) -> Result<CallToolResult, ErrorData> {
+        let reporter = ProgressReporter::from_meta(&peer, &meta);
+        self.inq_wait_impl(params.0, reporter).await
+    }
+
+    async fn inq_wait_impl(
+        &self,
+        params: WaitParam,
+        reporter: Option<ProgressReporter>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let timeout = Duration::from_secs(params.timeout_secs.unwrap_or(600));
+        let target_run_id = params.run_id.as_ref().map(crate::repository::RunId::new);
+        let status_filter = if let Some(ref filters) = params.status_filter {
             Some(parse_status_filters(filters)?)
         } else {
             None
@@ -1860,6 +2011,8 @@ impl InquestMcpService {
 
         let poll_interval = Duration::from_secs(2);
         let start = std::time::Instant::now();
+        let mut next_progress_at = PROGRESS_KEEPALIVE_INTERVAL;
+        let mut progress_counter: u64 = 0;
 
         loop {
             let repo = self.open_repo()?;
@@ -1927,6 +2080,23 @@ impl InquestMcpService {
                         .map(|id| id.as_str().to_string())
                         .collect(),
                 });
+            }
+
+            // Keep the client's tool-call timer alive on long waits. Throttled
+            // to PROGRESS_KEEPALIVE_INTERVAL rather than every poll so we
+            // don't spam a client that's waiting on a fast-changing run.
+            if let Some(ref reporter) = reporter {
+                let elapsed = start.elapsed();
+                if elapsed >= next_progress_at {
+                    progress_counter += 1;
+                    reporter
+                        .notify(
+                            progress_counter,
+                            format!("waiting for test runs (elapsed: {}s)", elapsed.as_secs()),
+                        )
+                        .await;
+                    next_progress_at = elapsed + PROGRESS_KEEPALIVE_INTERVAL;
+                }
             }
 
             tokio::time::sleep(poll_interval).await;
@@ -2013,11 +2183,18 @@ impl InquestMcpService {
         )
     )]
     async fn inq_auto(&self) -> Result<CallToolResult, ErrorData> {
-        let mut ui = CollectUI::new();
-
-        let cmd = crate::commands::AutoCommand::new(Some(self.dir_str()));
-        use crate::commands::Command;
-        let exit_code = cmd.execute(&mut ui).map_err(to_mcp_err)?;
+        let dir = self.dir_str();
+        let (exit_code, ui) = tokio::task::spawn_blocking(move || {
+            let mut ui = CollectUI::new();
+            let cmd = crate::commands::AutoCommand::new(Some(dir));
+            use crate::commands::Command;
+            let result = cmd.execute(&mut ui);
+            (result, ui)
+        })
+        .await
+        .map(|(result, ui)| result.map(|code| (code, ui)))
+        .map_err(|e| ErrorData::internal_error(format!("inq_auto panicked: {}", e), None))?
+        .map_err(to_mcp_err)?;
 
         if exit_code != 0 {
             let msg = if ui.errors.is_empty() {
@@ -2048,13 +2225,34 @@ impl InquestMcpService {
     async fn inq_analyze_isolation(
         &self,
         params: Parameters<AnalyzeIsolationParam>,
+        peer: Peer<RoleServer>,
+        meta: Meta,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut ui = CollectUI::new();
+        let reporter = ProgressReporter::from_meta(&peer, &meta);
+        self.inq_analyze_isolation_impl(params.0, reporter).await
+    }
 
-        let cmd =
-            crate::commands::AnalyzeIsolationCommand::new(Some(self.dir_str()), params.0.test);
-        use crate::commands::Command;
-        let exit_code = cmd.execute(&mut ui).map_err(to_mcp_err)?;
+    async fn inq_analyze_isolation_impl(
+        &self,
+        params: AnalyzeIsolationParam,
+        reporter: Option<ProgressReporter>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let dir = self.dir_str();
+        let test = params.test;
+        let (exit_code, ui) =
+            run_blocking_with_progress(reporter, "analyzing test isolation", move || {
+                let mut ui = CollectUI::new();
+                let cmd = crate::commands::AnalyzeIsolationCommand::new(Some(dir), test);
+                use crate::commands::Command;
+                let result = cmd.execute(&mut ui);
+                (result, ui)
+            })
+            .await
+            .map(|(result, ui)| result.map(|code| (code, ui)))
+            .map_err(|e| {
+                ErrorData::internal_error(format!("inq_analyze_isolation panicked: {}", e), None)
+            })?
+            .map_err(to_mcp_err)?;
 
         let mut all_output = ui.output;
         all_output.extend(ui.errors);
@@ -2841,12 +3039,15 @@ mod tests {
         let service = InquestMcpService::new(temp.path().to_path_buf());
 
         let result = service
-            .inq_run(Parameters(RunParam {
-                failing_only: None,
-                concurrency: None,
-                test_filters: None,
-                background: None,
-            }))
+            .inq_run_impl(
+                RunParam {
+                    failing_only: None,
+                    concurrency: None,
+                    test_filters: None,
+                    background: None,
+                },
+                None,
+            )
             .await
             .unwrap();
         let json = parse_result(&result);
@@ -2872,12 +3073,15 @@ mod tests {
 
         let service = InquestMcpService::new(temp.path().to_path_buf());
         let result = service
-            .inq_run(Parameters(RunParam {
-                failing_only: None,
-                concurrency: None,
-                test_filters: None,
-                background: None,
-            }))
+            .inq_run_impl(
+                RunParam {
+                    failing_only: None,
+                    concurrency: None,
+                    test_filters: None,
+                    background: None,
+                },
+                None,
+            )
             .await
             .unwrap();
         let json = parse_result(&result);
@@ -2900,12 +3104,15 @@ mod tests {
         let service = InquestMcpService::new(temp.path().to_path_buf());
 
         let result = service
-            .inq_run(Parameters(RunParam {
-                failing_only: None,
-                concurrency: None,
-                test_filters: None,
-                background: Some(true),
-            }))
+            .inq_run_impl(
+                RunParam {
+                    failing_only: None,
+                    concurrency: None,
+                    test_filters: None,
+                    background: Some(true),
+                },
+                None,
+            )
             .await
             .unwrap();
         let json = parse_result(&result);
@@ -2975,11 +3182,14 @@ mod tests {
         let service = InquestMcpService::new(temp.path().to_path_buf());
 
         let result = service
-            .inq_wait(Parameters(WaitParam {
-                run_id: None,
-                status_filter: None,
-                timeout_secs: Some(5),
-            }))
+            .inq_wait_impl(
+                WaitParam {
+                    run_id: None,
+                    status_filter: None,
+                    timeout_secs: Some(5),
+                },
+                None,
+            )
             .await
             .unwrap();
         let json = parse_result(&result);
@@ -2994,12 +3204,15 @@ mod tests {
 
         // Start a background run
         let result = service
-            .inq_run(Parameters(RunParam {
-                failing_only: None,
-                concurrency: None,
-                test_filters: None,
-                background: Some(true),
-            }))
+            .inq_run_impl(
+                RunParam {
+                    failing_only: None,
+                    concurrency: None,
+                    test_filters: None,
+                    background: Some(true),
+                },
+                None,
+            )
             .await
             .unwrap();
         let json = parse_result(&result);
@@ -3007,11 +3220,14 @@ mod tests {
 
         // Wait for it to complete
         let wait_result = service
-            .inq_wait(Parameters(WaitParam {
-                run_id: Some(run_id),
-                status_filter: None,
-                timeout_secs: Some(10),
-            }))
+            .inq_wait_impl(
+                WaitParam {
+                    run_id: Some(run_id),
+                    status_filter: None,
+                    timeout_secs: Some(10),
+                },
+                None,
+            )
             .await
             .unwrap();
         let wait_json = parse_result(&wait_result);
@@ -3041,11 +3257,14 @@ mod tests {
 
         let service = InquestMcpService::new(temp.path().to_path_buf());
         let wait_result = service
-            .inq_wait(Parameters(WaitParam {
-                run_id: Some(run_id.as_str().to_string()),
-                status_filter: Some(vec!["failing".to_string()]),
-                timeout_secs: Some(5),
-            }))
+            .inq_wait_impl(
+                WaitParam {
+                    run_id: Some(run_id.as_str().to_string()),
+                    status_filter: Some(vec!["failing".to_string()]),
+                    timeout_secs: Some(5),
+                },
+                None,
+            )
             .await
             .unwrap();
         let json = parse_result(&wait_result);
@@ -3315,5 +3534,25 @@ test_timeout = "5m"
         let service = InquestMcpService::new(temp.path().to_path_buf());
         let result = service.inq_config().await;
         assert!(result.is_err());
+    }
+
+    /// When no reporter is attached (client didn't opt in to progress), the
+    /// helper should still drive the blocking work to completion and return
+    /// its result unchanged, without spawning a keepalive task.
+    #[tokio::test]
+    async fn test_run_blocking_with_progress_without_reporter() {
+        let value = run_blocking_with_progress(None, "noop", || 42u32)
+            .await
+            .unwrap();
+        assert_eq!(value, 42);
+    }
+
+    /// Panics inside the blocking closure must surface as `JoinError` rather
+    /// than taking down the whole task.
+    #[tokio::test]
+    async fn test_run_blocking_with_progress_propagates_panic() {
+        let result = run_blocking_with_progress(None, "boom", || panic!("boom")).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_panic());
     }
 }
