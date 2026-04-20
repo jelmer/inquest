@@ -3,7 +3,6 @@
 //! Provides structured JSON access to test repository data via the MCP protocol.
 //! Start with `inq mcp` to run the server over stdio.
 
-use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, Content, ErrorData, Implementation, Meta, ProgressNotificationParam,
@@ -59,7 +58,6 @@ impl crate::ui::UI for CollectUI {
 #[derive(Debug, Clone)]
 pub struct InquestMcpService {
     directory: PathBuf,
-    tool_router: ToolRouter<Self>,
     /// Cancellation tokens for background runs, keyed by run ID.
     cancel_tokens: Arc<Mutex<HashMap<crate::repository::RunId, CancellationToken>>>,
 }
@@ -69,7 +67,6 @@ impl InquestMcpService {
     pub fn new(directory: PathBuf) -> Self {
         Self {
             directory,
-            tool_router: Self::tool_router(),
             cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
