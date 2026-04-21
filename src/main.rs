@@ -111,6 +111,31 @@ enum Commands {
     /// Show currently in-progress test runs
     Running,
 
+    /// Wait for in-progress test runs to complete
+    Wait {
+        /// Run ID to wait for (defaults to all running runs)
+        #[arg(long, short = 'r', value_hint = ValueHint::Other)]
+        run: Option<String>,
+
+        /// Maximum time to wait in seconds
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+
+        /// Return early when any test matches the given status. Accepts
+        /// "success", "failure", "error", "skip", "xfail", "uxsuccess",
+        /// plus the aliases "failing" and "passing". Can be repeated.
+        #[arg(long = "status", value_name = "STATUS")]
+        status_filter: Vec<String>,
+
+        /// Print each new test result as it is observed
+        #[arg(long)]
+        stream: bool,
+
+        /// With --stream, only print failing tests
+        #[arg(long, requires = "stream")]
+        only_failures: bool,
+    },
+
     /// Show repository statistics
     Stats,
 
@@ -351,6 +376,29 @@ fn main() {
         }
         Commands::Running => {
             let cmd = RunningCommand::new(cli.directory);
+            cmd.execute(&mut ui)
+        }
+        Commands::Wait {
+            run,
+            timeout,
+            status_filter,
+            stream,
+            only_failures,
+        } => {
+            let cmd = match WaitCommand::new(
+                cli.directory,
+                run,
+                std::time::Duration::from_secs(timeout),
+                status_filter,
+                stream,
+                only_failures,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("{}", e);
+                    std::process::exit(2);
+                }
+            };
             cmd.execute(&mut ui)
         }
         Commands::Stats => {
