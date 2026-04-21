@@ -924,44 +924,10 @@ struct AnalyzeIsolationResponse {
 
 /// Parse status filter strings into a set of TestStatus values.
 ///
-/// Accepts individual status names ("success", "failure", "error", "skip", "xfail", "uxsuccess")
-/// and group aliases ("failing" = failure+error+uxsuccess, "passing" = success+skip+xfail).
+/// Thin wrapper over `TestStatus::parse_filters` that maps the generic
+/// error into `ErrorData::invalid_params` for MCP responses.
 fn parse_status_filters(filters: &[String]) -> Result<Vec<TestStatus>, ErrorData> {
-    let mut statuses = Vec::new();
-    for f in filters {
-        match f.to_lowercase().as_str() {
-            "failing" => {
-                statuses.extend([
-                    TestStatus::Failure,
-                    TestStatus::Error,
-                    TestStatus::UnexpectedSuccess,
-                ]);
-            }
-            "passing" => {
-                statuses.extend([
-                    TestStatus::Success,
-                    TestStatus::Skip,
-                    TestStatus::ExpectedFailure,
-                ]);
-            }
-            "success" => statuses.push(TestStatus::Success),
-            "failure" => statuses.push(TestStatus::Failure),
-            "error" => statuses.push(TestStatus::Error),
-            "skip" => statuses.push(TestStatus::Skip),
-            "xfail" => statuses.push(TestStatus::ExpectedFailure),
-            "uxsuccess" => statuses.push(TestStatus::UnexpectedSuccess),
-            other => {
-                return Err(ErrorData::invalid_params(
-                    format!(
-                        "Unknown status filter: '{}'. Valid values: success, failure, error, skip, xfail, uxsuccess, failing, passing",
-                        other
-                    ),
-                    None,
-                ));
-            }
-        }
-    }
-    Ok(statuses)
+    TestStatus::parse_filters(filters).map_err(|e| ErrorData::invalid_params(e.to_string(), None))
 }
 
 #[tool_router]

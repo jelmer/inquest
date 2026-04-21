@@ -128,6 +128,47 @@ impl TestStatus {
             TestStatus::Success | TestStatus::Skip | TestStatus::ExpectedFailure
         )
     }
+
+    /// Parse a list of status filter strings into a set of `TestStatus` values.
+    ///
+    /// Accepts individual status names (`success`, `failure`, `error`, `skip`, `xfail`,
+    /// `uxsuccess`) and group aliases (`failing` = failure+error+uxsuccess,
+    /// `passing` = success+skip+xfail). Returns `Err` with an `Other` variant on
+    /// any unknown token.
+    pub fn parse_filters(filters: &[String]) -> crate::error::Result<Vec<TestStatus>> {
+        let mut statuses = Vec::new();
+        for f in filters {
+            match f.to_lowercase().as_str() {
+                "failing" => {
+                    statuses.extend([
+                        TestStatus::Failure,
+                        TestStatus::Error,
+                        TestStatus::UnexpectedSuccess,
+                    ]);
+                }
+                "passing" => {
+                    statuses.extend([
+                        TestStatus::Success,
+                        TestStatus::Skip,
+                        TestStatus::ExpectedFailure,
+                    ]);
+                }
+                "success" => statuses.push(TestStatus::Success),
+                "failure" => statuses.push(TestStatus::Failure),
+                "error" => statuses.push(TestStatus::Error),
+                "skip" => statuses.push(TestStatus::Skip),
+                "xfail" => statuses.push(TestStatus::ExpectedFailure),
+                "uxsuccess" => statuses.push(TestStatus::UnexpectedSuccess),
+                other => {
+                    return Err(crate::error::Error::Other(format!(
+                        "Unknown status filter: '{}'. Valid values: success, failure, error, skip, xfail, uxsuccess, failing, passing",
+                        other
+                    )));
+                }
+            }
+        }
+        Ok(statuses)
+    }
 }
 
 impl fmt::Display for TestStatus {

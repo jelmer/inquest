@@ -25,6 +25,7 @@ pub mod stats;
 #[cfg(feature = "testr")]
 pub mod upgrade;
 pub mod utils;
+pub mod wait;
 
 pub use analyze_isolation::AnalyzeIsolationCommand;
 pub use auto::AutoCommand;
@@ -45,6 +46,7 @@ pub use slowest::SlowestCommand;
 pub use stats::StatsCommand;
 #[cfg(feature = "testr")]
 pub use upgrade::UpgradeCommand;
+pub use wait::WaitCommand;
 
 /// Trait that all commands must implement
 pub trait Command {
