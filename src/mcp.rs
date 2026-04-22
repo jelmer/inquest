@@ -244,6 +244,15 @@ pub struct RunParam {
     /// use to reset their timer — but background mode is the portable
     /// choice.
     pub background: Option<bool>,
+    /// If the run is still in progress after this many seconds, stop waiting
+    /// synchronously and return `{status: "running", run_id}`. The run keeps
+    /// executing; poll `inq_running` or call `inq_wait` to follow it.
+    ///
+    /// Useful for suites whose duration is unpredictable: the tool returns
+    /// the final result when the run is fast, and hands back a handle when
+    /// it would otherwise risk tripping the client's tool-call timeout.
+    /// Ignored when `background: true` (that path returns immediately).
+    pub background_after: Option<u64>,
 }
 
 /// Parameters for the cancel tool.
@@ -1628,8 +1637,19 @@ impl InquestMcpService {
         let stderr_capture_for_task = stderr_capture.clone();
         let base_path = base.to_string_lossy().to_string();
         let concurrency = params.concurrency;
+        let background_after = params.background_after.map(Duration::from_secs);
 
-        let cli_output = run_blocking_with_progress(reporter, "running tests", move || {
+        // Shared slot so this async context can observe the run ID as soon as
+        // `RunCommand` allocates it — needed by the `background_after` path to
+        // hand back a handle before the run finishes.
+        let run_id_slot: Arc<Mutex<Option<crate::repository::RunId>>> = Arc::new(Mutex::new(None));
+        let run_id_slot_for_cmd = run_id_slot.clone();
+        // Token forwarded into the executor so `inq_cancel` can stop a run we
+        // hand off to the caller on a `background_after` timeout.
+        let cancel_token = CancellationToken::new();
+        let cancel_token_for_cmd = cancel_token.clone();
+
+        let run_work = move || {
             let mut ui = NullUI;
             let cmd = crate::commands::RunCommand {
                 base_path: Some(base_path),
@@ -1639,13 +1659,89 @@ impl InquestMcpService {
                 concurrency,
                 test_filters,
                 stderr_capture: Some(stderr_capture_for_task),
+                run_id_slot: Some(run_id_slot_for_cmd),
+                cancellation_token: Some(cancel_token_for_cmd),
                 ..Default::default()
             };
             cmd.execute_returning_run_id(&mut ui)
-        })
-        .await
-        .map_err(|e| ErrorData::internal_error(format!("Test execution panicked: {}", e), None))?
-        .map_err(|e| ErrorData::internal_error(format!("Test execution failed: {}", e), None))?;
+        };
+
+        let cli_output = if let Some(timeout) = background_after {
+            // Race the run against the background_after timeout. If the timer
+            // wins and we already know the run ID, hand the caller a handle
+            // and let the blocking work finish in a detached task. If the run
+            // ID isn't allocated yet (timeout hit during repo setup or test
+            // discovery), fall through and wait for the work as usual.
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+            let keepalive = reporter
+                .clone()
+                .map(|r| tokio::spawn(progress_keepalive_loop(r, stop_rx, "running tests")));
+            let mut join_handle = tokio::task::spawn_blocking(run_work);
+
+            let completed = tokio::select! {
+                result = &mut join_handle => Some(result),
+                _ = tokio::time::sleep(timeout) => None,
+            };
+            let _ = stop_tx.send(());
+            if let Some(h) = keepalive {
+                let _ = h.await;
+            }
+
+            match completed {
+                Some(result) => result
+                    .map_err(|e| {
+                        ErrorData::internal_error(format!("Test execution panicked: {}", e), None)
+                    })?
+                    .map_err(|e| {
+                        ErrorData::internal_error(format!("Test execution failed: {}", e), None)
+                    })?,
+                None => {
+                    let run_id = run_id_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    if let Some(rid) = run_id {
+                        self.cancel_tokens
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(rid.clone(), cancel_token.clone());
+                        let cancel_tokens = self.cancel_tokens.clone();
+                        let rid_for_cleanup = rid.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = join_handle.await {
+                                tracing::error!("Backgrounded test run task panicked: {}", e);
+                            }
+                            cancel_tokens
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&rid_for_cleanup);
+                        });
+                        return ok_json(&BackgroundStartedResponse {
+                            status: "running",
+                            run_id: rid.as_str().to_string(),
+                        });
+                    }
+                    // Run ID not allocated yet — wait it out.
+                    join_handle
+                        .await
+                        .map_err(|e| {
+                            ErrorData::internal_error(
+                                format!("Test execution panicked: {}", e),
+                                None,
+                            )
+                        })?
+                        .map_err(|e| {
+                            ErrorData::internal_error(format!("Test execution failed: {}", e), None)
+                        })?
+                }
+            }
+        } else {
+            run_blocking_with_progress(reporter, "running tests", run_work)
+                .await
+                .map_err(|e| {
+                    ErrorData::internal_error(format!("Test execution panicked: {}", e), None)
+                })?
+                .map_err(|e| {
+                    ErrorData::internal_error(format!("Test execution failed: {}", e), None)
+                })?
+        };
 
         // Pull out captured stderr once. Exposed only when the run failed —
         // a successful run's noisy stderr is rarely useful and would just
@@ -1998,12 +2094,15 @@ impl InquestMcpService {
             }
 
             if let Some(ref statuses) = status_filter {
-                let ids_to_check = if let Some(ref target) = target_run_id {
-                    vec![target.clone()]
-                } else {
-                    running_ids.clone()
-                };
-                for run_id in &ids_to_check {
+                let target_slice;
+                let ids_to_check: &[crate::repository::RunId] =
+                    if let Some(ref target) = target_run_id {
+                        target_slice = [target.clone()];
+                        &target_slice
+                    } else {
+                        &running_ids
+                    };
+                for run_id in ids_to_check {
                     if let Ok(test_run) = repo.get_test_run(run_id) {
                         let all_matching: Vec<WaitMatchingTest> = test_run
                             .results
@@ -3011,6 +3110,7 @@ mod tests {
                     concurrency: None,
                     test_filters: None,
                     background: None,
+                    background_after: None,
                 },
                 None,
             )
@@ -3045,6 +3145,7 @@ mod tests {
                     concurrency: None,
                     test_filters: None,
                     background: None,
+                    background_after: None,
                 },
                 None,
             )
@@ -3076,6 +3177,7 @@ mod tests {
                     concurrency: None,
                     test_filters: None,
                     background: Some(true),
+                    background_after: None,
                 },
                 None,
             )
@@ -3093,6 +3195,83 @@ mod tests {
         let running = service.inq_running().await.unwrap();
         let running_json = parse_result(&running);
         assert_eq!(running_json["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_inq_run_background_after_timeout() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        factory.initialise(temp.path()).unwrap();
+
+        // Test command that produces empty (valid) subunit output but takes
+        // long enough that a 1-second background_after timer will fire first.
+        let config = "test_command = \"sh -c 'sleep 3'\"\n";
+        std::fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        let result = service
+            .inq_run_impl(
+                RunParam {
+                    failing_only: None,
+                    concurrency: None,
+                    test_filters: None,
+                    background: None,
+                    background_after: Some(1),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert_eq!(json["status"], "running");
+        let run_id = json["run_id"]
+            .as_str()
+            .expect("run_id should be populated when timing out")
+            .to_string();
+        assert!(!run_id.is_empty());
+
+        // Follow-up: inq_wait should complete once the detached run finishes.
+        let wait_result = service
+            .inq_wait_impl(
+                WaitParam {
+                    run_id: Some(run_id),
+                    status_filter: None,
+                    timeout_secs: Some(15),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let wait_json = parse_result(&wait_result);
+        assert_eq!(wait_json["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn test_inq_run_background_after_unused_when_fast() {
+        let temp = TempDir::new().unwrap();
+        setup_runnable_project(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        // Run is fast enough to finish before background_after fires; response
+        // should be the normal RunResponse (with exit_code), not the handle.
+        let result = service
+            .inq_run_impl(
+                RunParam {
+                    failing_only: None,
+                    concurrency: None,
+                    test_filters: None,
+                    background: None,
+                    background_after: Some(30),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+
+        assert!(json.get("exit_code").is_some());
+        assert!(json.get("status").is_none());
     }
 
     #[tokio::test]
@@ -3176,6 +3355,7 @@ mod tests {
                     concurrency: None,
                     test_filters: None,
                     background: Some(true),
+                    background_after: None,
                 },
                 None,
             )

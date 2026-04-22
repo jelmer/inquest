@@ -18,6 +18,17 @@ pub struct CliRunOutput {
     pub run_id: Option<crate::repository::RunId>,
 }
 
+impl CliRunOutput {
+    /// Outcome for paths that finished without allocating a run (e.g. no
+    /// failing tests to re-run, hit the iteration cap, auto-config failed).
+    fn no_run(exit_code: i32) -> Self {
+        Self {
+            exit_code,
+            run_id: None,
+        }
+    }
+}
+
 /// Command to run tests and load results into the repository.
 ///
 /// All fields default to false/None/Disabled, so callers only need to set
@@ -64,6 +75,15 @@ pub struct RunCommand {
     /// to terminal forwarding. Used by the MCP server to surface stderr in
     /// the failure response.
     pub stderr_capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+    /// Optional slot that receives the run ID as soon as it is allocated,
+    /// before the tests finish executing. Used by the MCP server's
+    /// `background_after` feature to return a run handle to callers while
+    /// the run continues in the background.
+    pub run_id_slot: Option<std::sync::Arc<std::sync::Mutex<Option<crate::repository::RunId>>>>,
+    /// Optional cancellation token forwarded to the test executor. Lets
+    /// the MCP server's `inq_cancel` tool stop a run that was handed off
+    /// to the caller via `background_after`.
+    pub cancellation_token: Option<crate::test_executor::CancellationToken>,
 }
 
 impl RunCommand {
@@ -90,7 +110,7 @@ impl RunCommand {
             base_path: self.base_path.clone(),
             all_output: self.all_output,
             test_args: self.test_args.clone(),
-            cancellation_token: None,
+            cancellation_token: self.cancellation_token.clone(),
             max_restarts: self.max_restarts,
             stderr_capture: self.stderr_capture.clone(),
         }
@@ -113,6 +133,39 @@ impl Command for RunCommand {
 }
 
 impl RunCommand {
+    /// If a `run_id_slot` was supplied, store the newly allocated run ID in it
+    /// so external observers (e.g. the MCP server's `background_after` logic)
+    /// can see the ID before the run finishes.
+    fn publish_run_id(&self, run_id: &crate::repository::RunId) {
+        if let Some(ref slot) = self.run_id_slot {
+            if let Ok(mut guard) = slot.lock() {
+                *guard = Some(run_id.clone());
+            }
+        }
+    }
+
+    /// Persist the executor output into the repository, display the summary,
+    /// and repack the result as a `CliRunOutput`.
+    fn persist(
+        &self,
+        ui: &mut dyn UI,
+        repo: &mut dyn crate::repository::Repository,
+        output: crate::test_executor::RunOutput,
+        historical_times: &std::collections::HashMap<crate::repository::TestId, Duration>,
+    ) -> Result<CliRunOutput> {
+        let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
+            ui,
+            repo,
+            output,
+            self.partial,
+            historical_times,
+        )?;
+        Ok(CliRunOutput {
+            exit_code,
+            run_id: Some(run_id),
+        })
+    }
+
     /// Execute tests and return both the exit code and the run ID.
     pub fn execute_returning_run_id(&self, ui: &mut dyn UI) -> Result<CliRunOutput> {
         let base = Path::new(self.base_path.as_deref().unwrap_or("."));
@@ -121,10 +174,7 @@ impl RunCommand {
             let auto_cmd = crate::commands::auto::AutoCommand::new(self.base_path.clone());
             let exit_code = auto_cmd.execute(ui)?;
             if exit_code != 0 {
-                return Ok(CliRunOutput {
-                    exit_code,
-                    run_id: None,
-                });
+                return Ok(CliRunOutput::no_run(exit_code));
             }
         }
 
@@ -144,10 +194,7 @@ impl RunCommand {
             let failing = repo.get_failing_tests()?;
             if failing.is_empty() {
                 ui.output("No failing tests to run")?;
-                return Ok(CliRunOutput {
-                    exit_code: 0,
-                    run_id: None,
-                });
+                return Ok(CliRunOutput::no_run(0));
             }
             Some(failing)
         } else {
@@ -215,19 +262,10 @@ impl RunCommand {
 
         if self.subunit {
             let (run_id, writer) = repo.begin_test_run_raw()?;
+            self.publish_run_id(&run_id);
             let output =
                 executor.run_subunit(ui, &test_cmd, test_ids.as_deref(), run_id, writer)?;
-            let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
-                ui,
-                repo.as_mut(),
-                output,
-                self.partial,
-                &historical_times,
-            )?;
-            return Ok(CliRunOutput {
-                exit_code,
-                run_id: Some(run_id),
-            });
+            return self.persist(ui, repo.as_mut(), output, &historical_times);
         }
 
         let concurrency = if let Some(explicit_concurrency) = self.concurrency {
@@ -260,26 +298,26 @@ impl RunCommand {
 
             if all_tests.is_empty() {
                 ui.output("No tests to run")?;
-                return Ok(CliRunOutput {
-                    exit_code: 0,
-                    run_id: None,
-                });
+                return Ok(CliRunOutput::no_run(0));
             }
 
             let run_id = repo.get_next_run_id()?;
+            if !self.until_failure {
+                // until_failure publishes per-iteration below.
+                self.publish_run_id(&run_id);
+            }
 
             if self.until_failure {
                 let mut iteration = 1;
                 loop {
-                    if self.max_iterations.is_some_and(|max| iteration > max) {
-                        ui.output(&format!(
-                            "\nReached maximum iteration limit ({}), stopping",
-                            self.max_iterations.unwrap()
-                        ))?;
-                        return Ok(CliRunOutput {
-                            exit_code: 0,
-                            run_id: None,
-                        });
+                    if let Some(max) = self.max_iterations {
+                        if iteration > max {
+                            ui.output(&format!(
+                                "\nReached maximum iteration limit ({}), stopping",
+                                max
+                            ))?;
+                            return Ok(CliRunOutput::no_run(0));
+                        }
                     }
                     ui.output(&format!("\n=== Iteration {} ===", iteration))?;
                     let iter_run_id = if iteration == 1 {
@@ -287,6 +325,7 @@ impl RunCommand {
                     } else {
                         repo.get_next_run_id()?
                     };
+                    self.publish_run_id(&iter_run_id);
                     let output = executor.run_isolated(
                         ui,
                         &test_cmd,
@@ -295,20 +334,11 @@ impl RunCommand {
                         max_duration_value,
                         iter_run_id,
                     )?;
-                    let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
-                        ui,
-                        repo.as_mut(),
-                        output,
-                        self.partial,
-                        &historical_times,
-                    )?;
+                    let result = self.persist(ui, repo.as_mut(), output, &historical_times)?;
 
-                    if exit_code != 0 {
+                    if result.exit_code != 0 {
                         ui.output(&format!("\nTests failed on iteration {}", iteration))?;
-                        return Ok(CliRunOutput {
-                            exit_code,
-                            run_id: Some(run_id),
-                        });
+                        return Ok(result);
                     }
 
                     iteration += 1;
@@ -322,35 +352,25 @@ impl RunCommand {
                     max_duration_value,
                     run_id,
                 )?;
-                let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
-                    ui,
-                    repo.as_mut(),
-                    output,
-                    self.partial,
-                    &historical_times,
-                )?;
-                Ok(CliRunOutput {
-                    exit_code,
-                    run_id: Some(run_id),
-                })
+                self.persist(ui, repo.as_mut(), output, &historical_times)
             }
         } else if self.until_failure {
             let mut iteration = 1;
             loop {
-                if self.max_iterations.is_some_and(|max| iteration > max) {
-                    ui.output(&format!(
-                        "\nReached maximum iteration limit ({}), stopping",
-                        self.max_iterations.unwrap()
-                    ))?;
-                    return Ok(CliRunOutput {
-                        exit_code: 0,
-                        run_id: None,
-                    });
+                if let Some(max) = self.max_iterations {
+                    if iteration > max {
+                        ui.output(&format!(
+                            "\nReached maximum iteration limit ({}), stopping",
+                            max
+                        ))?;
+                        return Ok(CliRunOutput::no_run(0));
+                    }
                 }
                 ui.output(&format!("\n=== Iteration {} ===", iteration))?;
 
                 let output = if concurrency > 1 {
                     let run_id = repo.get_next_run_id()?;
+                    self.publish_run_id(&run_id);
                     executor.run_parallel(
                         ui,
                         &test_cmd,
@@ -365,6 +385,7 @@ impl RunCommand {
                     )?
                 } else {
                     let (run_id, writer) = repo.begin_test_run_raw()?;
+                    self.publish_run_id(&run_id);
                     executor.run_serial(
                         ui,
                         &test_cmd,
@@ -378,26 +399,18 @@ impl RunCommand {
                     )?
                 };
 
-                let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
-                    ui,
-                    repo.as_mut(),
-                    output,
-                    self.partial,
-                    &historical_times,
-                )?;
+                let result = self.persist(ui, repo.as_mut(), output, &historical_times)?;
 
-                if exit_code != 0 {
+                if result.exit_code != 0 {
                     ui.output(&format!("\nTests failed on iteration {}", iteration))?;
-                    return Ok(CliRunOutput {
-                        exit_code,
-                        run_id: Some(run_id),
-                    });
+                    return Ok(result);
                 }
 
                 iteration += 1;
             }
         } else if concurrency > 1 {
             let run_id = repo.get_next_run_id()?;
+            self.publish_run_id(&run_id);
             let output = executor.run_parallel(
                 ui,
                 &test_cmd,
@@ -410,19 +423,10 @@ impl RunCommand {
                 &historical_times,
                 || repo.begin_test_run_raw().map(|(_, w)| w),
             )?;
-            let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
-                ui,
-                repo.as_mut(),
-                output,
-                self.partial,
-                &historical_times,
-            )?;
-            Ok(CliRunOutput {
-                exit_code,
-                run_id: Some(run_id),
-            })
+            self.persist(ui, repo.as_mut(), output, &historical_times)
         } else {
             let (run_id, writer) = repo.begin_test_run_raw()?;
+            self.publish_run_id(&run_id);
             let output = executor.run_serial(
                 ui,
                 &test_cmd,
@@ -434,17 +438,7 @@ impl RunCommand {
                 writer,
                 &historical_times,
             )?;
-            let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
-                ui,
-                repo.as_mut(),
-                output,
-                self.partial,
-                &historical_times,
-            )?;
-            Ok(CliRunOutput {
-                exit_code,
-                run_id: Some(run_id),
-            })
+            self.persist(ui, repo.as_mut(), output, &historical_times)
         }
     }
 }
