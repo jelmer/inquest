@@ -70,7 +70,7 @@ impl Command for WaitCommand {
         // Tracks which (run_id, test_id) pairs have already been streamed so
         // each result is printed exactly once even though each poll re-reads
         // the whole run file.
-        let mut seen: HashSet<(String, String)> = HashSet::new();
+        let mut seen: HashSet<(RunId, TestId)> = HashSet::new();
         let start = Instant::now();
 
         loop {
@@ -82,19 +82,25 @@ impl Command for WaitCommand {
                 None => !running_ids.is_empty(),
             };
 
+            // Build the slice of run IDs to inspect this poll — either the
+            // targeted one or the full in-progress set — once, and borrow it
+            // for both the stream and the status-filter blocks.
+            let target_slice;
+            let ids_to_check: &[RunId] = match &target {
+                Some(t) => {
+                    target_slice = [t.clone()];
+                    &target_slice
+                }
+                None => &running_ids,
+            };
+
             if self.stream {
-                let to_check: Vec<RunId> = match &target {
-                    Some(t) => vec![t.clone()],
-                    None => running_ids.clone(),
-                };
-                for run_id in &to_check {
+                for run_id in ids_to_check {
                     if let Ok(test_run) = repo.get_test_run(run_id) {
                         for (test_id, result) in &test_run.results {
-                            let key = (run_id.as_str().to_string(), test_id.as_str().to_string());
-                            if seen.contains(&key) {
+                            if !seen.insert((run_id.clone(), test_id.clone())) {
                                 continue;
                             }
-                            seen.insert(key);
                             if self.only_failures && !result.status.is_failure() {
                                 continue;
                             }
@@ -112,11 +118,7 @@ impl Command for WaitCommand {
             }
 
             if let Some(statuses) = &self.status_filter {
-                let to_check: Vec<RunId> = match &target {
-                    Some(t) => vec![t.clone()],
-                    None => running_ids.clone(),
-                };
-                for run_id in &to_check {
+                for run_id in ids_to_check {
                     if let Ok(test_run) = repo.get_test_run(run_id) {
                         let matched: Vec<(&TestId, TestStatus)> = test_run
                             .results
@@ -146,18 +148,16 @@ impl Command for WaitCommand {
             drop(repo);
 
             if start.elapsed() >= self.timeout {
-                let ids: Vec<String> = running_ids
+                let joined: String = running_ids
                     .iter()
-                    .map(|id| id.as_str().to_string())
-                    .collect();
+                    .map(RunId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let still = if joined.is_empty() { "(none)" } else { &joined };
                 ui.error(&format!(
                     "Timed out after {}s; still running: {}",
                     self.timeout.as_secs(),
-                    if ids.is_empty() {
-                        "(none)".into()
-                    } else {
-                        ids.join(", ")
-                    },
+                    still,
                 ))?;
                 return Ok(EXIT_TIMEOUT);
             }

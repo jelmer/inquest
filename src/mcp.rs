@@ -1696,10 +1696,7 @@ impl InquestMcpService {
                         ErrorData::internal_error(format!("Test execution failed: {}", e), None)
                     })?,
                 None => {
-                    let run_id = run_id_slot
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
+                    let run_id = run_id_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
                     if let Some(rid) = run_id {
                         self.cancel_tokens
                             .lock()
@@ -2097,12 +2094,15 @@ impl InquestMcpService {
             }
 
             if let Some(ref statuses) = status_filter {
-                let ids_to_check = if let Some(ref target) = target_run_id {
-                    vec![target.clone()]
-                } else {
-                    running_ids.clone()
-                };
-                for run_id in &ids_to_check {
+                let target_slice;
+                let ids_to_check: &[crate::repository::RunId] =
+                    if let Some(ref target) = target_run_id {
+                        target_slice = [target.clone()];
+                        &target_slice
+                    } else {
+                        &running_ids
+                    };
+                for run_id in ids_to_check {
                     if let Ok(test_run) = repo.get_test_run(run_id) {
                         let all_matching: Vec<WaitMatchingTest> = test_run
                             .results
