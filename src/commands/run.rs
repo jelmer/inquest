@@ -64,6 +64,15 @@ pub struct RunCommand {
     /// to terminal forwarding. Used by the MCP server to surface stderr in
     /// the failure response.
     pub stderr_capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+    /// Optional slot that receives the run ID as soon as it is allocated,
+    /// before the tests finish executing. Used by the MCP server's
+    /// `background_after` feature to return a run handle to callers while
+    /// the run continues in the background.
+    pub run_id_slot: Option<std::sync::Arc<std::sync::Mutex<Option<crate::repository::RunId>>>>,
+    /// Optional cancellation token forwarded to the test executor. Lets
+    /// the MCP server's `inq_cancel` tool stop a run that was handed off
+    /// to the caller via `background_after`.
+    pub cancellation_token: Option<crate::test_executor::CancellationToken>,
 }
 
 impl RunCommand {
@@ -90,7 +99,7 @@ impl RunCommand {
             base_path: self.base_path.clone(),
             all_output: self.all_output,
             test_args: self.test_args.clone(),
-            cancellation_token: None,
+            cancellation_token: self.cancellation_token.clone(),
             max_restarts: self.max_restarts,
             stderr_capture: self.stderr_capture.clone(),
         }
@@ -113,6 +122,17 @@ impl Command for RunCommand {
 }
 
 impl RunCommand {
+    /// If a `run_id_slot` was supplied, store the newly allocated run ID in it
+    /// so external observers (e.g. the MCP server's `background_after` logic)
+    /// can see the ID before the run finishes.
+    fn publish_run_id(&self, run_id: &crate::repository::RunId) {
+        if let Some(ref slot) = self.run_id_slot {
+            if let Ok(mut guard) = slot.lock() {
+                *guard = Some(run_id.clone());
+            }
+        }
+    }
+
     /// Execute tests and return both the exit code and the run ID.
     pub fn execute_returning_run_id(&self, ui: &mut dyn UI) -> Result<CliRunOutput> {
         let base = Path::new(self.base_path.as_deref().unwrap_or("."));
@@ -215,6 +235,7 @@ impl RunCommand {
 
         if self.subunit {
             let (run_id, writer) = repo.begin_test_run_raw()?;
+            self.publish_run_id(&run_id);
             let output =
                 executor.run_subunit(ui, &test_cmd, test_ids.as_deref(), run_id, writer)?;
             let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
@@ -267,6 +288,10 @@ impl RunCommand {
             }
 
             let run_id = repo.get_next_run_id()?;
+            if !self.until_failure {
+                // until_failure publishes per-iteration below.
+                self.publish_run_id(&run_id);
+            }
 
             if self.until_failure {
                 let mut iteration = 1;
@@ -287,6 +312,7 @@ impl RunCommand {
                     } else {
                         repo.get_next_run_id()?
                     };
+                    self.publish_run_id(&iter_run_id);
                     let output = executor.run_isolated(
                         ui,
                         &test_cmd,
@@ -351,6 +377,7 @@ impl RunCommand {
 
                 let output = if concurrency > 1 {
                     let run_id = repo.get_next_run_id()?;
+                    self.publish_run_id(&run_id);
                     executor.run_parallel(
                         ui,
                         &test_cmd,
@@ -365,6 +392,7 @@ impl RunCommand {
                     )?
                 } else {
                     let (run_id, writer) = repo.begin_test_run_raw()?;
+                    self.publish_run_id(&run_id);
                     executor.run_serial(
                         ui,
                         &test_cmd,
@@ -398,6 +426,7 @@ impl RunCommand {
             }
         } else if concurrency > 1 {
             let run_id = repo.get_next_run_id()?;
+            self.publish_run_id(&run_id);
             let output = executor.run_parallel(
                 ui,
                 &test_cmd,
@@ -423,6 +452,7 @@ impl RunCommand {
             })
         } else {
             let (run_id, writer) = repo.begin_test_run_raw()?;
+            self.publish_run_id(&run_id);
             let output = executor.run_serial(
                 ui,
                 &test_cmd,
