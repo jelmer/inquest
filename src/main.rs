@@ -537,6 +537,8 @@ fn main() {
                 no_output_timeout,
                 max_restarts,
                 stderr_capture: None,
+                run_id_slot: None,
+                cancellation_token: None,
             };
             cmd.execute(&mut ui)
         }
