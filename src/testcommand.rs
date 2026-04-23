@@ -216,6 +216,24 @@ impl TestCommand {
     ///
     /// Times out after 5 minutes to avoid hanging indefinitely.
     pub fn list_tests(&self) -> Result<Vec<TestId>> {
+        self.list_tests_with_stderr(&mut std::io::stderr())
+    }
+
+    /// List all available tests, forwarding the child's stderr to `stderr_sink`
+    /// as it is produced.
+    ///
+    /// This lets callers surface build output (e.g. `cargo` compilation) live,
+    /// so the user isn't staring at a blank terminal while the test binary is
+    /// compiled. Passing `&mut std::io::sink()` preserves the old silent
+    /// behaviour.
+    ///
+    /// Times out after 5 minutes to avoid hanging indefinitely.
+    pub fn list_tests_with_stderr(
+        &self,
+        stderr_sink: &mut (dyn Write + Send),
+    ) -> Result<Vec<TestId>> {
+        use std::io::Read;
+        use std::sync::mpsc;
         use std::time::Duration;
 
         const LIST_TIMEOUT: Duration = Duration::from_secs(300);
@@ -234,44 +252,48 @@ impl TestCommand {
             })?;
 
         let stdout = child.stdout.take().expect("stdout was piped");
-        let stderr_handle = child.stderr.take().expect("stderr was piped");
+        let mut stderr_handle = child.stderr.take().expect("stderr was piped");
 
-        // Read stdout and stderr in background threads to avoid deadlock
+        // Read stdout in a background thread to avoid deadlock while the child
+        // writes to both stdout and stderr.
         let stdout_thread = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
             let mut buf = Vec::new();
             std::io::Read::read_to_end(&mut { stdout }, &mut buf)?;
             Ok(buf)
         });
-        let stderr_thread = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut { stderr_handle }, &mut buf)?;
-            Ok(buf)
+
+        // Read stderr chunks in a background thread and deliver them on a
+        // channel. The main thread forwards each chunk to `stderr_sink` as it
+        // arrives, so build output surfaces live rather than only after exit.
+        let (stderr_tx, stderr_rx) = mpsc::channel::<Vec<u8>>();
+        let stderr_reader = std::thread::spawn(move || -> std::io::Result<()> {
+            let mut buf = [0u8; 8192];
+            loop {
+                match stderr_handle.read(&mut buf) {
+                    Ok(0) => return Ok(()),
+                    Ok(n) => {
+                        if stderr_tx.send(buf[..n].to_vec()).is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
         });
 
-        // Wait with timeout
+        // Forward stderr chunks to the sink while polling the child for exit.
+        // Chunks are also retained so we can include them in an error message
+        // if the listing command fails.
+        let mut captured_stderr: Vec<u8> = Vec::new();
         let deadline = std::time::Instant::now() + LIST_TIMEOUT;
-        loop {
+        let exit_status = loop {
+            while let Ok(chunk) = stderr_rx.try_recv() {
+                let _ = stderr_sink.write_all(&chunk);
+                let _ = stderr_sink.flush();
+                captured_stderr.extend_from_slice(&chunk);
+            }
             match child.try_wait() {
-                Ok(Some(status)) => {
-                    let stdout_bytes = stdout_thread
-                        .join()
-                        .map_err(|_| Error::CommandExecution("stdout reader panicked".into()))?
-                        .map_err(Error::Io)?;
-
-                    if !status.success() {
-                        let stderr_bytes = stderr_thread
-                            .join()
-                            .map_err(|_| Error::CommandExecution("stderr reader panicked".into()))?
-                            .map_err(Error::Io)?;
-                        let stderr = String::from_utf8_lossy(&stderr_bytes);
-                        return Err(Error::CommandExecution(format!(
-                            "Test listing command failed with exit code: {}\nCommand: {}\nStderr:\n{}",
-                            status, cmd, stderr
-                        )));
-                    }
-
-                    return Self::parse_test_list(&stdout_bytes);
-                }
+                Ok(Some(status)) => break status,
                 Ok(None) => {
                     if std::time::Instant::now() >= deadline {
                         let _ = child.kill();
@@ -291,7 +313,30 @@ impl TestCommand {
                     )));
                 }
             }
+        };
+
+        // Drain any stderr written between the last try_recv and child exit.
+        let _ = stderr_reader.join();
+        while let Ok(chunk) = stderr_rx.try_recv() {
+            let _ = stderr_sink.write_all(&chunk);
+            let _ = stderr_sink.flush();
+            captured_stderr.extend_from_slice(&chunk);
         }
+
+        let stdout_bytes = stdout_thread
+            .join()
+            .map_err(|_| Error::CommandExecution("stdout reader panicked".into()))?
+            .map_err(Error::Io)?;
+
+        if !exit_status.success() {
+            let stderr = String::from_utf8_lossy(&captured_stderr);
+            return Err(Error::CommandExecution(format!(
+                "Test listing command failed with exit code: {}\nCommand: {}\nStderr:\n{}",
+                exit_status, cmd, stderr
+            )));
+        }
+
+        Self::parse_test_list(&stdout_bytes)
     }
 
     fn parse_test_list(output: &[u8]) -> Result<Vec<TestId>> {
