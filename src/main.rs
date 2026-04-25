@@ -22,7 +22,7 @@ struct Cli {
     directory: Option<String>,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -307,7 +307,27 @@ fn main() {
 
     let mut ui = CliUI;
 
-    let result = match cli.command {
+    let command = cli.command.unwrap_or(Commands::Run {
+        failing: false,
+        force_init: false,
+        auto: true,
+        partial: false,
+        load_list: None,
+        parallel: None,
+        until_failure: false,
+        max_iterations: None,
+        isolated: false,
+        subunit: false,
+        all_output: false,
+        testfilters: Vec::new(),
+        test_timeout: None,
+        max_duration: None,
+        no_output_timeout: None,
+        max_restarts: None,
+        testargs: Vec::new(),
+    });
+
+    let result = match command {
         Commands::Auto => {
             let cmd = AutoCommand::new(cli.directory);
             cmd.execute(&mut ui)
