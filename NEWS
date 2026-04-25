@@ -2,6 +2,67 @@
 inquest release notes
 #######################
 
+0.1.4	2026-04-25
+++++++++++++++++++
+
+CHANGES
+-------
+
+* Run ``inq`` with no arguments as ``inq run --auto`` so the common case
+  is a single word. (Jelmer Vernooĳ)
+
+* Stream the test listing command's stderr live during discovery so
+  long Rust ``cargo`` builds no longer present a blank terminal.
+  Fixes #65. (Jelmer Vernooĳ)
+
+* Add ``inq wait`` subcommand mirroring the ``inq_wait`` MCP tool, with
+  ``--run``, ``--timeout``, ``--status`` early-return, and optional
+  ``--stream`` / ``--only-failures`` filtering. (Jelmer Vernooĳ)
+
+* Detect Perl projects in ``inq auto``, generating a config that pipes
+  ``prove`` output through ``tap2subunit`` via ``prove-subunit``.
+  (Jelmer Vernooĳ)
+
+MCP SERVER
+----------
+
+* Add ``background_after`` option to ``inq_run`` so foreground runs
+  automatically detach into the background once they exceed a duration.
+  (Jelmer Vernooĳ)
+
+* Keep long-running tool calls alive with progress notifications.
+  (Jelmer Vernooĳ)
+
+* Add ``inq_config`` tool exposing project test configuration.
+  (Jelmer Vernooĳ)
+
+* Add ``inq_list_runs`` and ``inq_test_history`` for cross-run queries
+  ("when did test X start failing?", "is this flaky or newly broken?").
+  (Jelmer Vernooĳ)
+
+* Add ``inq_test_batch`` to fetch multiple tests in a single call,
+  declare tool annotations (``readOnlyHint``, ``destructiveHint``,
+  ``idempotentHint``, ``openWorldHint``), and sharpen docstrings on
+  ``run_id``, ``status_filter``, and ``test_id`` parameters.
+  (Jelmer Vernooĳ)
+
+* Add progress estimates to ``inq_running``. (Jelmer Vernooĳ)
+
+* Add ``inq_failure_summary`` and ``inq_test`` workflow tools that
+  collapse the failure-triage flow from three calls to one or two.
+  (Jelmer Vernooĳ)
+
+* Bump ``rmcp`` to 1.5 and drop the redundant ``tool_router`` field.
+  (Jelmer Vernooĳ)
+
+INTERNALS
+---------
+
+* Reduce per-poll allocations in ``inq wait`` / ``inq_wait``.
+  (Jelmer Vernooĳ)
+
+* Simplify ``RunCommand::execute_returning_run_id``. (Jelmer Vernooĳ)
+
 0.1.3
 +++++
 

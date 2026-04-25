@@ -1,6 +1,6 @@
 [package]
 name = "inquest"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 authors = ["Jelmer Vernooĳ <jelmer@jelmer.uk>"]
 license = "Apache-2.0 OR BSD-3-Clause"
