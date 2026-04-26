@@ -253,6 +253,14 @@ pub struct RunParam {
     /// it would otherwise risk tripping the client's tool-call timeout.
     /// Ignored when `background: true` (that path returns immediately).
     pub background_after: Option<u64>,
+    /// Order in which tests are executed. One of: "auto" (smart pick from
+    /// history — frequent-failing-first when there is failure history,
+    /// otherwise spread), "discovery", "alphabetical", "failing-first",
+    /// "spread", "shuffle" (optionally "shuffle:<seed>" for a reproducible
+    /// shuffle), "slowest-first", "fastest-first", "frequent-failing-first".
+    /// When omitted, falls back to the project's configured `test_order`,
+    /// or discovery order if none is set.
+    pub order: Option<String>,
 }
 
 /// Parameters for the cancel tool.
@@ -1461,6 +1469,13 @@ impl InquestMcpService {
         }
 
         let failing_only = params.failing_only.unwrap_or(false);
+        let test_order = match &params.order {
+            Some(s) => Some(
+                s.parse::<crate::ordering::TestOrder>()
+                    .map_err(to_mcp_err)?,
+            ),
+            None => None,
+        };
         let partial = failing_only;
         let test_filters = params.test_filters.filter(|f| !f.is_empty());
         let background = params.background.unwrap_or(false);
@@ -1658,6 +1673,7 @@ impl InquestMcpService {
                 force_init: true,
                 concurrency,
                 test_filters,
+                test_order,
                 stderr_capture: Some(stderr_capture_for_task),
                 run_id_slot: Some(run_id_slot_for_cmd),
                 cancellation_token: Some(cancel_token_for_cmd),
@@ -3111,6 +3127,7 @@ mod tests {
                     test_filters: None,
                     background: None,
                     background_after: None,
+                    order: None,
                 },
                 None,
             )
@@ -3118,6 +3135,60 @@ mod tests {
             .unwrap();
         let json = parse_result(&result);
 
+        assert!(json.get("exit_code").is_some());
+        assert!(json.get("id").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_inq_run_rejects_invalid_order() {
+        let temp = TempDir::new().unwrap();
+        setup_runnable_project(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let err = service
+            .inq_run_impl(
+                RunParam {
+                    failing_only: None,
+                    concurrency: None,
+                    test_filters: None,
+                    background: None,
+                    background_after: None,
+                    order: Some("nonsense-order".to_string()),
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.message.contains("unknown test order"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inq_run_accepts_alphabetical_order() {
+        let temp = TempDir::new().unwrap();
+        setup_runnable_project(&temp);
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+
+        let result = service
+            .inq_run_impl(
+                RunParam {
+                    failing_only: None,
+                    concurrency: None,
+                    test_filters: None,
+                    background: None,
+                    background_after: None,
+                    order: Some("alphabetical".to_string()),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let json = parse_result(&result);
         assert!(json.get("exit_code").is_some());
         assert!(json.get("id").is_some());
     }
@@ -3146,6 +3217,7 @@ mod tests {
                     test_filters: None,
                     background: None,
                     background_after: None,
+                    order: None,
                 },
                 None,
             )
@@ -3178,6 +3250,7 @@ mod tests {
                     test_filters: None,
                     background: Some(true),
                     background_after: None,
+                    order: None,
                 },
                 None,
             )
@@ -3217,6 +3290,7 @@ mod tests {
                     test_filters: None,
                     background: None,
                     background_after: Some(1),
+                    order: None,
                 },
                 None,
             )
@@ -3263,6 +3337,7 @@ mod tests {
                     test_filters: None,
                     background: None,
                     background_after: Some(30),
+                    order: None,
                 },
                 None,
             )
@@ -3356,6 +3431,7 @@ mod tests {
                     test_filters: None,
                     background: Some(true),
                     background_after: None,
+                    order: None,
                 },
                 None,
             )
