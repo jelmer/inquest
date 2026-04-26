@@ -253,6 +253,12 @@ enum Commands {
         #[arg(long, value_name = "N")]
         max_restarts: Option<usize>,
 
+        /// Test ordering: "auto" (smart pick from history), "discovery",
+        /// "alphabetical", "failing-first", "spread", "shuffle[:<seed>]",
+        /// "slowest-first", "fastest-first", or "frequent-failing-first"
+        #[arg(long, value_name = "ORDER")]
+        order: Option<String>,
+
         /// Additional arguments to pass to the test command (use after --)
         #[arg(last = true, value_name = "TESTARGS")]
         testargs: Vec<String>,
@@ -324,6 +330,10 @@ fn main() {
         max_duration: None,
         no_output_timeout: None,
         max_restarts: None,
+        // Bare `inq` picks an ordering automatically: frequent-failing-first
+        // when there's failure history, else spread. Explicit `inq run`
+        // keeps Discovery as its default.
+        order: Some("auto".to_string()),
         testargs: Vec::new(),
     });
 
@@ -493,6 +503,7 @@ fn main() {
             max_duration,
             no_output_timeout,
             max_restarts,
+            order,
             testfilters,
             testargs,
         } => {
@@ -528,6 +539,16 @@ fn main() {
                 },
                 None => None,
             };
+            let test_order = match order {
+                Some(s) => match s.parse::<inquest::ordering::TestOrder>() {
+                    Ok(o) => Some(o),
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
 
             let cmd = RunCommand {
                 base_path: cli.directory,
@@ -556,6 +577,7 @@ fn main() {
                 max_duration,
                 no_output_timeout,
                 max_restarts,
+                test_order,
                 stderr_capture: None,
                 run_id_slot: None,
                 cancellation_token: None,

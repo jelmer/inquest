@@ -4,6 +4,7 @@ use crate::commands::utils::open_or_init_repository;
 use crate::commands::Command;
 use crate::config::TimeoutSetting;
 use crate::error::Result;
+use crate::ordering::{apply_order, OrderingContext, TestOrder};
 use crate::test_executor::{self, TestExecutor, TestExecutorConfig};
 use crate::testcommand::TestCommand;
 use crate::ui::UI;
@@ -71,6 +72,9 @@ pub struct RunCommand {
     pub no_output_timeout: Option<Duration>,
     /// Maximum number of restarts on timeout or crash (None = default).
     pub max_restarts: Option<usize>,
+    /// Optional explicit ordering strategy. If `None`, the strategy comes
+    /// from the configuration file (defaulting to discovery order).
+    pub test_order: Option<TestOrder>,
     /// Optional shared buffer for capturing child-process stderr in addition
     /// to terminal forwarding. Used by the MCP server to surface stderr in
     /// the failure response.
@@ -257,6 +261,51 @@ impl RunCommand {
         let test_timeout_fn =
             test_executor::build_test_timeout_fn(&test_timeout, &historical_times);
 
+        // Resolve the ordering strategy: CLI override > config > Discovery.
+        let mut resolved_order = match &self.test_order {
+            Some(o) => o.clone(),
+            None => test_cmd.config().parsed_test_order()?,
+        };
+
+        // Resolve Auto: pick FrequentFailingFirst when we have meaningful
+        // failure history, else Spread. We compute the counts here so the
+        // Auto resolver and the FrequentFailingFirst path can share them.
+        let mut failure_counts: std::collections::HashMap<crate::repository::TestId, u32> =
+            std::collections::HashMap::new();
+        if resolved_order == TestOrder::Auto {
+            failure_counts = compute_failure_counts(repo.as_ref());
+            resolved_order = crate::ordering::resolve_auto(&failure_counts);
+            ui.output(&format!(
+                "Auto-selected test order: {}",
+                resolved_order.as_str()
+            ))?;
+        } else if resolved_order == TestOrder::FrequentFailingFirst {
+            failure_counts = compute_failure_counts(repo.as_ref());
+        }
+
+        // Apply ordering. If the strategy is non-discovery we need a concrete
+        // list of tests to reorder, so materialise via discovery if the
+        // earlier filtering didn't already produce one.
+        if resolved_order != TestOrder::Discovery {
+            let materialised = match test_ids.take() {
+                Some(ids) => ids,
+                None => test_cmd.list_tests()?,
+            };
+            let failing_for_order =
+                if matches!(resolved_order, TestOrder::FailingFirst) && !self.failing_only {
+                    repo.get_failing_tests().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+            let ctx = OrderingContext {
+                failing_tests: &failing_for_order,
+                historical_times: &historical_times,
+                failure_counts: &failure_counts,
+                group_regex: test_cmd.config().group_regex.as_deref(),
+            };
+            test_ids = Some(apply_order(materialised, &resolved_order, &ctx)?);
+        }
+
         let config = self.executor_config();
         let executor = TestExecutor::new(&config);
 
@@ -441,6 +490,29 @@ impl RunCommand {
             self.persist(ui, repo.as_mut(), output, &historical_times)
         }
     }
+}
+
+/// Walk every recorded run and tally how often each test produced a
+/// failing status. Used by [`TestOrder::FrequentFailingFirst`].
+fn compute_failure_counts(
+    repo: &dyn crate::repository::Repository,
+) -> std::collections::HashMap<crate::repository::TestId, u32> {
+    let mut counts: std::collections::HashMap<crate::repository::TestId, u32> =
+        std::collections::HashMap::new();
+    let Ok(run_ids) = repo.list_run_ids() else {
+        return counts;
+    };
+    for run_id in &run_ids {
+        let Ok(run) = repo.get_test_run(run_id) else {
+            continue;
+        };
+        for (test_id, result) in &run.results {
+            if result.status.is_failure() {
+                *counts.entry(test_id.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
 }
 
 #[cfg(test)]
