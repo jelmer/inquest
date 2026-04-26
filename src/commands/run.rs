@@ -281,9 +281,15 @@ impl RunCommand {
                 } else {
                     Vec::new()
                 };
+            let failure_counts = if matches!(resolved_order, TestOrder::FrequentFailingFirst) {
+                compute_failure_counts(repo.as_ref())
+            } else {
+                std::collections::HashMap::new()
+            };
             let ctx = OrderingContext {
                 failing_tests: &failing_for_order,
                 historical_times: &historical_times,
+                failure_counts: &failure_counts,
                 group_regex: test_cmd.config().group_regex.as_deref(),
             };
             test_ids = Some(apply_order(materialised, &resolved_order, &ctx)?);
@@ -473,6 +479,29 @@ impl RunCommand {
             self.persist(ui, repo.as_mut(), output, &historical_times)
         }
     }
+}
+
+/// Walk every recorded run and tally how often each test produced a
+/// failing status. Used by [`TestOrder::FrequentFailingFirst`].
+fn compute_failure_counts(
+    repo: &dyn crate::repository::Repository,
+) -> std::collections::HashMap<crate::repository::TestId, u32> {
+    let mut counts: std::collections::HashMap<crate::repository::TestId, u32> =
+        std::collections::HashMap::new();
+    let Ok(run_ids) = repo.list_run_ids() else {
+        return counts;
+    };
+    for run_id in &run_ids {
+        let Ok(run) = repo.get_test_run(run_id) else {
+            continue;
+        };
+        for (test_id, result) in &run.results {
+            if result.status.is_failure() {
+                *counts.entry(test_id.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
 }
 
 #[cfg(test)]

@@ -254,7 +254,8 @@ enum Commands {
         max_restarts: Option<usize>,
 
         /// Test ordering: "discovery", "alphabetical", "failing-first",
-        /// "spread", "shuffle[:<seed>]", or "slowest-first"
+        /// "spread", "shuffle[:<seed>]", "slowest-first", "fastest-first",
+        /// or "frequent-failing-first"
         #[arg(long, value_name = "ORDER")]
         order: Option<String>,
 

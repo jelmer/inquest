@@ -43,6 +43,16 @@ pub enum TestOrder {
     /// the runner is parallel and a single long test would otherwise hold
     /// up the whole run.
     SlowestFirst,
+
+    /// Run the historically fastest tests first. Useful when combined with
+    /// fail-fast workflows: get the cheap signal out of the way before the
+    /// expensive long tail.
+    FastestFirst,
+
+    /// Run tests with the highest historical failure rate first. Surfaces
+    /// known-flaky or chronically broken tests early, before time is spent
+    /// on tests that almost always pass.
+    FrequentFailingFirst,
 }
 
 impl TestOrder {
@@ -56,6 +66,8 @@ impl TestOrder {
             TestOrder::Shuffle { seed: None } => "shuffle".to_string(),
             TestOrder::Shuffle { seed: Some(s) } => format!("shuffle:{}", s),
             TestOrder::SlowestFirst => "slowest-first".to_string(),
+            TestOrder::FastestFirst => "fastest-first".to_string(),
+            TestOrder::FrequentFailingFirst => "frequent-failing-first".to_string(),
         }
     }
 }
@@ -92,8 +104,15 @@ impl FromStr for TestOrder {
             "failing-first" | "failing_first" | "failing" => Ok(TestOrder::FailingFirst),
             "spread" | "interleave" | "interleaved" => Ok(TestOrder::Spread),
             "slowest-first" | "slowest_first" | "slowest" => Ok(TestOrder::SlowestFirst),
+            "fastest-first" | "fastest_first" | "fastest" => Ok(TestOrder::FastestFirst),
+            "frequent-failing-first"
+            | "frequent_failing_first"
+            | "frequent-failing"
+            | "frequent_failing"
+            | "flaky-first"
+            | "flaky" => Ok(TestOrder::FrequentFailingFirst),
             other => Err(Error::Config(format!(
-                "unknown test order '{}': expected one of discovery, alphabetical, failing-first, spread, shuffle[:<seed>], slowest-first",
+                "unknown test order '{}': expected one of discovery, alphabetical, failing-first, spread, shuffle[:<seed>], slowest-first, fastest-first, frequent-failing-first",
                 other
             ))),
         }
@@ -107,8 +126,13 @@ pub struct OrderingContext<'a> {
     /// Tests known to have failed in the most recent run, used by
     /// [`TestOrder::FailingFirst`].
     pub failing_tests: &'a [TestId],
-    /// Historical test durations, used by [`TestOrder::SlowestFirst`].
+    /// Historical test durations, used by [`TestOrder::SlowestFirst`] and
+    /// [`TestOrder::FastestFirst`].
     pub historical_times: &'a HashMap<TestId, Duration>,
+    /// Number of historical failures observed per test, used by
+    /// [`TestOrder::FrequentFailingFirst`]. Tests not present in the map
+    /// are treated as having zero historical failures.
+    pub failure_counts: &'a HashMap<TestId, u32>,
     /// Regex used to extract a "prefix" group from each test ID for
     /// [`TestOrder::Spread`]. When `None`, a heuristic is used instead.
     pub group_regex: Option<&'a str>,
@@ -129,7 +153,9 @@ pub fn apply_order(
         TestOrder::FailingFirst => Ok(failing_first(tests, ctx.failing_tests)),
         TestOrder::Spread => spread(tests, ctx.group_regex),
         TestOrder::Shuffle { seed } => Ok(shuffle(tests, *seed)),
-        TestOrder::SlowestFirst => Ok(slowest_first(tests, ctx.historical_times)),
+        TestOrder::SlowestFirst => Ok(by_duration(tests, ctx.historical_times, true)),
+        TestOrder::FastestFirst => Ok(by_duration(tests, ctx.historical_times, false)),
+        TestOrder::FrequentFailingFirst => Ok(frequent_failing_first(tests, ctx.failure_counts)),
     }
 }
 
@@ -156,7 +182,11 @@ fn failing_first(tests: Vec<TestId>, failing: &[TestId]) -> Vec<TestId> {
     head
 }
 
-fn slowest_first(tests: Vec<TestId>, durations: &HashMap<TestId, Duration>) -> Vec<TestId> {
+fn by_duration(
+    tests: Vec<TestId>,
+    durations: &HashMap<TestId, Duration>,
+    slowest_first: bool,
+) -> Vec<TestId> {
     let mut indexed: Vec<(usize, TestId)> = tests.into_iter().enumerate().collect();
     // Tests with unknown duration sort to the end; stable on original index
     // so the relative order of unknown-duration tests is preserved.
@@ -164,11 +194,29 @@ fn slowest_first(tests: Vec<TestId>, durations: &HashMap<TestId, Duration>) -> V
         let da = durations.get(a);
         let db = durations.get(b);
         match (da, db) {
-            (Some(x), Some(y)) => y.cmp(x).then(ia.cmp(ib)),
+            (Some(x), Some(y)) => {
+                let cmp = if slowest_first { y.cmp(x) } else { x.cmp(y) };
+                cmp.then(ia.cmp(ib))
+            }
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => ia.cmp(ib),
         }
+    });
+    indexed.into_iter().map(|(_, t)| t).collect()
+}
+
+fn frequent_failing_first(
+    tests: Vec<TestId>,
+    failure_counts: &HashMap<TestId, u32>,
+) -> Vec<TestId> {
+    let mut indexed: Vec<(usize, TestId)> = tests.into_iter().enumerate().collect();
+    indexed.sort_by(|(ia, a), (ib, b)| {
+        let ca = failure_counts.get(a).copied().unwrap_or(0);
+        let cb = failure_counts.get(b).copied().unwrap_or(0);
+        // Higher count first; stable on original index for ties (including
+        // the common case of all-zero counts when there's no history).
+        cb.cmp(&ca).then(ia.cmp(ib))
     });
     indexed.into_iter().map(|(_, t)| t).collect()
 }
@@ -318,6 +366,18 @@ mod tests {
             "slowest-first".parse::<TestOrder>().unwrap(),
             TestOrder::SlowestFirst
         );
+        assert_eq!(
+            "fastest-first".parse::<TestOrder>().unwrap(),
+            TestOrder::FastestFirst
+        );
+        assert_eq!(
+            "frequent-failing-first".parse::<TestOrder>().unwrap(),
+            TestOrder::FrequentFailingFirst
+        );
+        assert_eq!(
+            "flaky".parse::<TestOrder>().unwrap(),
+            TestOrder::FrequentFailingFirst
+        );
     }
 
     #[test]
@@ -370,6 +430,8 @@ mod tests {
             TestOrder::Shuffle { seed: None },
             TestOrder::Shuffle { seed: Some(123) },
             TestOrder::SlowestFirst,
+            TestOrder::FastestFirst,
+            TestOrder::FrequentFailingFirst,
         ] {
             let parsed: TestOrder = order.as_str().parse().unwrap();
             assert_eq!(parsed, order);
@@ -382,9 +444,11 @@ mod tests {
         static EMPTY_FAILING: Vec<TestId> = Vec::new();
         static EMPTY_TIMES: std::sync::OnceLock<HashMap<TestId, Duration>> =
             std::sync::OnceLock::new();
+        static EMPTY_COUNTS: std::sync::OnceLock<HashMap<TestId, u32>> = std::sync::OnceLock::new();
         OrderingContext {
             failing_tests: &EMPTY_FAILING,
             historical_times: EMPTY_TIMES.get_or_init(HashMap::new),
+            failure_counts: EMPTY_COUNTS.get_or_init(HashMap::new),
             group_regex: None,
         }
     }
@@ -410,6 +474,7 @@ mod tests {
         let ctx = OrderingContext {
             failing_tests: &failing,
             historical_times: &HashMap::new(),
+            failure_counts: &HashMap::new(),
             group_regex: None,
         };
         let result = apply_order(tests, &TestOrder::FailingFirst, &ctx).unwrap();
@@ -435,10 +500,62 @@ mod tests {
         let ctx = OrderingContext {
             failing_tests: &[],
             historical_times: &durations,
+            failure_counts: &HashMap::new(),
             group_regex: None,
         };
         let result = apply_order(tests, &TestOrder::SlowestFirst, &ctx).unwrap();
         assert_eq!(result, ids(&["slow", "medium", "fast", "unknown"]));
+    }
+
+    #[test]
+    fn fastest_first_reverses_slowest() {
+        let tests = ids(&["fast", "slow", "medium", "unknown"]);
+        let mut durations = HashMap::new();
+        durations.insert(TestId::new("fast"), Duration::from_millis(10));
+        durations.insert(TestId::new("slow"), Duration::from_secs(5));
+        durations.insert(TestId::new("medium"), Duration::from_secs(1));
+        let ctx = OrderingContext {
+            failing_tests: &[],
+            historical_times: &durations,
+            failure_counts: &HashMap::new(),
+            group_regex: None,
+        };
+        let result = apply_order(tests, &TestOrder::FastestFirst, &ctx).unwrap();
+        // Known durations ascending, then unknown at the tail.
+        assert_eq!(result, ids(&["fast", "medium", "slow", "unknown"]));
+    }
+
+    #[test]
+    fn frequent_failing_first_orders_by_count() {
+        let tests = ids(&["never_fails", "flaky", "occasional", "broken"]);
+        let mut counts = HashMap::new();
+        counts.insert(TestId::new("flaky"), 7);
+        counts.insert(TestId::new("broken"), 12);
+        counts.insert(TestId::new("occasional"), 2);
+        // "never_fails" intentionally absent → treated as 0
+        let ctx = OrderingContext {
+            failing_tests: &[],
+            historical_times: &HashMap::new(),
+            failure_counts: &counts,
+            group_regex: None,
+        };
+        let result = apply_order(tests, &TestOrder::FrequentFailingFirst, &ctx).unwrap();
+        assert_eq!(
+            result,
+            ids(&["broken", "flaky", "occasional", "never_fails"])
+        );
+    }
+
+    #[test]
+    fn frequent_failing_first_with_no_history_is_stable() {
+        let tests = ids(&["a", "b", "c"]);
+        let result = apply_order(
+            tests.clone(),
+            &TestOrder::FrequentFailingFirst,
+            &empty_ctx(),
+        )
+        .unwrap();
+        assert_eq!(result, tests);
     }
 
     #[test]
@@ -477,6 +594,7 @@ mod tests {
         let ctx = OrderingContext {
             failing_tests: &[],
             historical_times: &HashMap::new(),
+            failure_counts: &HashMap::new(),
             group_regex: Some(r"^tests::(?P<group>\w+)::"),
         };
         let result = apply_order(tests, &TestOrder::Spread, &ctx).unwrap();
@@ -515,6 +633,7 @@ mod tests {
         let ctx = OrderingContext {
             failing_tests: &[],
             historical_times: &HashMap::new(),
+            failure_counts: &HashMap::new(),
             group_regex: Some(r"^(unclosed"),
         };
         let err = apply_order(tests, &TestOrder::Spread, &ctx).unwrap_err();
@@ -563,6 +682,8 @@ mod tests {
             TestOrder::Spread,
             TestOrder::Shuffle { seed: Some(1) },
             TestOrder::SlowestFirst,
+            TestOrder::FastestFirst,
+            TestOrder::FrequentFailingFirst,
         ] {
             let result = apply_order(tests.clone(), &order, &empty_ctx()).unwrap();
             assert_eq!(result, tests);

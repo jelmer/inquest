@@ -194,7 +194,8 @@ pub struct TestrConfig {
     pub instance_dispose: Option<String>,
 
     /// Default test ordering strategy. One of: "discovery", "alphabetical",
-    /// "failing-first", "spread", "shuffle[:<seed>]", "slowest-first".
+    /// "failing-first", "spread", "shuffle[:<seed>]", "slowest-first",
+    /// "fastest-first", "frequent-failing-first".
     pub test_order: Option<String>,
 }
 
