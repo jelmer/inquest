@@ -261,13 +261,29 @@ impl RunCommand {
         let test_timeout_fn =
             test_executor::build_test_timeout_fn(&test_timeout, &historical_times);
 
-        // Resolve the ordering strategy: CLI override > config > Default.
-        let resolved_order = match &self.test_order {
+        // Resolve the ordering strategy: CLI override > config > Discovery.
+        let mut resolved_order = match &self.test_order {
             Some(o) => o.clone(),
             None => test_cmd.config().parsed_test_order()?,
         };
 
-        // Apply ordering. If the strategy is non-default we need a concrete
+        // Resolve Auto: pick FrequentFailingFirst when we have meaningful
+        // failure history, else Spread. We compute the counts here so the
+        // Auto resolver and the FrequentFailingFirst path can share them.
+        let mut failure_counts: std::collections::HashMap<crate::repository::TestId, u32> =
+            std::collections::HashMap::new();
+        if resolved_order == TestOrder::Auto {
+            failure_counts = compute_failure_counts(repo.as_ref());
+            resolved_order = crate::ordering::resolve_auto(&failure_counts);
+            ui.output(&format!(
+                "Auto-selected test order: {}",
+                resolved_order.as_str()
+            ))?;
+        } else if resolved_order == TestOrder::FrequentFailingFirst {
+            failure_counts = compute_failure_counts(repo.as_ref());
+        }
+
+        // Apply ordering. If the strategy is non-discovery we need a concrete
         // list of tests to reorder, so materialise via discovery if the
         // earlier filtering didn't already produce one.
         if resolved_order != TestOrder::Discovery {
@@ -281,11 +297,6 @@ impl RunCommand {
                 } else {
                     Vec::new()
                 };
-            let failure_counts = if matches!(resolved_order, TestOrder::FrequentFailingFirst) {
-                compute_failure_counts(repo.as_ref())
-            } else {
-                std::collections::HashMap::new()
-            };
             let ctx = OrderingContext {
                 failing_tests: &failing_for_order,
                 historical_times: &historical_times,

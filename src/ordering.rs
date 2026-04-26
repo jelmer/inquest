@@ -14,6 +14,12 @@ use std::time::Duration;
 /// Strategy for ordering tests before execution.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum TestOrder {
+    /// Let the runner choose. Falls back to a configured `test_order` if
+    /// one is set; otherwise picks [`TestOrder::FrequentFailingFirst`] when
+    /// there is meaningful failure history and [`TestOrder::Spread`]
+    /// otherwise. This is the default the bare `inq` invocation uses.
+    Auto,
+
     /// Preserve the order produced by test discovery (no reordering).
     #[default]
     Discovery,
@@ -59,6 +65,7 @@ impl TestOrder {
     /// Render this ordering as the canonical CLI/config string.
     pub fn as_str(&self) -> String {
         match self {
+            TestOrder::Auto => "auto".to_string(),
             TestOrder::Discovery => "discovery".to_string(),
             TestOrder::Alphabetical => "alphabetical".to_string(),
             TestOrder::FailingFirst => "failing-first".to_string(),
@@ -99,6 +106,7 @@ impl FromStr for TestOrder {
             };
         }
         match lower.as_str() {
+            "auto" => Ok(TestOrder::Auto),
             "discovery" | "default" | "" => Ok(TestOrder::Discovery),
             "alphabetical" | "alpha" | "sorted" => Ok(TestOrder::Alphabetical),
             "failing-first" | "failing_first" | "failing" => Ok(TestOrder::FailingFirst),
@@ -112,7 +120,7 @@ impl FromStr for TestOrder {
             | "flaky-first"
             | "flaky" => Ok(TestOrder::FrequentFailingFirst),
             other => Err(Error::Config(format!(
-                "unknown test order '{}': expected one of discovery, alphabetical, failing-first, spread, shuffle[:<seed>], slowest-first, fastest-first, frequent-failing-first",
+                "unknown test order '{}': expected one of auto, discovery, alphabetical, failing-first, spread, shuffle[:<seed>], slowest-first, fastest-first, frequent-failing-first",
                 other
             ))),
         }
@@ -138,6 +146,24 @@ pub struct OrderingContext<'a> {
     pub group_regex: Option<&'a str>,
 }
 
+/// Resolve [`TestOrder::Auto`] to a concrete strategy based on what we
+/// know about the test history.
+///
+/// Returns [`TestOrder::FrequentFailingFirst`] when the history shows at
+/// least one test that has failed more than once (the threshold filters
+/// out one-off flakes), otherwise [`TestOrder::Spread`].
+pub fn resolve_auto(failure_counts: &HashMap<TestId, u32>) -> TestOrder {
+    const FREQUENT_FAILURE_THRESHOLD: u32 = 2;
+    if failure_counts
+        .values()
+        .any(|&c| c >= FREQUENT_FAILURE_THRESHOLD)
+    {
+        TestOrder::FrequentFailingFirst
+    } else {
+        TestOrder::Spread
+    }
+}
+
 /// Apply an ordering strategy to a list of tests.
 pub fn apply_order(
     tests: Vec<TestId>,
@@ -148,6 +174,9 @@ pub fn apply_order(
         return Ok(tests);
     }
     match order {
+        TestOrder::Auto => Err(Error::Config(
+            "TestOrder::Auto must be resolved to a concrete strategy by the caller".to_string(),
+        )),
         TestOrder::Discovery => Ok(tests),
         TestOrder::Alphabetical => Ok(sort_alphabetical(tests)),
         TestOrder::FailingFirst => Ok(failing_first(tests, ctx.failing_tests)),
@@ -339,6 +368,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_auto() {
+        assert_eq!("auto".parse::<TestOrder>().unwrap(), TestOrder::Auto);
+        assert_eq!("AUTO".parse::<TestOrder>().unwrap(), TestOrder::Auto);
+    }
+
+    #[test]
+    fn auto_picks_frequent_failing_when_history_present() {
+        let mut counts = HashMap::new();
+        counts.insert(TestId::new("flaky"), 3);
+        counts.insert(TestId::new("solid"), 0);
+        assert_eq!(resolve_auto(&counts), TestOrder::FrequentFailingFirst);
+    }
+
+    #[test]
+    fn auto_picks_spread_when_only_one_off_failures() {
+        let mut counts = HashMap::new();
+        // A single observed failure isn't enough — could be a one-off.
+        counts.insert(TestId::new("blip"), 1);
+        assert_eq!(resolve_auto(&counts), TestOrder::Spread);
+    }
+
+    #[test]
+    fn auto_picks_spread_with_no_history() {
+        let counts = HashMap::new();
+        assert_eq!(resolve_auto(&counts), TestOrder::Spread);
+    }
+
+    #[test]
+    fn applying_auto_directly_is_an_error() {
+        // Auto must be resolved by the caller before reaching apply_order.
+        let tests = ids(&["a", "b"]);
+        let err = apply_order(tests, &TestOrder::Auto, &empty_ctx()).unwrap_err();
+        assert!(err.to_string().contains("Auto"));
+    }
+
+    #[test]
     fn parse_basic_variants() {
         assert_eq!(
             "default".parse::<TestOrder>().unwrap(),
@@ -423,6 +488,7 @@ mod tests {
     #[test]
     fn as_str_round_trip() {
         for order in [
+            TestOrder::Auto,
             TestOrder::Discovery,
             TestOrder::Alphabetical,
             TestOrder::FailingFirst,

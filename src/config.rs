@@ -193,9 +193,9 @@ pub struct TestrConfig {
     /// Dispose of one or more test running environments
     pub instance_dispose: Option<String>,
 
-    /// Default test ordering strategy. One of: "discovery", "alphabetical",
-    /// "failing-first", "spread", "shuffle[:<seed>]", "slowest-first",
-    /// "fastest-first", "frequent-failing-first".
+    /// Default test ordering strategy. One of: "auto", "discovery",
+    /// "alphabetical", "failing-first", "spread", "shuffle[:<seed>]",
+    /// "slowest-first", "fastest-first", "frequent-failing-first".
     pub test_order: Option<String>,
 }
 

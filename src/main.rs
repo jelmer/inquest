@@ -253,9 +253,9 @@ enum Commands {
         #[arg(long, value_name = "N")]
         max_restarts: Option<usize>,
 
-        /// Test ordering: "discovery", "alphabetical", "failing-first",
-        /// "spread", "shuffle[:<seed>]", "slowest-first", "fastest-first",
-        /// or "frequent-failing-first"
+        /// Test ordering: "auto" (smart pick from history), "discovery",
+        /// "alphabetical", "failing-first", "spread", "shuffle[:<seed>]",
+        /// "slowest-first", "fastest-first", or "frequent-failing-first"
         #[arg(long, value_name = "ORDER")]
         order: Option<String>,
 
@@ -330,7 +330,10 @@ fn main() {
         max_duration: None,
         no_output_timeout: None,
         max_restarts: None,
-        order: None,
+        // Bare `inq` picks an ordering automatically: frequent-failing-first
+        // when there's failure history, else spread. Explicit `inq run`
+        // keeps Discovery as its default.
+        order: Some("auto".to_string()),
         testargs: Vec::new(),
     });
 
