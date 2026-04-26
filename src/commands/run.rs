@@ -4,6 +4,7 @@ use crate::commands::utils::open_or_init_repository;
 use crate::commands::Command;
 use crate::config::TimeoutSetting;
 use crate::error::Result;
+use crate::ordering::{apply_order, OrderingContext, TestOrder};
 use crate::test_executor::{self, TestExecutor, TestExecutorConfig};
 use crate::testcommand::TestCommand;
 use crate::ui::UI;
@@ -71,6 +72,9 @@ pub struct RunCommand {
     pub no_output_timeout: Option<Duration>,
     /// Maximum number of restarts on timeout or crash (None = default).
     pub max_restarts: Option<usize>,
+    /// Optional explicit ordering strategy. If `None`, the strategy comes
+    /// from the configuration file (defaulting to discovery order).
+    pub test_order: Option<TestOrder>,
     /// Optional shared buffer for capturing child-process stderr in addition
     /// to terminal forwarding. Used by the MCP server to surface stderr in
     /// the failure response.
@@ -256,6 +260,34 @@ impl RunCommand {
             test_executor::compute_max_duration(&max_duration, &historical_times);
         let test_timeout_fn =
             test_executor::build_test_timeout_fn(&test_timeout, &historical_times);
+
+        // Resolve the ordering strategy: CLI override > config > Default.
+        let resolved_order = match &self.test_order {
+            Some(o) => o.clone(),
+            None => test_cmd.config().parsed_test_order()?,
+        };
+
+        // Apply ordering. If the strategy is non-default we need a concrete
+        // list of tests to reorder, so materialise via discovery if the
+        // earlier filtering didn't already produce one.
+        if resolved_order != TestOrder::Discovery {
+            let materialised = match test_ids.take() {
+                Some(ids) => ids,
+                None => test_cmd.list_tests()?,
+            };
+            let failing_for_order =
+                if matches!(resolved_order, TestOrder::FailingFirst) && !self.failing_only {
+                    repo.get_failing_tests().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+            let ctx = OrderingContext {
+                failing_tests: &failing_for_order,
+                historical_times: &historical_times,
+                group_regex: test_cmd.config().group_regex.as_deref(),
+            };
+            test_ids = Some(apply_order(materialised, &resolved_order, &ctx)?);
+        }
 
         let config = self.executor_config();
         let executor = TestExecutor::new(&config);

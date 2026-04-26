@@ -192,6 +192,10 @@ pub struct TestrConfig {
 
     /// Dispose of one or more test running environments
     pub instance_dispose: Option<String>,
+
+    /// Default test ordering strategy. One of: "discovery", "alphabetical",
+    /// "failing-first", "spread", "shuffle[:<seed>]", "slowest-first".
+    pub test_order: Option<String>,
 }
 
 impl TestrConfig {
@@ -266,6 +270,7 @@ impl TestrConfig {
             instance_provision: default.get("instance_provision").cloned(),
             instance_execute: default.get("instance_execute").cloned(),
             instance_dispose: default.get("instance_dispose").cloned(),
+            test_order: default.get("test_order").cloned(),
         };
 
         Self::validate(config)
@@ -306,7 +311,20 @@ impl TestrConfig {
             })?;
         }
 
+        // Validate test_order is a recognised strategy
+        if let Some(ref s) = config.test_order {
+            s.parse::<crate::ordering::TestOrder>()?;
+        }
+
         Ok(config)
+    }
+
+    /// Parse the configured test ordering, or return the default if unset.
+    pub fn parsed_test_order(&self) -> Result<crate::ordering::TestOrder> {
+        match &self.test_order {
+            None => Ok(crate::ordering::TestOrder::Discovery),
+            Some(s) => s.parse(),
+        }
     }
 
     /// Parse the test_timeout config value into a TimeoutSetting.
