@@ -64,6 +64,33 @@ fn detect_project(base: &Path) -> Vec<Detection> {
         });
     }
 
+    // Maven / Gradle — drive the build tool through `jvmtest-subunit`
+    // (ships with python-subunit), which spawns the build tool, watches
+    // its reports directory live, and emits subunit packets as each
+    // test class finishes. The wrapper auto-detects the build tool
+    // from the current directory, so the config is one word. Per-test
+    // selection isn't wired up — Maven's `-Dtest=...` and Gradle's
+    // `--tests` are class+method-level and don't fit the $IDFILE
+    // model — so the generated config runs the whole suite each
+    // invocation.
+    if has_maven(base) {
+        detections.push(Detection {
+            name: "Maven (JVM)",
+            test_command: "jvmtest-subunit",
+            test_id_option: None,
+            test_list_option: None,
+        });
+    }
+
+    if has_gradle(base) {
+        detections.push(Detection {
+            name: "Gradle (JVM)",
+            test_command: "jvmtest-subunit",
+            test_id_option: None,
+            test_list_option: None,
+        });
+    }
+
     // Perl project using prove + tap2subunit (via prove-subunit wrapper)
     if has_perl(base) {
         detections.push(Detection {
@@ -80,6 +107,29 @@ fn detect_project(base: &Path) -> Vec<Detection> {
 /// Check if the project is a Go module.
 fn has_go(base: &Path) -> bool {
     base.join("go.mod").exists()
+}
+
+/// Check if the project is a Maven project.
+fn has_maven(base: &Path) -> bool {
+    base.join("pom.xml").exists()
+}
+
+/// Check if the project is a Gradle project. Both Groovy (`build.gradle`)
+/// and Kotlin (`build.gradle.kts`) DSLs are recognised, plus the
+/// `settings.gradle*` markers used by multi-module builds whose root
+/// directory has no top-level `build.gradle`.
+fn has_gradle(base: &Path) -> bool {
+    for name in &[
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+    ] {
+        if base.join(name).exists() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Check if the project uses pytest.
@@ -194,7 +244,7 @@ impl Command for AutoCommand {
         if detections.is_empty() {
             ui.error("Could not detect project type")?;
             ui.error(
-                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), prove (Perl)",
+                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), Maven (JVM), Gradle (JVM), prove (Perl)",
             )?;
             return Ok(1);
         }
@@ -383,7 +433,7 @@ mod tests {
             ui.errors,
             vec![
                 "Could not detect project type",
-                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), prove (Perl)",
+                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), Maven (JVM), Gradle (JVM), prove (Perl)",
             ]
         );
     }
@@ -417,6 +467,89 @@ mod tests {
              test_id_option = \"--id-file $IDFILE\"\n\
              test_list_option = \"--list\"\n"
         );
+    }
+
+    #[test]
+    fn test_auto_detect_maven() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("pom.xml"),
+            "<project><groupId>x</groupId></project>\n",
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ui.output,
+            vec![format!(
+                "Detected Maven (JVM) project, wrote {}",
+                temp.path().join("inquest.toml").display()
+            )]
+        );
+
+        let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
+        assert_eq!(content, "test_command = \"jvmtest-subunit\"\n");
+    }
+
+    #[test]
+    fn test_auto_detect_gradle_groovy() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("build.gradle"), "apply plugin: 'java'\n").unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ui.output,
+            vec![format!(
+                "Detected Gradle (JVM) project, wrote {}",
+                temp.path().join("inquest.toml").display()
+            )]
+        );
+
+        let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
+        assert_eq!(content, "test_command = \"jvmtest-subunit\"\n");
+    }
+
+    #[test]
+    fn test_auto_detect_gradle_kotlin() {
+        // The Kotlin DSL marker (build.gradle.kts) on its own should
+        // also trigger Gradle detection.
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("build.gradle.kts"), "plugins { java }\n").unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert!(ui.output[0].contains("Detected Gradle (JVM)"));
+    }
+
+    #[test]
+    fn test_auto_detect_gradle_settings_only() {
+        // Multi-module Gradle builds often have only `settings.gradle`
+        // at the root (the per-module `build.gradle` is one level down).
+        // Detect from the settings file alone.
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("settings.gradle"),
+            "rootProject.name = 'demo'\n",
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert!(ui.output[0].contains("Detected Gradle (JVM)"));
     }
 
     #[test]

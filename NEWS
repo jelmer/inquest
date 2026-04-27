@@ -24,6 +24,19 @@ CHANGES
   runtime, but executing them by ID is fine. Closes #72.
   (Jelmer Vernooĳ)
 
+* Detect Maven (``pom.xml``) and Gradle
+  (``build.gradle``/``build.gradle.kts``/``settings.gradle{,.kts}``)
+  projects in ``inq auto``. The generated config drives the build
+  tool through the new ``jvmtest-subunit`` wrapper (ships with
+  python-subunit), which auto-detects Maven vs Gradle, spawns the
+  build tool, and watches its reports directory live so per-class
+  results stream into ``inq run`` as each test class finishes
+  rather than batching after the whole suite completes. Per-test
+  selection isn't wired up — the build tools' selection syntax
+  doesn't map cleanly to inquest's $IDFILE model — so the generated
+  config runs the whole suite each invocation. Closes #73.
+  (Jelmer Vernooĳ)
+
 INTERNALS
 ---------
 
