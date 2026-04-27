@@ -2,6 +2,24 @@
 inquest release notes
 #######################
 
+UNRELEASED
+++++++++++
+
+CHANGES
+-------
+
+* Add ``inq flaky`` and the ``inq_flaky`` MCP tool, ranking tests by
+  pass↔fail transitions across recorded runs so chronically broken tests
+  rank below genuinely flapping ones. (Jelmer Vernooĳ)
+
+INTERNALS
+---------
+
+* Add ``Repository::get_flakiness`` with a default fallback that walks
+  recorded runs and a SQL-backed override on the inquest backend that
+  computes the same metric in a single sequential scan over the
+  ``test_results`` table. (Jelmer Vernooĳ)
+
 0.1.4	2026-04-25
 ++++++++++++++++++
 

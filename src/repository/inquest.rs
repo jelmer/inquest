@@ -619,6 +619,29 @@ impl Repository for InquestRepository {
         )?;
         Ok(())
     }
+
+    fn get_flakiness(&self, min_runs: usize) -> Result<Vec<crate::repository::TestFlakiness>> {
+        // Single sequential scan grouped by test_id; transitions are computed
+        // in Rust over each per-test bucket, so the SQL stays trivial.
+        let mut stmt = self
+            .conn
+            .prepare("SELECT test_id, status FROM test_results ORDER BY test_id ASC, run_id ASC")?;
+        let mut history: HashMap<TestId, Vec<bool>> = HashMap::new();
+        let rows = stmt.query_map([], |row| {
+            let test_id: String = row.get(0)?;
+            let status: String = row.get(1)?;
+            Ok((test_id, status))
+        })?;
+        for row in rows {
+            let (test_id, status_str) = row?;
+            let status = str_to_status(&status_str);
+            history
+                .entry(TestId::new(test_id))
+                .or_default()
+                .push(status.is_failure());
+        }
+        Ok(crate::repository::summarise_flakiness(history, min_runs))
+    }
 }
 
 fn update_run_summary(conn: &rusqlite::Connection, run_id: i64, run: &TestRun) -> Result<()> {

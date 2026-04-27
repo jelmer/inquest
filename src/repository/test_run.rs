@@ -294,6 +294,35 @@ impl fmt::Display for StreamInterruption {
     }
 }
 
+/// Per-test flakiness statistics aggregated across the run history.
+///
+/// "Flakiness" here means a test that produces inconsistent results without
+/// the code under it changing — pass↔fail flips, not chronic failures. The
+/// `transitions` field counts how many times the status flipped between
+/// pass and fail in consecutive runs in which the test was recorded; a
+/// chronically broken test has 0 transitions, while a flapping one has many.
+/// `flakiness_score` normalises that to `[0, 1]` so it's comparable across
+/// tests with different amounts of history.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TestFlakiness {
+    /// Test identifier.
+    pub test_id: TestId,
+    /// Number of recorded runs in which this test ran (any status).
+    pub runs: u32,
+    /// Number of those runs in which the test failed (failure/error/uxsuccess).
+    pub failures: u32,
+    /// Number of pass↔fail transitions across consecutive runs in which the
+    /// test was recorded. The marker for true flakiness.
+    pub transitions: u32,
+    /// `transitions / max(1, runs - 1)` — the share of consecutive run pairs
+    /// where the status flipped, in `[0, 1]`. Higher means more unstable.
+    pub flakiness_score: f64,
+    /// `failures / runs` — the share of runs where the test failed, in
+    /// `[0, 1]`. High failure rate with low transitions means "broken",
+    /// not "flaky".
+    pub failure_rate: f64,
+}
+
 /// Metadata about a test run's execution context.
 ///
 /// Captures information about the environment and configuration

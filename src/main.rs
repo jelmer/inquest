@@ -151,6 +151,21 @@ enum Commands {
         all: bool,
     },
 
+    /// Show flakiest tests across recorded runs
+    Flaky {
+        /// Number of tests to show
+        #[arg(short = 'n', long, default_value = "10", conflicts_with = "all")]
+        count: usize,
+
+        /// Show all candidate tests (not just top N)
+        #[arg(long)]
+        all: bool,
+
+        /// Minimum number of recorded runs a test must appear in to be ranked
+        #[arg(long, default_value = "5")]
+        min_runs: usize,
+    },
+
     /// Show logs for individual tests
     Log {
         /// Run ID to show logs from (defaults to latest)
@@ -438,6 +453,15 @@ fn main() {
         Commands::Slowest { count, all } => {
             let display_count = if all { usize::MAX } else { count };
             let cmd = SlowestCommand::with_count(cli.directory, display_count);
+            cmd.execute(&mut ui)
+        }
+        Commands::Flaky {
+            count,
+            all,
+            min_runs,
+        } => {
+            let display_count = if all { usize::MAX } else { count };
+            let cmd = FlakyCommand::new(cli.directory, display_count, min_runs);
             cmd.execute(&mut ui)
         }
         Commands::Log { run, tests } => {

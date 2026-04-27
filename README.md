@@ -163,6 +163,20 @@ Options:
 - `-n, --count <N>`: Number of tests to show (default: 10)
 - `--all`: Show all tests (not just top N)
 
+### `inq flaky`
+
+Rank tests by flakiness across recorded runs. Flakiness is measured by
+pass↔fail transitions in consecutive runs in which the test was recorded,
+so chronically broken tests rank low and genuinely flapping tests rank high.
+
+Options:
+- `-n, --count <N>`: Number of tests to show (default: 10)
+- `--all`: Show all candidate tests (not just top N)
+- `--min-runs <N>`: Minimum runs a test must appear in to be ranked (default: 5)
+
+Each row reports `flake%` (transitions / max(1, runs - 1)), `fail%`
+(failures / runs), the raw transition count, and the number of recorded runs.
+
 ### `inq log <TESTPATTERN>`
 
 Show logs and tracebacks for specific tests, matched by glob-style patterns.

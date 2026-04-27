@@ -14,7 +14,7 @@ pub mod test_run;
 pub mod testr;
 
 pub use test_run::{
-    RunId, RunMetadata, StreamInterruption, TestId, TestResult, TestRun, TestStatus,
+    RunId, RunMetadata, StreamInterruption, TestFlakiness, TestId, TestResult, TestRun, TestStatus,
 };
 
 /// Abstract repository trait for test result storage
@@ -184,6 +184,86 @@ pub trait Repository {
     fn get_run_metadata(&self, _run_id: &RunId) -> Result<RunMetadata> {
         Ok(RunMetadata::default())
     }
+
+    /// Compute per-test flakiness statistics across all recorded runs.
+    ///
+    /// Tests are considered in the order returned by [`Self::list_run_ids`]
+    /// (chronological for both built-in backends). Tests that ran in fewer
+    /// than `min_runs` recorded runs are filtered out — without enough
+    /// history, transition counts aren't meaningful.
+    ///
+    /// The default implementation walks every run via [`Self::get_test_run`],
+    /// which is `O(runs × tests)` in I/O. Backends that store per-run results
+    /// in a structured store should override this with a single query.
+    ///
+    /// Returns tests sorted by `transitions` (desc), then `failure_rate`
+    /// (desc), then `test_id` (asc) for stable output.
+    fn get_flakiness(&self, min_runs: usize) -> Result<Vec<TestFlakiness>> {
+        let run_ids = self.list_run_ids()?;
+        let mut history: HashMap<TestId, Vec<bool>> = HashMap::new();
+        for run_id in &run_ids {
+            let run = match self.get_test_run(run_id) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("skipping run {} while computing flakiness: {}", run_id, e);
+                    continue;
+                }
+            };
+            for (test_id, result) in &run.results {
+                history
+                    .entry(test_id.clone())
+                    .or_default()
+                    .push(result.status.is_failure());
+            }
+        }
+        Ok(summarise_flakiness(history, min_runs))
+    }
+}
+
+/// Convert a per-test sequence of pass/fail booleans into [`TestFlakiness`]
+/// entries. Shared between the default trait fallback and backend-specific
+/// implementations so the metric definition stays in one place.
+pub fn summarise_flakiness(
+    history: HashMap<TestId, Vec<bool>>,
+    min_runs: usize,
+) -> Vec<TestFlakiness> {
+    let mut out: Vec<TestFlakiness> = history
+        .into_iter()
+        .filter_map(|(test_id, statuses)| {
+            let runs = statuses.len() as u32;
+            if (runs as usize) < min_runs {
+                return None;
+            }
+            let failures = statuses.iter().filter(|&&f| f).count() as u32;
+            let transitions = statuses.windows(2).filter(|w| w[0] != w[1]).count() as u32;
+            let denom = runs.saturating_sub(1).max(1) as f64;
+            let flakiness_score = transitions as f64 / denom;
+            let failure_rate = if runs == 0 {
+                0.0
+            } else {
+                failures as f64 / runs as f64
+            };
+            Some(TestFlakiness {
+                test_id,
+                runs,
+                failures,
+                transitions,
+                flakiness_score,
+                failure_rate,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.transitions
+            .cmp(&a.transitions)
+            .then_with(|| {
+                b.failure_rate
+                    .partial_cmp(&a.failure_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.test_id.as_str().cmp(b.test_id.as_str()))
+    });
+    out
 }
 
 /// Factory trait for creating and opening repositories

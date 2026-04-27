@@ -101,6 +101,19 @@ pub struct SlowestParam {
     pub count: Option<usize>,
 }
 
+/// Parameters for the flaky tests tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FlakyParam {
+    /// Maximum number of tests to return, ranked by flakiness. Default 10.
+    /// The response reports the total candidate pool so you know if more exist.
+    pub count: Option<usize>,
+    /// Minimum number of recorded runs a test must appear in to be ranked.
+    /// Default 5. Tests with shorter history are dropped because their
+    /// transition counts are statistically noisy. Lower it to inspect a
+    /// young repository; raise it to be stricter.
+    pub min_runs: Option<usize>,
+}
+
 /// Parameters for the diff tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DiffParam {
@@ -632,6 +645,32 @@ struct SlowTest {
 struct SlowestResponse {
     total_time_secs: f64,
     tests: Vec<SlowTest>,
+}
+
+#[derive(Serialize)]
+struct FlakyTest {
+    test_id: String,
+    runs: u32,
+    failures: u32,
+    transitions: u32,
+    flakiness_score: f64,
+    failure_rate: f64,
+}
+
+#[derive(Serialize)]
+struct FlakyResponse {
+    /// Tests with at least `min_runs` recorded runs that qualified for ranking.
+    total_candidates: usize,
+    /// Number of `tests` returned (may be smaller than `total_candidates` when
+    /// `count` truncated the list).
+    count: usize,
+    /// How many candidates were dropped because of the `count` limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<usize>,
+    /// The `min_runs` threshold actually used. Surfaced so callers can tell
+    /// when the default kicked in.
+    min_runs: usize,
+    tests: Vec<FlakyTest>,
 }
 
 #[derive(Serialize)]
@@ -1186,6 +1225,49 @@ impl InquestMcpService {
 
         ok_json(&SlowestResponse {
             total_time_secs: total_secs,
+            tests,
+        })
+    }
+
+    /// Rank tests by flakiness across recorded runs.
+    #[tool(
+        description = "Rank tests by flakiness across recorded runs. Flakiness is measured \
+                        by pass↔fail transitions in consecutive runs in which the test ran, \
+                        so chronically broken tests rank low and genuinely flapping ones \
+                        rank high. Each entry includes raw counts (runs, failures, \
+                        transitions) plus normalised flakiness_score and failure_rate \
+                        in [0, 1]. Tests with fewer than min_runs recorded runs are \
+                        excluded — defaults: count=10, min_runs=5.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn inq_flaky(&self, params: Parameters<FlakyParam>) -> Result<CallToolResult, ErrorData> {
+        let repo = self.open_repo()?;
+        let min_runs = params.0.min_runs.unwrap_or(5);
+        let count = params.0.count.unwrap_or(10);
+
+        let stats = repo.get_flakiness(min_runs).map_err(to_mcp_err)?;
+        let total_candidates = stats.len();
+        let returned = count.min(total_candidates);
+        let truncated = total_candidates.saturating_sub(returned);
+
+        let tests: Vec<FlakyTest> = stats
+            .into_iter()
+            .take(returned)
+            .map(|s| FlakyTest {
+                test_id: s.test_id.as_str().to_string(),
+                runs: s.runs,
+                failures: s.failures,
+                transitions: s.transitions,
+                flakiness_score: s.flakiness_score,
+                failure_rate: s.failure_rate,
+            })
+            .collect();
+
+        ok_json(&FlakyResponse {
+            total_candidates,
+            count: returned,
+            truncated: (truncated > 0).then_some(truncated),
+            min_runs,
             tests,
         })
     }
