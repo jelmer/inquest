@@ -283,15 +283,21 @@ test_list_option = "--collect-only -q"
 
 #### Go
 
-Pipe `go test -json` through `gojson2subunit` (ships with python-subunit):
+Use the `gotest-run` wrapper (ships with python-subunit):
 
 ```toml
-test_command = "go test -json ./... | gojson2subunit"
+test_command = "gotest-run $LISTOPT $IDOPTION"
+test_id_option = "--id-file $IDFILE"
+test_list_option = "--list"
 ```
 
-`inq auto` generates this automatically when it sees a `go.mod`. Per-test
-selection isn't wired up — Go's `-run` regex doesn't fit the `$IDFILE`
-model — so the whole suite runs each invocation.
+`inq auto` generates this automatically when it sees a `go.mod`. The
+wrapper enumerates tests via `go test -json -list ...` for `--list`,
+fans out one `go test -json -run <regex>` invocation per affected
+package for `--id-file`, and otherwise runs the whole tree. Subtests
+are created at runtime by `t.Run` and aren't statically discoverable,
+so they're absent from listings — but executing them by ID works
+(e.g. `inq run --failing` correctly re-runs `pkg::TestX/sub_one`).
 
 #### Advanced Configuration with Parallel Execution
 

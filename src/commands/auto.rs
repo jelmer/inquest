@@ -48,17 +48,19 @@ fn detect_project(base: &Path) -> Vec<Detection> {
         });
     }
 
-    // Go module — pipe `go test -json` through `gojson2subunit` (ships with
-    // python-subunit). Go's per-test selection is regex-on-name plus
-    // package scope, which doesn't map cleanly to inquest's $IDFILE /
-    // $LISTOPT model, so the generated config runs the whole suite each
-    // invocation.
+    // Go module — orchestrate `go test` via the `gotest-run` wrapper
+    // (ships with python-subunit). The wrapper handles all three modes:
+    // bare invocation runs the whole tree, `--list` enumerates tests as
+    // subunit `exists` events (subtests aren't statically discoverable
+    // and are absent), and `--id-file` fans out one `go test -json -run
+    // <regex>` invocation per package so per-test selection works for
+    // `--failing`, `--isolated`, and load-list mode.
     if has_go(base) {
         detections.push(Detection {
             name: "go test (Go)",
-            test_command: "go test -json ./... | gojson2subunit",
-            test_id_option: None,
-            test_list_option: None,
+            test_command: "gotest-run $LISTOPT $IDOPTION",
+            test_id_option: Some("--id-file $IDFILE"),
+            test_list_option: Some("--list"),
         });
     }
 
@@ -411,7 +413,9 @@ mod tests {
         let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
         assert_eq!(
             content,
-            "test_command = \"go test -json ./... | gojson2subunit\"\n"
+            "test_command = \"gotest-run $LISTOPT $IDOPTION\"\n\
+             test_id_option = \"--id-file $IDFILE\"\n\
+             test_list_option = \"--list\"\n"
         );
     }
 
