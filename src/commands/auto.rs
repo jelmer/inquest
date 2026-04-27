@@ -74,6 +74,33 @@ fn detect_project(base: &Path) -> Vec<Detection> {
         });
     }
 
+    // Node.js project with Vitest — Vitest ships a built-in TAP reporter
+    // that writes to stdout, so a simple pipe through `tap2subunit`
+    // (ships with python-subunit) produces a subunit v2 stream.
+    if has_vitest(base) {
+        detections.push(Detection {
+            name: "vitest (Node.js)",
+            test_command: "vitest run --reporter=tap | tap2subunit",
+            test_id_option: None,
+            test_list_option: None,
+        });
+    }
+
+    // Node.js project with Jest — Jest has no built-in machine-readable
+    // reporter, so we rely on the de-facto `jest-junit` package (which
+    // the user must add as a devDependency) to emit `junit.xml`, then
+    // post-process with `junitxml2subunit` (ships with python-subunit).
+    // We use `;` rather than `&&` so the conversion still runs when
+    // tests fail — inquest derives pass/fail from the subunit stream.
+    if has_jest(base) {
+        detections.push(Detection {
+            name: "jest (Node.js)",
+            test_command: "jest --ci --reporters=jest-junit; junitxml2subunit junit.xml",
+            test_id_option: None,
+            test_list_option: None,
+        });
+    }
+
     detections
 }
 
@@ -117,6 +144,64 @@ fn has_python_unittest(base: &Path) -> bool {
         }
     }
 
+    false
+}
+
+/// Check if the project uses Vitest.
+fn has_vitest(base: &Path) -> bool {
+    for name in &[
+        "vitest.config.js",
+        "vitest.config.ts",
+        "vitest.config.mjs",
+        "vitest.config.cjs",
+        "vitest.config.mts",
+        "vitest.config.cts",
+    ] {
+        if base.join(name).exists() {
+            return true;
+        }
+    }
+    package_json_mentions(base, "vitest")
+}
+
+/// Check if the project uses Jest.
+fn has_jest(base: &Path) -> bool {
+    for name in &[
+        "jest.config.js",
+        "jest.config.ts",
+        "jest.config.mjs",
+        "jest.config.cjs",
+        "jest.config.json",
+    ] {
+        if base.join(name).exists() {
+            return true;
+        }
+    }
+    package_json_mentions(base, "jest")
+}
+
+/// Look for `name` as a key under "dependencies"/"devDependencies" in
+/// package.json, or as a top-level key (Jest accepts a `"jest"` block in
+/// package.json as a config source).
+fn package_json_mentions(base: &Path, name: &str) -> bool {
+    let Ok(contents) = std::fs::read_to_string(base.join("package.json")) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    if value.get(name).is_some() {
+        return true;
+    }
+    for section in &["dependencies", "devDependencies", "peerDependencies"] {
+        if value
+            .get(section)
+            .and_then(|s| s.as_object())
+            .is_some_and(|m| m.contains_key(name))
+        {
+            return true;
+        }
+    }
     false
 }
 
@@ -194,7 +279,7 @@ impl Command for AutoCommand {
         if detections.is_empty() {
             ui.error("Could not detect project type")?;
             ui.error(
-                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), prove (Perl)",
+                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), prove (Perl), vitest (Node.js), jest (Node.js)",
             )?;
             return Ok(1);
         }
@@ -383,7 +468,7 @@ mod tests {
             ui.errors,
             vec![
                 "Could not detect project type",
-                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), prove (Perl)",
+                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), prove (Perl), vitest (Node.js), jest (Node.js)",
             ]
         );
     }
@@ -521,6 +606,177 @@ mod tests {
                 temp.path().join("inquest.toml").display()
             )]
         );
+    }
+
+    #[test]
+    fn test_auto_detect_vitest_config() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("vitest.config.ts"), "export default {}\n").unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ui.output,
+            vec![format!(
+                "Detected vitest (Node.js) project, wrote {}",
+                temp.path().join("inquest.toml").display()
+            )]
+        );
+
+        let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
+        assert_eq!(
+            content,
+            "test_command = \"vitest run --reporter=tap | tap2subunit\"\n"
+        );
+    }
+
+    #[test]
+    fn test_auto_detect_vitest_devdependency() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"name":"foo","devDependencies":{"vitest":"^1.0.0"}}"#,
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ui.output,
+            vec![format!(
+                "Detected vitest (Node.js) project, wrote {}",
+                temp.path().join("inquest.toml").display()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_auto_detect_jest_config() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("jest.config.js"), "module.exports = {};\n").unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ui.output,
+            vec![format!(
+                "Detected jest (Node.js) project, wrote {}",
+                temp.path().join("inquest.toml").display()
+            )]
+        );
+
+        let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
+        assert_eq!(
+            content,
+            "test_command = \"jest --ci --reporters=jest-junit; junitxml2subunit junit.xml\"\n"
+        );
+    }
+
+    #[test]
+    fn test_auto_detect_jest_package_json_block() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"name":"foo","jest":{"testEnvironment":"node"}}"#,
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ui.output,
+            vec![format!(
+                "Detected jest (Node.js) project, wrote {}",
+                temp.path().join("inquest.toml").display()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_auto_detect_jest_devdependency() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"name":"foo","devDependencies":{"jest":"^29.0.0"}}"#,
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ui.output,
+            vec![format!(
+                "Detected jest (Node.js) project, wrote {}",
+                temp.path().join("inquest.toml").display()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_auto_vitest_priority_over_jest() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"devDependencies":{"vitest":"^1","jest":"^29"}}"#,
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ui.output,
+            vec![format!(
+                "Detected vitest (Node.js) project, wrote {}",
+                temp.path().join("inquest.toml").display()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_auto_node_no_test_runner_not_detected() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"name":"foo","dependencies":{"lodash":"^4"}}"#,
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn test_auto_package_json_invalid_json_no_panic() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("package.json"), "not json {").unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        // Falls through to "no project detected" since package.json is unparseable.
+        assert_eq!(result, 1);
     }
 
     #[test]
