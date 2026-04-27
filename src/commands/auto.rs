@@ -48,6 +48,22 @@ fn detect_project(base: &Path) -> Vec<Detection> {
         });
     }
 
+    // Go module — orchestrate `go test` via the `gotest-run` wrapper
+    // (ships with python-subunit). The wrapper handles all three modes:
+    // bare invocation runs the whole tree, `--list` enumerates tests as
+    // subunit `exists` events (subtests aren't statically discoverable
+    // and are absent), and `--id-file` fans out one `go test -json -run
+    // <regex>` invocation per package so per-test selection works for
+    // `--failing`, `--isolated`, and load-list mode.
+    if has_go(base) {
+        detections.push(Detection {
+            name: "go test (Go)",
+            test_command: "gotest-run $LISTOPT $IDOPTION",
+            test_id_option: Some("--id-file $IDFILE"),
+            test_list_option: Some("--list"),
+        });
+    }
+
     // Perl project using prove + tap2subunit (via prove-subunit wrapper)
     if has_perl(base) {
         detections.push(Detection {
@@ -59,6 +75,11 @@ fn detect_project(base: &Path) -> Vec<Detection> {
     }
 
     detections
+}
+
+/// Check if the project is a Go module.
+fn has_go(base: &Path) -> bool {
+    base.join("go.mod").exists()
 }
 
 /// Check if the project uses pytest.
@@ -173,7 +194,7 @@ impl Command for AutoCommand {
         if detections.is_empty() {
             ui.error("Could not detect project type")?;
             ui.error(
-                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), prove (Perl)",
+                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), prove (Perl)",
             )?;
             return Ok(1);
         }
@@ -362,8 +383,39 @@ mod tests {
             ui.errors,
             vec![
                 "Could not detect project type",
-                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), prove (Perl)",
+                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), prove (Perl)",
             ]
+        );
+    }
+
+    #[test]
+    fn test_auto_detect_go() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("go.mod"),
+            "module example.com/foo\n\ngo 1.22\n",
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            ui.output,
+            vec![format!(
+                "Detected go test (Go) project, wrote {}",
+                temp.path().join("inquest.toml").display()
+            )]
+        );
+
+        let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
+        assert_eq!(
+            content,
+            "test_command = \"gotest-run $LISTOPT $IDOPTION\"\n\
+             test_id_option = \"--id-file $IDFILE\"\n\
+             test_list_option = \"--list\"\n"
         );
     }
 

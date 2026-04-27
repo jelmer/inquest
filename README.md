@@ -163,6 +163,20 @@ Options:
 - `-n, --count <N>`: Number of tests to show (default: 10)
 - `--all`: Show all tests (not just top N)
 
+### `inq flaky`
+
+Rank tests by flakiness across recorded runs. Flakiness is measured by
+pass↔fail transitions in consecutive runs in which the test was recorded,
+so chronically broken tests rank low and genuinely flapping tests rank high.
+
+Options:
+- `-n, --count <N>`: Number of tests to show (default: 10)
+- `--all`: Show all candidate tests (not just top N)
+- `--min-runs <N>`: Minimum runs a test must appear in to be ranked (default: 5)
+
+Each row reports `flake%` (transitions / max(1, runs - 1)), `fail%`
+(failures / runs), the raw transition count, and the number of recorded runs.
+
 ### `inq log <TESTPATTERN>`
 
 Show logs and tracebacks for specific tests, matched by glob-style patterns.
@@ -266,6 +280,24 @@ test_command = "pytest $IDOPTION"
 test_id_option = "--test-id-file=$IDFILE"
 test_list_option = "--collect-only -q"
 ```
+
+#### Go
+
+Use the `gotest-run` wrapper (ships with python-subunit):
+
+```toml
+test_command = "gotest-run $LISTOPT $IDOPTION"
+test_id_option = "--id-file $IDFILE"
+test_list_option = "--list"
+```
+
+`inq auto` generates this automatically when it sees a `go.mod`. The
+wrapper enumerates tests via `go test -json -list ...` for `--list`,
+fans out one `go test -json -run <regex>` invocation per affected
+package for `--id-file`, and otherwise runs the whole tree. Subtests
+are created at runtime by `t.Run` and aren't statically discoverable,
+so they're absent from listings — but executing them by ID works
+(e.g. `inq run --failing` correctly re-runs `pkg::TestX/sub_one`).
 
 #### Advanced Configuration with Parallel Execution
 
