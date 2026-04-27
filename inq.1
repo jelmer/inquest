@@ -129,6 +129,31 @@ List test IDs only, one per line (for scripting)
 Show output as a subunit stream
 .PP
 Exit code is 0 if no failing tests, 1 if there are failures.
+.SS "config"
+Print the resolved effective configuration.
+.PP
+Shows the configuration that
+.B inq run
+would use, combining values from the config file
+.RB ( inquest.toml ", " .inquest.toml ", or " .testr.conf ),
+CLI overrides, and built\-in defaults. Each resolved value is annotated with its
+source ([config], [cli], or [default]). Useful for debugging configuration
+precedence.
+.TP
+\fB\-\-test\-timeout\fR \fI\,TIMEOUT\/\fR
+Per\-test timeout override
+.TP
+\fB\-\-max\-duration\fR \fI\,DURATION\/\fR
+Overall run\-duration override
+.TP
+\fB\-\-no\-output\-timeout\fR \fI\,DURATION\/\fR
+No\-output timeout override
+.TP
+\fB\-\-order\fR \fI\,ORDER\/\fR
+Test ordering strategy override
+.TP
+\fB\-j\fR, \fB\-\-parallel\fR \fI\,N\/\fR
+Concurrency override
 .SS "stats"
 Show repository statistics.
 .PP

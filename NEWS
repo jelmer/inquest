@@ -8,6 +8,10 @@ UNRELEASED
 CHANGES
 -------
 
+* Add ``inq config``, which prints the resolved effective configuration
+  (config file + CLI overrides + defaults) with each value annotated by
+  its source. Closes #71. (Jelmer Vernooĳ)
+
 * Add ``inq flaky`` and the ``inq_flaky`` MCP tool, ranking tests by
   pass↔fail transitions across recorded runs so chronically broken tests
   rank below genuinely flapping ones. (Jelmer Vernooĳ)

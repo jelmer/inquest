@@ -68,6 +68,29 @@ enum Commands {
         command: Option<String>,
     },
 
+    /// Print the resolved effective configuration
+    Config {
+        /// Per-test timeout: "5m", "auto", or "disabled"
+        #[arg(long, value_name = "TIMEOUT")]
+        test_timeout: Option<String>,
+
+        /// Overall run timeout: "30m", "auto", or "disabled"
+        #[arg(long, value_name = "DURATION")]
+        max_duration: Option<String>,
+
+        /// Kill test process if no output for this duration (e.g. "60s")
+        #[arg(long, value_name = "DURATION")]
+        no_output_timeout: Option<String>,
+
+        /// Test ordering strategy
+        #[arg(long, value_name = "ORDER")]
+        order: Option<String>,
+
+        /// Number of parallel test workers
+        #[arg(long, short = 'j', value_name = "N", alias = "concurrency", num_args = 0..=1, default_missing_value = "0")]
+        parallel: Option<usize>,
+    },
+
     /// Show quickstart documentation
     Quickstart,
 
@@ -382,6 +405,23 @@ fn main() {
         }
         Commands::Help { command } => {
             let cmd = HelpCommand::new(command);
+            cmd.execute(&mut ui)
+        }
+        Commands::Config {
+            test_timeout,
+            max_duration,
+            no_output_timeout,
+            order,
+            parallel,
+        } => {
+            let cmd = ConfigCommand {
+                base_path: cli.directory,
+                test_timeout,
+                max_duration,
+                no_output_timeout,
+                order,
+                concurrency: parallel,
+            };
             cmd.execute(&mut ui)
         }
         Commands::Quickstart => {

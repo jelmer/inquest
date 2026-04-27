@@ -151,6 +151,16 @@ Options:
 
 Show currently in-progress test runs, including live test counts. Uses lock files to track active runs.
 
+### `inq config`
+
+Print the resolved effective configuration. Combines values from the config file
+(`inquest.toml`, `.inquest.toml`, or `.testr.conf`), CLI overrides, and built-in
+defaults. Each value is annotated with its source (`[config]`, `[cli]`, or
+`[default]`), making it easy to see what `inq run` would actually use.
+
+Options accept the same overrides as `inq run`: `--test-timeout`, `--max-duration`,
+`--no-output-timeout`, `--order`, and `-j/--parallel`.
+
 ### `inq stats`
 
 Show repository statistics including total test runs, latest run details, and total tests executed.
