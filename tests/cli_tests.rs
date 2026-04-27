@@ -61,3 +61,18 @@ fn no_subcommand_differs_from_plain_run() {
 
     assert_ne!(no_arg.stderr, plain_run.stderr);
 }
+
+#[test]
+fn run_help_advertises_starting_with_flag() {
+    let out = Command::new(inq_bin())
+        .arg("run")
+        .arg("--help")
+        .output()
+        .expect("run inq run --help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--starting-with") && stdout.contains("-s"),
+        "expected --starting-with/-s in help, got:\n{stdout}"
+    );
+}
