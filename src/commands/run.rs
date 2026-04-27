@@ -62,6 +62,9 @@ pub struct RunCommand {
     pub all_output: bool,
     /// Test patterns to filter
     pub test_filters: Option<Vec<String>>,
+    /// `-s`/`--starting-with` prefixes (possibly abbreviated; expanded
+    /// against the discovered test list before matching).
+    pub starting_with: Option<Vec<String>>,
     /// Additional arguments to pass to the test command
     pub test_args: Option<Vec<String>>,
     /// Per-test timeout setting
@@ -249,6 +252,38 @@ impl RunCommand {
                     compiled_filters
                         .iter()
                         .any(|re| re.is_match(test_id.as_str()))
+                })
+                .collect();
+
+            test_ids = Some(filtered_ids);
+        }
+
+        if let Some(ref starting_with) = self.starting_with {
+            let all_test_ids = if let Some(ids) = test_ids {
+                ids
+            } else {
+                test_cmd.list_tests()?
+            };
+
+            let known: Vec<&str> = all_test_ids.iter().map(|id| id.as_str()).collect();
+            let mut prefixes: Vec<String> = Vec::with_capacity(starting_with.len());
+            for s in starting_with {
+                let expanded = crate::abbreviation::expand_abbreviation(s, &known)?;
+                if expanded != *s {
+                    ui.output(&format!("Expanded '{}' to '{}'", s, expanded))?;
+                }
+                prefixes.push(expanded);
+            }
+
+            let filtered_ids: Vec<_> = all_test_ids
+                .into_iter()
+                .filter(|test_id| {
+                    let id = test_id.as_str();
+                    prefixes.iter().any(|p| {
+                        id == p
+                            || id.starts_with(p)
+                                && id.as_bytes().get(p.len()).copied() == Some(b'.')
+                    })
                 })
                 .collect();
 

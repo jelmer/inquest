@@ -275,6 +275,13 @@ enum Commands {
         #[arg(value_name = "TESTFILTER")]
         testfilters: Vec<String>,
 
+        /// Run only tests whose ID starts with this prefix. Dotted segments
+        /// may be abbreviated to single letters when the expansion against
+        /// the discovered test list is unique (e.g. "bt.test_foo" expanding
+        /// to "breezy.tests.test_foo"). May be given multiple times.
+        #[arg(long = "starting-with", short = 's', value_name = "TESTID")]
+        starting_with: Vec<String>,
+
         /// Per-test timeout: "5m", "auto" (from history), or "disabled" (default)
         #[arg(long, value_name = "TIMEOUT")]
         test_timeout: Option<String>,
@@ -364,6 +371,7 @@ fn main() {
         subunit: false,
         all_output: false,
         testfilters: Vec::new(),
+        starting_with: Vec::new(),
         test_timeout: None,
         max_duration: None,
         no_output_timeout: None,
@@ -569,6 +577,7 @@ fn main() {
             max_restarts,
             order,
             testfilters,
+            starting_with,
             testargs,
         } => {
             // Parse timeout settings: CLI flags override config file values.
@@ -631,6 +640,11 @@ fn main() {
                     None
                 } else {
                     Some(testfilters)
+                },
+                starting_with: if starting_with.is_empty() {
+                    None
+                } else {
+                    Some(starting_with)
                 },
                 test_args: if testargs.is_empty() {
                     None
