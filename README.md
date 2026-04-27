@@ -305,27 +305,35 @@ Drive the build tool through `jvmtest-subunit` (ships with
 python-subunit):
 
 ```toml
-test_command = "jvmtest-subunit"
+test_command = "jvmtest-subunit $LISTOPT $IDOPTION"
+test_id_option = "--id-file $IDFILE"
+test_list_option = "--list"
 ```
 
 `inq auto` generates this from `pom.xml` or
-`build.gradle{,.kts}`/`settings.gradle{,.kts}`. The wrapper
-auto-detects Maven vs Gradle from the working directory, spawns the
-right build tool, and watches its reports directory live so per-class
-results stream into `inq run` as each test class finishes — no
-waiting for the whole suite to complete. Build-tool stdout/stderr is
-forwarded so users still see compile errors and progress.
+`build.gradle{,.kts}`/`settings.gradle{,.kts}`. The wrapper:
+
+* auto-detects Maven vs Gradle from the working directory;
+* spawns the build tool and watches its reports directory live so
+  per-class results stream into `inq run` as each test class finishes;
+* enumerates tests for `--list` by walking `src/test/java` and
+  `src/test/kotlin` for conventionally-named test classes
+  (`*Test`/`*Tests`/`*TestCase`/`*IT`);
+* translates `--id-file` IDs (`Class` or `Class::method`) to the
+  build tool's selection syntax — `-Dtest=Class1,Class2#methodA+methodB`
+  for Maven, `--tests Class1 --tests Class2.methodA` for Gradle;
+* forwards build-tool stdout/stderr so users still see compile errors
+  and progress.
+
+`inq run --failing`, `inq run --isolated`, and `inq list-tests` all
+work — methods created at runtime (`@ParameterizedTest`,
+`@TestFactory` dynamic tests) aren't statically discoverable and so
+are absent from listings, but executing them by ID works.
 
 The wrapper takes optional flags for non-default layouts:
 `jvmtest-subunit --tool gradle --reports-dir build/custom-reports`,
 or pass extra build args after `--`:
 `jvmtest-subunit -- -Dmaven.test.skip=false`.
-
-Per-test selection isn't wired up — both build tools select at
-class+method granularity with build-tool-specific flags
-(`-Dtest=Foo#bar` for Maven, `--tests Foo.bar` for Gradle) that don't
-fit the `$IDFILE` model — so the generated config runs the whole suite
-each invocation.
 
 #### Advanced Configuration with Parallel Execution
 

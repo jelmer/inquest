@@ -25,12 +25,15 @@ CHANGES
   projects in ``inq auto``. The generated config drives the build
   tool through the new ``jvmtest-subunit`` wrapper (ships with
   python-subunit), which auto-detects Maven vs Gradle, spawns the
-  build tool, and watches its reports directory live so per-class
-  results stream into ``inq run`` as each test class finishes
-  rather than batching after the whole suite completes. Per-test
-  selection isn't wired up — the build tools' selection syntax
-  doesn't map cleanly to inquest's $IDFILE model — so the generated
-  config runs the whole suite each invocation. Closes #73.
+  build tool, watches its reports directory live so per-class
+  results stream as each class finishes, walks
+  ``src/test/{java,kotlin}`` for ``--list``, and translates
+  ``--id-file`` test IDs into the build tool's selection vocabulary
+  (``-Dtest=`` for Maven, ``--tests`` for Gradle). ``inq run
+  --failing``, ``inq run --isolated``, and ``inq list-tests`` all
+  work; methods created at runtime (``@ParameterizedTest``,
+  ``@TestFactory``) aren't statically discoverable and are absent
+  from listings, but executing them by ID is fine. Closes #73.
   (Jelmer Vernooĳ)
 
 INTERNALS

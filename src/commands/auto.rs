@@ -65,29 +65,31 @@ fn detect_project(base: &Path) -> Vec<Detection> {
     }
 
     // Maven / Gradle — drive the build tool through `jvmtest-subunit`
-    // (ships with python-subunit), which spawns the build tool, watches
-    // its reports directory live, and emits subunit packets as each
-    // test class finishes. The wrapper auto-detects the build tool
-    // from the current directory, so the config is one word. Per-test
-    // selection isn't wired up — Maven's `-Dtest=...` and Gradle's
-    // `--tests` are class+method-level and don't fit the $IDFILE
-    // model — so the generated config runs the whole suite each
-    // invocation.
+    // (ships with python-subunit). The wrapper auto-detects the
+    // build tool from the current directory, spawns it, watches its
+    // reports directory live, and translates inquest's $LISTOPT /
+    // $IDOPTION into the build tool's selection vocabulary
+    // (`-Dtest=` for Maven, `--tests` for Gradle). Listing is done
+    // by walking src/test/java and src/test/kotlin for conventionally-
+    // named test classes; methods created at runtime
+    // (`@ParameterizedTest`, `@TestFactory`) aren't statically
+    // discoverable and are absent from listings, but executing them
+    // by ID works.
     if has_maven(base) {
         detections.push(Detection {
             name: "Maven (JVM)",
-            test_command: "jvmtest-subunit",
-            test_id_option: None,
-            test_list_option: None,
+            test_command: "jvmtest-subunit $LISTOPT $IDOPTION",
+            test_id_option: Some("--id-file $IDFILE"),
+            test_list_option: Some("--list"),
         });
     }
 
     if has_gradle(base) {
         detections.push(Detection {
             name: "Gradle (JVM)",
-            test_command: "jvmtest-subunit",
-            test_id_option: None,
-            test_list_option: None,
+            test_command: "jvmtest-subunit $LISTOPT $IDOPTION",
+            test_id_option: Some("--id-file $IDFILE"),
+            test_list_option: Some("--list"),
         });
     }
 
@@ -492,7 +494,12 @@ mod tests {
         );
 
         let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
-        assert_eq!(content, "test_command = \"jvmtest-subunit\"\n");
+        assert_eq!(
+            content,
+            "test_command = \"jvmtest-subunit $LISTOPT $IDOPTION\"\n\
+             test_id_option = \"--id-file $IDFILE\"\n\
+             test_list_option = \"--list\"\n"
+        );
     }
 
     #[test]
@@ -514,7 +521,12 @@ mod tests {
         );
 
         let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
-        assert_eq!(content, "test_command = \"jvmtest-subunit\"\n");
+        assert_eq!(
+            content,
+            "test_command = \"jvmtest-subunit $LISTOPT $IDOPTION\"\n\
+             test_id_option = \"--id-file $IDFILE\"\n\
+             test_list_option = \"--list\"\n"
+        );
     }
 
     #[test]
