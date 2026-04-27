@@ -309,6 +309,33 @@ are created at runtime by `t.Run` and aren't statically discoverable,
 so they're absent from listings — but executing them by ID works
 (e.g. `inq run --failing` correctly re-runs `pkg::TestX/sub_one`).
 
+#### Node.js with Vitest
+
+Vitest ships a built-in TAP reporter; pipe it through `tap2subunit`
+(ships with python-subunit):
+
+```toml
+test_command = "vitest run --reporter=tap | tap2subunit"
+```
+
+`inq auto` generates this when it finds a `vitest.config.*` file or
+`vitest` in `package.json` dependencies.
+
+#### Node.js with Jest
+
+Jest has no built-in machine-readable reporter, so the standard
+approach is to install `jest-junit` as a devDependency and convert
+its XML output:
+
+```toml
+test_command = "jest --ci --reporters=jest-junit; junitxml2subunit junit.xml"
+```
+
+`inq auto` generates this when it finds a `jest.config.*` file, a
+`jest` block in `package.json`, or `jest` in `package.json`
+dependencies. The `;` (rather than `&&`) ensures `junitxml2subunit`
+still runs when tests fail.
+
 #### Advanced Configuration with Parallel Execution
 
 ```toml
