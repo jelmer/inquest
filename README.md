@@ -281,6 +281,18 @@ test_id_option = "--test-id-file=$IDFILE"
 test_list_option = "--collect-only -q"
 ```
 
+#### Go
+
+Pipe `go test -json` through `gojson2subunit` (ships with python-subunit):
+
+```toml
+test_command = "go test -json ./... | gojson2subunit"
+```
+
+`inq auto` generates this automatically when it sees a `go.mod`. Per-test
+selection isn't wired up — Go's `-run` regex doesn't fit the `$IDFILE`
+model — so the whole suite runs each invocation.
+
 #### Advanced Configuration with Parallel Execution
 
 ```toml

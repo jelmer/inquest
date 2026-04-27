@@ -12,6 +12,10 @@ CHANGES
   pass↔fail transitions across recorded runs so chronically broken tests
   rank below genuinely flapping ones. (Jelmer Vernooĳ)
 
+* Detect Go modules (``go.mod``) in ``inq auto``, generating a config
+  that pipes ``go test -json`` through ``gojson2subunit`` (ships with
+  python-subunit). Closes #72. (Jelmer Vernooĳ)
+
 INTERNALS
 ---------
 
