@@ -18,6 +18,6 @@ negation prefixed with `!` (results carrying that tag are skipped).
 The same selection can be supplied on the command line via `--tag`, which can
 be repeated and overrides `filter_tags` from the config:
 
-```
+```sh
 inq run --tag worker-0 --tag '!slow'
 ```
