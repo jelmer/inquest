@@ -164,7 +164,8 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             total_tests INTEGER NOT NULL DEFAULT 0,
             failures INTEGER NOT NULL DEFAULT 0,
             errors INTEGER NOT NULL DEFAULT 0,
-            skips INTEGER NOT NULL DEFAULT 0
+            skips INTEGER NOT NULL DEFAULT 0,
+            test_args TEXT
         );
 
         CREATE TABLE test_results (
@@ -216,6 +217,7 @@ fn migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
     add_column_if_missing(conn, "runs", "duration_secs", "REAL");
     add_column_if_missing(conn, "runs", "exit_code", "INTEGER");
     add_column_if_missing(conn, "runs", "git_dirty", "INTEGER");
+    add_column_if_missing(conn, "runs", "test_args", "TEXT");
     Ok(())
 }
 
@@ -542,9 +544,13 @@ impl Repository for InquestRepository {
 
     fn get_run_metadata(&self, run_id: &RunId) -> Result<RunMetadata> {
         let result = self.conn.query_row(
-            "SELECT git_commit, git_dirty, command, concurrency, duration_secs, exit_code FROM runs WHERE id = ?",
+            "SELECT git_commit, git_dirty, command, concurrency, duration_secs, exit_code, test_args FROM runs WHERE id = ?",
             [run_id.as_str()],
             |row| {
+                let test_args_json: Option<String> = row.get(6)?;
+                let test_args = test_args_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok());
                 Ok(RunMetadata {
                     git_commit: row.get(0)?,
                     git_dirty: row.get(1)?,
@@ -552,6 +558,7 @@ impl Repository for InquestRepository {
                     concurrency: row.get::<_, Option<i64>>(3)?.map(|v| v as u32),
                     duration_secs: row.get(4)?,
                     exit_code: row.get(5)?,
+                    test_args,
                 })
             },
         );
@@ -605,8 +612,14 @@ impl Repository for InquestRepository {
     }
 
     fn set_run_metadata(&mut self, run_id: &RunId, metadata: RunMetadata) -> Result<()> {
+        let test_args_json = metadata
+            .test_args
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| Error::Other(format!("Failed to serialize test_args: {}", e)))?;
         self.conn.execute(
-            "UPDATE runs SET git_commit = ?, git_dirty = ?, command = ?, concurrency = ?, duration_secs = ?, exit_code = ? WHERE id = ?",
+            "UPDATE runs SET git_commit = ?, git_dirty = ?, command = ?, concurrency = ?, duration_secs = ?, exit_code = ?, test_args = ? WHERE id = ?",
             params![
                 metadata.git_commit,
                 metadata.git_dirty,
@@ -614,6 +627,7 @@ impl Repository for InquestRepository {
                 metadata.concurrency,
                 metadata.duration_secs,
                 metadata.exit_code,
+                test_args_json,
                 run_id.as_str(),
             ],
         )?;
@@ -1012,6 +1026,7 @@ mod tests {
                 concurrency: Some(4),
                 duration_secs: Some(12.5),
                 exit_code: Some(1),
+                test_args: Some(vec!["-x".to_string(), "--maxfail=3".to_string()]),
             },
         )
         .unwrap();
@@ -1159,6 +1174,7 @@ mod tests {
                 concurrency: Some(2),
                 duration_secs: Some(45.3),
                 exit_code: Some(0),
+                test_args: None,
             },
         )
         .unwrap();

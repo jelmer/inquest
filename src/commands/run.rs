@@ -48,6 +48,10 @@ pub struct RunCommand {
     pub auto: bool,
     /// Path to a file containing test IDs to run
     pub load_list: Option<String>,
+    /// Pre-computed list of tests to run, in the order they should run.
+    /// Bypasses discovery and `--load-list` parsing. Used by `inq rerun` to
+    /// reproduce the exact test set and order from a previous run.
+    pub test_ids_override: Option<Vec<crate::repository::TestId>>,
     /// Number of parallel test workers
     pub concurrency: Option<usize>,
     /// Run tests repeatedly until they fail
@@ -211,7 +215,9 @@ impl RunCommand {
             &test_cmd,
         )?;
 
-        let mut test_ids = if self.failing_only {
+        let mut test_ids = if let Some(ref override_ids) = self.test_ids_override {
+            Some(override_ids.clone())
+        } else if self.failing_only {
             let failing = repo.get_failing_tests()?;
             if failing.is_empty() {
                 ui.output("No failing tests to run")?;

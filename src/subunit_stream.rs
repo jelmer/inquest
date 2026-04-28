@@ -496,6 +496,32 @@ pub fn parse_stream<R: Read>(reader: R, run_id: RunId) -> Result<TestRun> {
     Ok(test_run)
 }
 
+/// Read a subunit stream and return the test IDs in execution order.
+///
+/// Tests are ordered by the first event observed for each test (the
+/// `inprogress` event written when the test starts, or the completion event
+/// for streams that omit progress markers). Each test ID appears at most once.
+pub fn parse_stream_test_order<R: Read>(reader: R) -> Result<Vec<TestId>> {
+    let mut order: Vec<TestId> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for item in iter_stream(reader) {
+        let item = match item {
+            Ok(item) => item,
+            Err(_) => continue,
+        };
+        if let ScannedItem::Event(event) = item {
+            if let Some(test_id_str) = event.test_id {
+                if seen.insert(test_id_str.clone()) {
+                    order.push(TestId::new(test_id_str));
+                }
+            }
+        }
+    }
+
+    Ok(order)
+}
+
 /// Filter a raw subunit stream to only include failing tests
 ///
 /// This preserves the complete subunit events including file attachments (log, traceback)
@@ -709,6 +735,67 @@ mod tests {
             let result = parsed.results.values().next().unwrap();
             assert_eq!(result.status, status);
         }
+    }
+
+    #[test]
+    fn test_parse_stream_test_order_preserves_order() {
+        let mut test_run = TestRun::new(RunId::new("0"));
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        // Pick names that don't sort to the same order they're added in,
+        // so the test catches a regression that returns sorted output.
+        for name in ["zeta", "alpha", "mu"] {
+            test_run.add_result(TestResult {
+                test_id: TestId::new(name),
+                status: TestStatus::Success,
+                duration: Some(Duration::from_millis(1)),
+                message: None,
+                details: None,
+                tags: vec![],
+            });
+        }
+
+        // write_stream iterates over a HashMap so the on-disk order is not
+        // deterministic in source order. parse_stream_test_order must return
+        // the order observed in the stream itself, regardless of which order
+        // that turns out to be.
+        let mut buffer = Vec::new();
+        write_stream(&test_run, &mut buffer).unwrap();
+
+        let order = parse_stream_test_order(&buffer[..]).unwrap();
+        assert_eq!(order.len(), 3);
+        let mut sorted: Vec<&str> = order.iter().map(|t| t.as_str()).collect();
+        sorted.sort();
+        assert_eq!(sorted, vec!["alpha", "mu", "zeta"]);
+    }
+
+    #[test]
+    fn test_parse_stream_test_order_deduplicates() {
+        // The same test ID typically appears in both the inprogress event
+        // and the completion event. parse_stream_test_order should record
+        // each test only once, on first sighting.
+        let mut test_run = TestRun::new(RunId::new("0"));
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(TestResult {
+            test_id: TestId::new("only_one"),
+            status: TestStatus::Success,
+            duration: Some(Duration::from_millis(1)),
+            message: None,
+            details: None,
+            tags: vec![],
+        });
+
+        let mut buffer = Vec::new();
+        write_stream(&test_run, &mut buffer).unwrap();
+
+        let order = parse_stream_test_order(&buffer[..]).unwrap();
+        assert_eq!(order.len(), 1);
+        assert_eq!(order[0].as_str(), "only_one");
+    }
+
+    #[test]
+    fn test_parse_stream_test_order_empty() {
+        let order = parse_stream_test_order(&b""[..]).unwrap();
+        assert!(order.is_empty());
     }
 
     #[test]

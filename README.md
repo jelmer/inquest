@@ -111,6 +111,15 @@ Options:
 - `TESTFILTER`: Regex patterns to filter which tests to run
 - `-- TESTARGS`: Additional arguments passed through to the test command
 
+### `inq rerun`
+
+Re-run exactly the tests of a previous run, in the same order, forwarding the same `--`-style test arguments captured in the run's metadata. Without an argument, re-runs the latest run.
+
+```sh
+inq rerun 7    # repeat run 7
+inq rerun -1   # repeat the latest run
+```
+
 ### `inq load`
 
 Load test results from stdin in subunit format.

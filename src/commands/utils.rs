@@ -136,6 +136,7 @@ pub fn store_run_metadata(
     concurrency: Option<u32>,
     duration: Option<std::time::Duration>,
     exit_code: Option<i32>,
+    test_args: Option<Vec<String>>,
 ) -> Result<()> {
     let git_commit = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -170,6 +171,7 @@ pub fn store_run_metadata(
         concurrency,
         duration_secs: duration.map(|d| d.as_secs_f64()),
         exit_code,
+        test_args,
     };
 
     repo.set_run_metadata(run_id, metadata)
@@ -306,6 +308,7 @@ pub fn persist_and_display_run(
         duration,
         test_command,
         concurrency,
+        test_args,
         ..
     } = output;
 
@@ -324,6 +327,7 @@ pub fn persist_and_display_run(
         Some(concurrency),
         Some(duration),
         Some(exit_code),
+        test_args,
     )?;
 
     display_test_summary(ui, &run_id, &combined_run, filter_tags)?;
@@ -581,6 +585,7 @@ mod tests {
             duration: std::time::Duration::from_secs(2),
             test_command: "echo test".to_string(),
             concurrency: 1,
+            test_args: None,
         };
 
         let mut ui = crate::ui::test_ui::TestUI::new();
@@ -662,6 +667,7 @@ mod tests {
             duration: std::time::Duration::from_secs(3),
             test_command: "cargo test".to_string(),
             concurrency: 1,
+            test_args: None,
         };
 
         let mut ui = crate::ui::test_ui::TestUI::new();

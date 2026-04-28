@@ -125,6 +125,23 @@ Examples:
   inq last --subunit
 "#
                 }
+                "rerun" => {
+                    r#"inq rerun - Re-run exactly the tests of a previous run
+
+Usage: inq rerun [RUN_ID]
+
+Re-runs the same tests in the same order, forwarding the same `--`-style
+test arguments captured in the run's metadata. Defaults to the latest run.
+
+Arguments:
+  RUN_ID  Run ID to re-run (supports negative indices like -1, -2)
+
+Examples:
+  inq rerun
+  inq rerun 7
+  inq rerun -2
+"#
+                }
                 "stats" => {
                     r#"inq stats - Show repository statistics
 
@@ -200,6 +217,7 @@ Available commands:
   init          Initialize a new test repository
   load          Load test results from a subunit stream
   run           Run tests and load results
+  rerun         Re-run the tests of a previous run, in the same order
   diff          Compare two test runs and show what changed
   failing       Show currently failing tests
   last          Show results from the last test run

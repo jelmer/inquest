@@ -49,6 +49,9 @@ pub struct RunOutput {
     pub test_command: String,
     /// Number of parallel workers used (1 for serial/subunit/isolated).
     pub concurrency: u32,
+    /// Extra arguments forwarded to the test command after `--`. Captured so
+    /// `inq rerun` can reproduce the original invocation.
+    pub test_args: Option<Vec<String>>,
 }
 
 impl RunOutput {
@@ -283,6 +286,7 @@ impl<'a> TestExecutor<'a> {
             duration,
             test_command: test_cmd.config().test_command.clone(),
             concurrency: 1,
+            test_args: self.config.test_args.clone(),
         })
     }
 
@@ -629,6 +633,7 @@ impl<'a> TestExecutor<'a> {
             duration: start_time.elapsed(),
             test_command: test_cmd.config().test_command.clone(),
             concurrency: 1,
+            test_args: self.config.test_args.clone(),
         })
     }
 
@@ -675,6 +680,7 @@ impl<'a> TestExecutor<'a> {
                 duration: start_time.elapsed(),
                 test_command: test_cmd.config().test_command.clone(),
                 concurrency: concurrency as u32,
+                test_args: self.config.test_args.clone(),
             });
         }
 
@@ -978,6 +984,7 @@ impl<'a> TestExecutor<'a> {
             duration: start_time.elapsed(),
             test_command: test_cmd.config().test_command.clone(),
             concurrency: concurrency as u32,
+            test_args: self.config.test_args.clone(),
         })
     }
 
@@ -1134,6 +1141,7 @@ impl<'a> TestExecutor<'a> {
             duration: start_time.elapsed(),
             test_command: test_cmd.config().test_command.clone(),
             concurrency: 1,
+            test_args: self.config.test_args.clone(),
         })
     }
 }
@@ -1793,6 +1801,7 @@ mod tests {
             duration: Duration::from_secs(1),
             test_command: "echo".to_string(),
             concurrency: 1,
+            test_args: None,
         };
         assert_eq!(output.exit_code(), 0);
     }
@@ -1812,6 +1821,7 @@ mod tests {
             duration: Duration::from_secs(1),
             test_command: "echo".to_string(),
             concurrency: 1,
+            test_args: None,
         };
         assert_eq!(output.exit_code(), 1);
     }
@@ -1825,6 +1835,7 @@ mod tests {
             duration: Duration::from_secs(1),
             test_command: "echo".to_string(),
             concurrency: 1,
+            test_args: None,
         };
         assert_eq!(output.exit_code(), 1);
     }
@@ -1843,6 +1854,7 @@ mod tests {
             duration: Duration::from_secs(1),
             test_command: "echo".to_string(),
             concurrency: 1,
+            test_args: None,
         };
         assert_eq!(output.exit_code(), 1);
     }
@@ -1859,6 +1871,7 @@ mod tests {
             duration: Duration::from_secs(5),
             test_command: "cargo test".to_string(),
             concurrency: 2,
+            test_args: None,
         };
         let test_run = output.into_test_run();
         assert_eq!(test_run.id.as_str(), "42");

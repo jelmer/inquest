@@ -2486,6 +2486,7 @@ mod tests {
                 concurrency: Some(4),
                 duration_secs: Some(5.0),
                 exit_code: Some(1),
+                test_args: None,
             },
         )
         .unwrap();

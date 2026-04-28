@@ -72,6 +72,22 @@ until the error is pinpointed.
 again stopping only when interrupted or a failure occurs. This is useful
 for repeating timing-related test failures.
 
+## Re-running a previous run
+
+`inq rerun <run_id>` re-runs exactly the tests of a previous run, in the
+same order, forwarding the same `--`-style test arguments that the run
+captured in its metadata. Without an argument it re-runs the latest run;
+negative indices like `-2` are also accepted.
+
+```sh
+  $ inq rerun 7    # Repeat run 7
+  $ inq rerun -1   # Repeat the latest run
+```
+
+This is useful for reproducing a flaky failure under the same conditions
+or for re-running a suite after a code change without re-typing
+`-- --pytest-flag --another` each time.
+
 ## Timeouts
 
 inq supports several timeout mechanisms to deal with hanging tests:
