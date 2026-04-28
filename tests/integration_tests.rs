@@ -1383,3 +1383,80 @@ fn test_isolated_run_with_cancellation() {
     );
     assert!(output.any_command_failed);
 }
+
+#[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
+fn test_run_with_profile_persists_active_profile_in_metadata() {
+    use inquest::commands::RunCommand;
+    use inquest::repository::inquest::InquestRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    // Base config + a `fast` profile that's the active one for this run.
+    let config = r#"
+test_command = "true"
+
+[profiles.fast]
+test_timeout = "1m"
+"#;
+    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+    let load_list_path = temp.path().join("test_ids.txt");
+    fs::write(&load_list_path, "fake_test\n").unwrap();
+
+    let mut ui = TestUI::new();
+    let cmd = RunCommand {
+        base_path: Some(base_path.clone()),
+        load_list: Some(load_list_path.to_string_lossy().to_string()),
+        profile: Some("fast".to_string()),
+        ..Default::default()
+    };
+    let exit_code = cmd.execute(&mut ui).unwrap();
+
+    // Walk the runs and confirm exactly one carries `profile = "fast"`.
+    let repo = factory.open(temp.path()).unwrap();
+    let run_ids = repo.list_run_ids().unwrap();
+    assert_eq!(run_ids.len(), 1);
+    let metadata = repo.get_run_metadata(&run_ids[0]).unwrap();
+    assert_eq!(metadata.profile.as_deref(), Some("fast"));
+    // Sanity: the run actually executed.
+    assert_eq!(metadata.exit_code, Some(exit_code));
+}
+
+#[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
+fn test_run_without_profile_records_no_profile_in_metadata() {
+    use inquest::commands::RunCommand;
+    use inquest::repository::inquest::InquestRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    let config = r#"test_command = "true""#;
+    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+    let load_list_path = temp.path().join("test_ids.txt");
+    fs::write(&load_list_path, "fake_test\n").unwrap();
+
+    let mut ui = TestUI::new();
+    let cmd = RunCommand {
+        base_path: Some(base_path.clone()),
+        load_list: Some(load_list_path.to_string_lossy().to_string()),
+        profile: None,
+        ..Default::default()
+    };
+    cmd.execute(&mut ui).unwrap();
+
+    let repo = factory.open(temp.path()).unwrap();
+    let run_ids = repo.list_run_ids().unwrap();
+    assert_eq!(run_ids.len(), 1);
+    let metadata = repo.get_run_metadata(&run_ids[0]).unwrap();
+    assert_eq!(metadata.profile, None);
+}

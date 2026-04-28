@@ -96,3 +96,202 @@ fn bisect_help_shows_good_and_bad_overrides() {
         "expected positional TEST: {stdout}"
     );
 }
+
+#[test]
+fn config_with_profile_resolves_overlay() {
+    let temp = TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join("inquest.toml"),
+        r#"
+test_command = "echo"
+test_timeout = "1m"
+
+[profiles.ci]
+test_timeout = "5m"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(inq_bin())
+        .arg("-C")
+        .arg(temp.path())
+        .arg("--profile")
+        .arg("ci")
+        .arg("config")
+        .output()
+        .expect("run inq --profile ci config");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Active profile: ci"), "got: {stdout}");
+    assert!(
+        stdout.contains("test_timeout: 5m [profile:ci]"),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn config_list_profiles_lists_names() {
+    let temp = TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join("inquest.toml"),
+        r#"
+test_command = "echo"
+
+[profiles.ci]
+test_timeout = "5m"
+
+[profiles.nightly]
+test_timeout = "30m"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(inq_bin())
+        .arg("-C")
+        .arg(temp.path())
+        .arg("config")
+        .arg("--list-profiles")
+        .output()
+        .expect("run inq config --list-profiles");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Profiles:"), "got: {stdout}");
+    assert!(stdout.contains("  ci"), "got: {stdout}");
+    assert!(stdout.contains("  nightly"), "got: {stdout}");
+}
+
+#[test]
+fn unknown_profile_errors_with_available_list() {
+    let temp = TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join("inquest.toml"),
+        r#"
+test_command = "echo"
+
+[profiles.ci]
+test_timeout = "5m"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(inq_bin())
+        .arg("-C")
+        .arg(temp.path())
+        .arg("--profile")
+        .arg("nope")
+        .arg("config")
+        .output()
+        .expect("run inq --profile nope config");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("nope"), "stderr: {stderr}");
+    assert!(stderr.contains("ci"), "stderr: {stderr}");
+}
+
+#[test]
+fn inq_profile_env_var_selects_profile() {
+    let temp = TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join("inquest.toml"),
+        r#"
+test_command = "echo"
+
+[profiles.ci]
+test_timeout = "5m"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(inq_bin())
+        .arg("-C")
+        .arg(temp.path())
+        .arg("config")
+        .env("INQ_PROFILE", "ci")
+        .output()
+        .expect("run inq config with INQ_PROFILE");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Active profile: ci"), "got: {stdout}");
+}
+
+#[test]
+fn cli_profile_overrides_env_var() {
+    let temp = TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join("inquest.toml"),
+        r#"
+test_command = "echo"
+
+[profiles.ci]
+test_timeout = "5m"
+
+[profiles.dev]
+test_timeout = "10m"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(inq_bin())
+        .arg("-C")
+        .arg(temp.path())
+        .arg("--profile")
+        .arg("dev")
+        .arg("config")
+        .env("INQ_PROFILE", "ci")
+        .output()
+        .expect("run inq --profile dev config");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Active profile: dev"), "got: {stdout}");
+    assert!(
+        stdout.contains("test_timeout: 10m [profile:dev]"),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn flat_config_still_works_unchanged() {
+    // Backwards-compat smoke test: a flat config (no profiles, no
+    // default_profile) loads and resolves with no profile annotations.
+    let temp = TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join("inquest.toml"),
+        r#"
+test_command = "cargo subunit $LISTOPT $IDOPTION"
+test_id_option = "--load-list $IDFILE"
+test_list_option = "--list"
+"#,
+    )
+    .unwrap();
+
+    let out = Command::new(inq_bin())
+        .arg("-C")
+        .arg(temp.path())
+        .arg("config")
+        .output()
+        .expect("run inq config");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("Active profile:"), "got: {stdout}");
+    assert!(!stdout.contains("[profile:"), "got: {stdout}");
+}

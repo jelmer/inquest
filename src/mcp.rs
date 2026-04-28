@@ -814,6 +814,12 @@ struct ConfigResponse {
     supports_listing: bool,
     /// When true, inq_run can run a specific subset of tests by ID.
     supports_targeted_runs: bool,
+    /// Names of all profiles defined in the config file. Empty when the
+    /// file has no `[profiles.*]` tables.
+    available_profiles: Vec<String>,
+    /// `default_profile` from the config file (omitted if unset).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     test_list_option: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1682,6 +1688,7 @@ impl InquestMcpService {
                                     partial,
                                     &historical_times,
                                     &[],
+                                    None,
                                 ) {
                                     tracing::error!(
                                         "Failed to persist background run results: {}",
@@ -1975,10 +1982,19 @@ impl InquestMcpService {
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn inq_config(&self) -> Result<CallToolResult, ErrorData> {
-        let (config, config_path) = crate::config::TestrConfig::find_in_directory(&self.directory)
+        let (cfg, config_path) = crate::config::ConfigFile::find_in_directory(&self.directory)
             .map_err(|e| {
                 ErrorData::invalid_params(format!("Failed to load test config: {}", e), None)
             })?;
+        let available_profiles = cfg
+            .profile_names()
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let default_profile = cfg.default_profile.clone();
+        let (config, _active) = cfg.resolve(None).map_err(|e| {
+            ErrorData::invalid_params(format!("Failed to resolve config: {}", e), None)
+        })?;
 
         ok_json(&ConfigResponse {
             config_path: config_path.to_string_lossy().into_owned(),
@@ -1993,6 +2009,8 @@ impl InquestMcpService {
             no_output_timeout: config.no_output_timeout,
             group_regex: config.group_regex,
             test_run_concurrency: config.test_run_concurrency,
+            available_profiles,
+            default_profile,
         })
     }
 
@@ -2547,6 +2565,7 @@ mod tests {
                 duration_secs: Some(5.0),
                 exit_code: Some(1),
                 test_args: None,
+                profile: None,
             },
         )
         .unwrap();

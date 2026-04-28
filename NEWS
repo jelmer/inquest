@@ -8,6 +8,19 @@ UNRELEASED
 CHANGES
 -------
 
+* Add support for named **profiles** in ``inquest.toml``. Top-level
+  fields form the implicit base layer; ``[profiles.<name>]`` tables
+  declare overlayable variants. Select one with ``inq --profile NAME``,
+  the ``INQ_PROFILE`` environment variable, or the optional
+  ``default_profile`` config field. ``Some("")`` in a profile clears the
+  base value rather than inheriting it. The active profile is persisted
+  in run metadata so ``inq info`` can show which profile produced a run;
+  ``inq config`` honours ``--profile`` and adds ``[profile:<name>]``
+  source annotations, plus a new ``--list-profiles`` flag. Existing flat
+  configs continue to load unchanged. Profiles are TOML-only;
+  ``.testr.conf`` configs do not support them. Closes #99.
+  (Jelmer Vernooĳ)
+
 * Add ``inq prune`` for dropping older test runs from the repository.
   Selection modes: ``--keep <N>`` keeps the N most recent runs,
   ``--older-than <DURATION>`` drops runs older than the given age
