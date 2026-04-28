@@ -279,43 +279,38 @@ fn rebuild_flakiness_cache(conn: &rusqlite::Connection) -> Result<()> {
         let status: String = row.get(2)?;
         Ok((test_id, run_id, status))
     })?;
-    let mut current: Option<(String, FlakinessAccum)> = None;
     let mut insert = conn.prepare(
         "INSERT INTO test_flakiness \
          (test_id, runs, failures, transitions, last_run_id, last_failed) \
          VALUES (?, ?, ?, ?, ?, ?)",
     )?;
+    let mut flush = |test_id: &str, accum: &FlakinessAccum| -> Result<()> {
+        insert.execute(params![
+            test_id,
+            accum.runs,
+            accum.failures,
+            accum.transitions,
+            accum.last_run_id,
+            accum.last_failed,
+        ])?;
+        Ok(())
+    };
+    let mut current: Option<(String, FlakinessAccum)> = None;
     for row in rows {
         let (test_id, run_id, status_str) = row?;
         let failed = str_to_status(&status_str).is_failure();
         match &mut current {
-            Some((cur_id, accum)) if *cur_id == test_id => {
-                accum.add(run_id, failed);
-            }
+            Some((cur_id, accum)) if *cur_id == test_id => accum.add(run_id, failed),
             _ => {
                 if let Some((cur_id, accum)) = current.take() {
-                    insert.execute(params![
-                        cur_id,
-                        accum.runs,
-                        accum.failures,
-                        accum.transitions,
-                        accum.last_run_id,
-                        accum.last_failed as i64,
-                    ])?;
+                    flush(&cur_id, &accum)?;
                 }
                 current = Some((test_id, FlakinessAccum::new(run_id, failed)));
             }
         }
     }
     if let Some((cur_id, accum)) = current {
-        insert.execute(params![
-            cur_id,
-            accum.runs,
-            accum.failures,
-            accum.transitions,
-            accum.last_run_id,
-            accum.last_failed as i64,
-        ])?;
+        flush(&cur_id, &accum)?;
     }
     Ok(())
 }
@@ -334,7 +329,7 @@ impl FlakinessAccum {
     fn new(run_id: i64, failed: bool) -> Self {
         Self {
             runs: 1,
-            failures: if failed { 1 } else { 0 },
+            failures: u32::from(failed),
             transitions: 0,
             last_run_id: run_id,
             last_failed: failed,
@@ -343,12 +338,8 @@ impl FlakinessAccum {
 
     fn add(&mut self, run_id: i64, failed: bool) {
         self.runs += 1;
-        if failed {
-            self.failures += 1;
-        }
-        if failed != self.last_failed {
-            self.transitions += 1;
-        }
+        self.failures += u32::from(failed);
+        self.transitions += u32::from(failed != self.last_failed);
         self.last_run_id = run_id;
         self.last_failed = failed;
     }
@@ -941,37 +932,23 @@ impl Repository for InquestRepository {
             let runs: u32 = row.get(1)?;
             let failures: u32 = row.get(2)?;
             let transitions: u32 = row.get(3)?;
-            Ok((test_id, runs, failures, transitions))
-        })?;
-        let mut out: Vec<crate::repository::TestFlakiness> = rows
-            .map(|r| {
-                r.map(|(test_id, runs, failures, transitions)| {
-                    let denom = runs.saturating_sub(1).max(1) as f64;
-                    let flakiness_score = transitions as f64 / denom;
-                    let failure_rate = if runs == 0 {
-                        0.0
-                    } else {
-                        failures as f64 / runs as f64
-                    };
-                    crate::repository::TestFlakiness {
-                        test_id: TestId::new(test_id),
-                        runs,
-                        failures,
-                        transitions,
-                        flakiness_score,
-                        failure_rate,
-                    }
-                })
+            // `failures > 0` in the WHERE clause guarantees runs >= 1.
+            let denom = runs.saturating_sub(1).max(1) as f64;
+            Ok(crate::repository::TestFlakiness {
+                test_id: TestId::new(test_id),
+                runs,
+                failures,
+                transitions,
+                flakiness_score: transitions as f64 / denom,
+                failure_rate: failures as f64 / runs as f64,
             })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        })?;
+        let mut out: Vec<crate::repository::TestFlakiness> =
+            rows.collect::<std::result::Result<_, _>>()?;
         out.sort_by(|a, b| {
             b.transitions
                 .cmp(&a.transitions)
-                .then_with(|| {
-                    b.failure_rate
-                        .partial_cmp(&a.failure_rate)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
+                .then_with(|| b.failure_rate.total_cmp(&a.failure_rate))
                 .then_with(|| a.test_id.as_str().cmp(b.test_id.as_str()))
         });
         Ok(out)
@@ -1014,7 +991,7 @@ fn insert_test_results(conn: &rusqlite::Connection, run_id: i64, run: &TestRun) 
     // Track tests where a prior `(run_id, test_id)` row was overwritten — for
     // these we can't incrementally update the cache, since the change could
     // have happened anywhere in the test's history. Recompute them at the end.
-    let mut needs_rebuild: Vec<TestId> = Vec::new();
+    let mut needs_rebuild: Vec<&str> = Vec::new();
 
     for result in run.results.values() {
         let tags = if result.tags.is_empty() {
@@ -1023,13 +1000,14 @@ fn insert_test_results(conn: &rusqlite::Connection, run_id: i64, run: &TestRun) 
             Some(result.tags.join(","))
         };
 
+        let test_id = result.test_id.as_str();
         let prior_status: Option<String> = existing_stmt
-            .query_row(params![run_id, result.test_id.as_str()], |row| row.get(0))
+            .query_row(params![run_id, test_id], |row| row.get(0))
             .ok();
 
         stmt.execute(params![
             run_id,
-            result.test_id.as_str(),
+            test_id,
             status_to_str(result.status),
             result.duration.map(|d| d.as_secs_f64()),
             result.message,
@@ -1038,21 +1016,16 @@ fn insert_test_results(conn: &rusqlite::Connection, run_id: i64, run: &TestRun) 
         ])?;
 
         if prior_status.is_some() {
-            needs_rebuild.push(result.test_id.clone());
+            needs_rebuild.push(test_id);
         } else {
-            update_flakiness_cache(
-                conn,
-                result.test_id.as_str(),
-                run_id,
-                result.status.is_failure(),
-            )?;
+            update_flakiness_cache(conn, test_id, run_id, result.status.is_failure())?;
         }
     }
 
     drop(stmt);
     drop(existing_stmt);
     for test_id in needs_rebuild {
-        rebuild_flakiness_for_test(conn, test_id.as_str())?;
+        rebuild_flakiness_for_test(conn, test_id)?;
     }
 
     Ok(())
@@ -1068,18 +1041,18 @@ fn update_flakiness_cache(
     run_id: i64,
     failed: bool,
 ) -> Result<()> {
-    let existing: Option<(u32, u32, u32, i64, i64)> = conn
+    let existing: Option<(u32, u32, u32, i64, bool)> = conn
         .query_row(
             "SELECT runs, failures, transitions, last_run_id, last_failed \
              FROM test_flakiness WHERE test_id = ?",
             params![test_id],
             |row| {
                 Ok((
-                    row.get::<_, u32>(0)?,
-                    row.get::<_, u32>(1)?,
-                    row.get::<_, u32>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
                 ))
             },
         )
@@ -1091,33 +1064,31 @@ fn update_flakiness_cache(
                 "INSERT INTO test_flakiness \
                  (test_id, runs, failures, transitions, last_run_id, last_failed) \
                  VALUES (?, 1, ?, 0, ?, ?)",
-                params![test_id, failed as i64, run_id, failed as i64],
+                params![test_id, u32::from(failed), run_id, failed],
             )?;
         }
-        Some((runs, failures, transitions, last_run_id, last_failed)) => {
-            if run_id > last_run_id {
-                let prev_failed = last_failed != 0;
-                let new_transitions = transitions + if failed != prev_failed { 1 } else { 0 };
-                let new_failures = failures + if failed { 1 } else { 0 };
-                conn.execute(
-                    "UPDATE test_flakiness \
-                     SET runs = ?, failures = ?, transitions = ?, \
-                         last_run_id = ?, last_failed = ? \
-                     WHERE test_id = ?",
-                    params![
-                        runs + 1,
-                        new_failures,
-                        new_transitions,
-                        run_id,
-                        failed as i64,
-                        test_id,
-                    ],
-                )?;
-            } else {
-                // Out-of-order insert: cheaper to just recompute this one test
-                // than to rederive transitions piecewise.
-                rebuild_flakiness_for_test(conn, test_id)?;
-            }
+        Some((runs, failures, transitions, last_run_id, last_failed)) if run_id > last_run_id => {
+            let new_transitions = transitions + u32::from(failed != last_failed);
+            let new_failures = failures + u32::from(failed);
+            conn.execute(
+                "UPDATE test_flakiness \
+                 SET runs = ?, failures = ?, transitions = ?, \
+                     last_run_id = ?, last_failed = ? \
+                 WHERE test_id = ?",
+                params![
+                    runs + 1,
+                    new_failures,
+                    new_transitions,
+                    run_id,
+                    failed,
+                    test_id,
+                ],
+            )?;
+        }
+        Some(_) => {
+            // Out-of-order insert: cheaper to just recompute this one test
+            // than to rederive transitions piecewise.
+            rebuild_flakiness_for_test(conn, test_id)?;
         }
     }
     Ok(())
@@ -1162,7 +1133,7 @@ fn rebuild_flakiness_for_test(conn: &rusqlite::Connection, test_id: &str) -> Res
                     a.failures,
                     a.transitions,
                     a.last_run_id,
-                    a.last_failed as i64,
+                    a.last_failed,
                 ],
             )?;
         }
