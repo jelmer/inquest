@@ -120,6 +120,13 @@ enum Commands {
         no_output: bool,
     },
 
+    /// Re-run exactly the tests of a previous run, in the same order with the same args
+    Rerun {
+        /// Run ID to re-run (defaults to latest; supports negative indices like -1, -2)
+        #[arg(value_hint = ValueHint::Other)]
+        run: Option<String>,
+    },
+
     /// Show failing tests from the last run
     Failing {
         /// List test IDs only, one per line (for scripting)
@@ -465,6 +472,10 @@ fn main() {
             };
             cmd.execute(&mut ui)
         }
+        Commands::Rerun { run } => {
+            let cmd = RerunCommand::new(cli.directory, run);
+            cmd.execute(&mut ui)
+        }
         Commands::Failing { list, subunit } => {
             let cmd = if subunit {
                 FailingCommand::with_subunit(cli.directory)
@@ -673,6 +684,7 @@ fn main() {
                 stderr_capture: None,
                 run_id_slot: None,
                 cancellation_token: None,
+                test_ids_override: None,
             };
             cmd.execute(&mut ui)
         }

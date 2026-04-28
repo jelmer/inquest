@@ -341,6 +341,9 @@ pub struct RunMetadata {
     pub duration_secs: Option<f64>,
     /// Exit code of the test command.
     pub exit_code: Option<i32>,
+    /// Extra arguments passed to the test command after `--`. Captured so
+    /// `inq rerun` can reproduce the original invocation.
+    pub test_args: Option<Vec<String>>,
 }
 
 /// A complete test run containing results for multiple tests.

@@ -109,6 +109,7 @@ mod tests {
                 concurrency: Some(4),
                 duration_secs: Some(12.5),
                 exit_code: Some(1),
+                test_args: None,
             },
         )
         .unwrap();
@@ -151,6 +152,7 @@ mod tests {
                 concurrency: None,
                 duration_secs: None,
                 exit_code: Some(0),
+                test_args: None,
             },
         )
         .unwrap();

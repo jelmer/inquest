@@ -119,6 +119,20 @@ Show output as a subunit stream
 Don't show test output/tracebacks for failed tests
 .PP
 Exit code is 0 if all tests passed, 1 if there are failures.
+.SS "rerun"
+Re\-run exactly the tests of a previous run, in the same order with the same
+.BR \-\- \-style
+test arguments.
+.PP
+The test IDs are read from the recorded subunit stream and replayed under
+.B discovery
+ordering so the original execution order is preserved. Any extra arguments
+that were forwarded to the test command after
+.B \-\-
+are pulled from the run's metadata and re\-applied.
+.TP
+\fIRUN_ID\fR
+Run ID to re\-run (defaults to latest; supports negative indices like \-1, \-2)
 .SS "failing"
 Show failing tests from the last run.
 .TP
