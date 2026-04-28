@@ -197,6 +197,26 @@ Run ID to show logs from (defaults to latest)
 \fI\,TESTPATTERN\/\fR ...
 Test ID patterns to match (glob\-style wildcards). If no patterns are
 provided, shows all tests.
+.SS "prune"
+Drop older test runs from the repository.
+.PP
+Exactly one selection mode must be given. In\-progress runs are always skipped.
+.TP
+\fB\-\-keep\fR \fI\,N\/\fR
+Keep the N most recent runs and prune the rest
+.TP
+\fB\-\-older\-than\fR \fI\,DURATION\/\fR
+Prune runs older than the given duration. Accepts \fBs\fR, \fBm\fR, \fBh\fR,
+\fBd\fR, and \fBw\fR suffixes (e.g. \fB30d\fR, \fB2w\fR, \fB12h\fR)
+.TP
+\fB\-\-run\fR \fI\,ID\/\fR
+Prune the named run by ID. May be given multiple times
+.TP
+\fB\-\-all\fR
+Prune every run in the repository
+.TP
+\fB\-\-dry\-run\fR
+Show what would be pruned without modifying the repository
 .SS "list\-tests"
 List all available tests.
 .PP

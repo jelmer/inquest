@@ -8,6 +8,13 @@ UNRELEASED
 CHANGES
 -------
 
+* Add ``inq prune`` for dropping older test runs from the repository.
+  Selection modes: ``--keep <N>`` keeps the N most recent runs,
+  ``--older-than <DURATION>`` drops runs older than the given age
+  (e.g. ``30d``, ``2w``), ``--run <ID>`` drops specific runs, and
+  ``--all`` clears the repository. ``--dry-run`` previews the action.
+  In-progress runs are skipped. Closes #78. (Jelmer Vernooĳ)
+
 * ``inq upgrade`` now displays a progress bar while migrating test runs
   from a legacy ``.testrepository/`` directory. (Jelmer Vernooĳ)
 

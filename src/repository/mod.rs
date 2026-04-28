@@ -211,6 +211,17 @@ pub trait Repository {
         Ok(None)
     }
 
+    /// Delete the given test runs from the repository.
+    ///
+    /// Removes the runs' on-disk data (subunit streams, captured stderr) and
+    /// any associated metadata. In-progress runs are skipped — callers that
+    /// need to drop them must cancel them first.
+    ///
+    /// Returns the run IDs that were actually pruned. Run IDs that did not
+    /// exist or were skipped because they were in progress are silently
+    /// dropped from the result.
+    fn prune_runs(&mut self, run_ids: &[RunId]) -> Result<Vec<RunId>>;
+
     /// Compute per-test flakiness statistics across all recorded runs.
     ///
     /// Tests are considered in the order returned by [`Self::list_run_ids`]
