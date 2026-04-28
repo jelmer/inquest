@@ -62,6 +62,11 @@ pub struct RunCommand {
     pub all_output: bool,
     /// Test patterns to filter
     pub test_filters: Option<Vec<String>>,
+    /// Tag filters used when summarising counts. `None` means fall back to
+    /// the `filter_tags` value in the config; `Some(_)` overrides it (an
+    /// empty `Vec` clears the filter entirely). Each entry may be a positive
+    /// tag (e.g. `worker-0`) or an exclusion (`!slow`).
+    pub filter_tags: Option<Vec<String>>,
     /// `-s`/`--starting-with` prefixes (possibly abbreviated; expanded
     /// against the discovered test list before matching).
     pub starting_with: Option<Vec<String>>,
@@ -159,6 +164,7 @@ impl RunCommand {
         repo: &mut dyn crate::repository::Repository,
         output: crate::test_executor::RunOutput,
         historical_times: &std::collections::HashMap<crate::repository::TestId, Duration>,
+        filter_tags: &[String],
     ) -> Result<CliRunOutput> {
         let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
             ui,
@@ -166,6 +172,7 @@ impl RunCommand {
             output,
             self.partial,
             historical_times,
+            filter_tags,
         )?;
         Ok(CliRunOutput {
             exit_code,
@@ -189,6 +196,13 @@ impl RunCommand {
             open_or_init_repository(self.base_path.as_deref(), self.force_init || self.auto, ui)?;
 
         let test_cmd = TestCommand::from_directory(base)?;
+
+        // CLI overrides config; fall back to whatever `filter_tags` is set to
+        // in the config file when no CLI flag was given.
+        let filter_tags: Vec<String> = match &self.filter_tags {
+            Some(tags) => tags.clone(),
+            None => test_cmd.config().parsed_filter_tags(),
+        };
 
         let (test_timeout, max_duration, no_output_timeout) = test_executor::resolve_timeouts(
             &self.test_timeout,
@@ -349,7 +363,7 @@ impl RunCommand {
             self.publish_run_id(&run_id);
             let output =
                 executor.run_subunit(ui, &test_cmd, test_ids.as_deref(), run_id, writer)?;
-            return self.persist(ui, repo.as_mut(), output, &historical_times);
+            return self.persist(ui, repo.as_mut(), output, &historical_times, &filter_tags);
         }
 
         let concurrency = if let Some(explicit_concurrency) = self.concurrency {
@@ -418,7 +432,8 @@ impl RunCommand {
                         max_duration_value,
                         iter_run_id,
                     )?;
-                    let result = self.persist(ui, repo.as_mut(), output, &historical_times)?;
+                    let result =
+                        self.persist(ui, repo.as_mut(), output, &historical_times, &filter_tags)?;
 
                     if result.exit_code != 0 {
                         ui.output(&format!("\nTests failed on iteration {}", iteration))?;
@@ -436,7 +451,7 @@ impl RunCommand {
                     max_duration_value,
                     run_id,
                 )?;
-                self.persist(ui, repo.as_mut(), output, &historical_times)
+                self.persist(ui, repo.as_mut(), output, &historical_times, &filter_tags)
             }
         } else if self.until_failure {
             let mut iteration = 1;
@@ -483,7 +498,8 @@ impl RunCommand {
                     )?
                 };
 
-                let result = self.persist(ui, repo.as_mut(), output, &historical_times)?;
+                let result =
+                    self.persist(ui, repo.as_mut(), output, &historical_times, &filter_tags)?;
 
                 if result.exit_code != 0 {
                     ui.output(&format!("\nTests failed on iteration {}", iteration))?;
@@ -507,7 +523,7 @@ impl RunCommand {
                 &historical_times,
                 || repo.begin_test_run_raw().map(|(_, w)| w),
             )?;
-            self.persist(ui, repo.as_mut(), output, &historical_times)
+            self.persist(ui, repo.as_mut(), output, &historical_times, &filter_tags)
         } else {
             let (run_id, writer) = repo.begin_test_run_raw()?;
             self.publish_run_id(&run_id);
@@ -522,7 +538,7 @@ impl RunCommand {
                 writer,
                 &historical_times,
             )?;
-            self.persist(ui, repo.as_mut(), output, &historical_times)
+            self.persist(ui, repo.as_mut(), output, &historical_times, &filter_tags)
         }
     }
 }

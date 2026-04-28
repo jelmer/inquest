@@ -275,6 +275,13 @@ enum Commands {
         #[arg(value_name = "TESTFILTER")]
         testfilters: Vec<String>,
 
+        /// Restrict the post-run summary counts to results carrying the given
+        /// tag. Repeat to allow several tags. Prefix with `!` to exclude
+        /// results carrying the tag (e.g. `--tag worker-0 --tag '!slow'`).
+        /// Overrides `filter_tags` from the config file.
+        #[arg(long = "tag", value_name = "TAG")]
+        filter_tags: Vec<String>,
+
         /// Run only tests whose ID starts with this prefix. Dotted segments
         /// may be abbreviated to single letters when the expansion against
         /// the discovered test list is unique (e.g. "bt.test_foo" expanding
@@ -371,6 +378,7 @@ fn main() {
         subunit: false,
         all_output: false,
         testfilters: Vec::new(),
+        filter_tags: Vec::new(),
         starting_with: Vec::new(),
         test_timeout: None,
         max_duration: None,
@@ -577,6 +585,7 @@ fn main() {
             max_restarts,
             order,
             testfilters,
+            filter_tags,
             starting_with,
             testargs,
         } => {
@@ -640,6 +649,11 @@ fn main() {
                     None
                 } else {
                     Some(testfilters)
+                },
+                filter_tags: if filter_tags.is_empty() {
+                    None
+                } else {
+                    Some(filter_tags)
                 },
                 starting_with: if starting_with.is_empty() {
                     None

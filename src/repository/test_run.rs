@@ -414,13 +414,39 @@ impl TestRun {
             .map(|first| durations.fold(first, |acc, d| acc + d))
     }
 
-    /// Check if a result matches the given tag filter
+    /// Check if a result matches the given tag filter.
+    ///
+    /// Each entry in `filter_tags` is either a positive tag (the result must
+    /// carry one of them) or an exclusion (`!tag`, the result must not carry
+    /// that tag). When no positive entries are supplied, any result that
+    /// avoids all exclusions matches.
     fn matches_filter(result: &TestResult, filter_tags: &[String]) -> bool {
         if filter_tags.is_empty() {
             return true;
         }
-        // Result matches if it has any of the filter tags
-        result.tags.iter().any(|tag| filter_tags.contains(tag))
+
+        let (excludes, includes): (Vec<&str>, Vec<&str>) = filter_tags
+            .iter()
+            .map(|t| t.as_str())
+            .partition(|t| t.starts_with('!'));
+        let excludes: Vec<&str> = excludes.iter().map(|t| &t[1..]).collect();
+
+        if result
+            .tags
+            .iter()
+            .any(|tag| excludes.contains(&tag.as_str()))
+        {
+            return false;
+        }
+
+        if includes.is_empty() {
+            return true;
+        }
+
+        result
+            .tags
+            .iter()
+            .any(|tag| includes.contains(&tag.as_str()))
     }
 
     /// Count failures matching the given tags
@@ -661,6 +687,47 @@ mod tests {
 
         // Filter should match if result has ANY of the filter tags
         let filter = vec!["slow".to_string()];
+        assert_eq!(run.total_tests_filtered(&filter), 1);
+    }
+
+    #[test]
+    fn test_filtered_counts_exclude_tag() {
+        let mut run = TestRun::new(RunId::new("0"));
+
+        run.add_result(TestResult::success("test1").with_tag("slow"));
+        run.add_result(TestResult::success("test2").with_tag("fast"));
+        run.add_result(TestResult::failure("test3", "Failed").with_tag("slow"));
+
+        let filter = vec!["!slow".to_string()];
+        assert_eq!(run.total_tests_filtered(&filter), 1);
+        assert_eq!(run.count_successes_filtered(&filter), 1);
+        assert_eq!(run.count_failures_filtered(&filter), 0);
+    }
+
+    #[test]
+    fn test_filtered_counts_include_and_exclude() {
+        let mut run = TestRun::new(RunId::new("0"));
+
+        run.add_result(
+            TestResult::success("test1")
+                .with_tag("worker-0")
+                .with_tag("slow"),
+        );
+        run.add_result(TestResult::success("test2").with_tag("worker-0"));
+        run.add_result(TestResult::success("test3").with_tag("worker-1"));
+
+        let filter = vec!["worker-0".to_string(), "!slow".to_string()];
+        assert_eq!(run.total_tests_filtered(&filter), 1);
+    }
+
+    #[test]
+    fn test_filtered_counts_exclude_only_untagged_passes() {
+        let mut run = TestRun::new(RunId::new("0"));
+
+        run.add_result(TestResult::success("test1"));
+        run.add_result(TestResult::success("test2").with_tag("slow"));
+
+        let filter = vec!["!slow".to_string()];
         assert_eq!(run.total_tests_filtered(&filter), 1);
     }
 }

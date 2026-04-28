@@ -12,6 +12,10 @@ CHANGES
   (config file + CLI overrides + defaults) with each value annotated by
   its source. Closes #71. (Jelmer Vernooĳ)
 
+* Add ``--tag`` to ``inq run`` for filtering the post-run summary counts
+  by result tag. Repeatable; prefix with ``!`` to exclude. Overrides
+  ``filter_tags`` from the config. Closes #70. (Jelmer Vernooĳ)
+
 * Add ``inq flaky`` and the ``inq_flaky`` MCP tool, ranking tests by
   pass↔fail transitions across recorded runs so chronically broken tests
   rank below genuinely flapping ones. (Jelmer Vernooĳ)

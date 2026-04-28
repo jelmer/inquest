@@ -344,6 +344,17 @@ impl TestrConfig {
         }
     }
 
+    /// Parse the configured `filter_tags` into a list of tag entries.
+    ///
+    /// Tags are space-separated. A leading `!` marks an exclusion; otherwise
+    /// the entry is an inclusion.
+    pub fn parsed_filter_tags(&self) -> Vec<String> {
+        match &self.filter_tags {
+            None => Vec::new(),
+            Some(s) => s.split_whitespace().map(|t| t.to_string()).collect(),
+        }
+    }
+
     /// Parse the no_output_timeout config value into a Duration.
     pub fn parsed_no_output_timeout(&self) -> Result<Option<Duration>> {
         match &self.no_output_timeout {
@@ -781,5 +792,24 @@ test_command = "python -m test"
             TimeoutSetting::Disabled
         );
         assert_eq!(config.parsed_no_output_timeout().unwrap(), None);
+    }
+
+    #[test]
+    fn test_parsed_filter_tags_unset() {
+        let config = TestrConfig::parse_toml(r#"test_command = "echo""#).unwrap();
+        assert_eq!(config.parsed_filter_tags(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_parsed_filter_tags_space_separated() {
+        let config_str = r#"
+test_command = "echo"
+filter_tags = "worker-0  !slow"
+"#;
+        let config = TestrConfig::parse_toml(config_str).unwrap();
+        assert_eq!(
+            config.parsed_filter_tags(),
+            vec!["worker-0".to_string(), "!slow".to_string()]
+        );
     }
 }
