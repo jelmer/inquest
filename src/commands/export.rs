@@ -17,6 +17,8 @@ pub enum ExportFormat {
     Junit,
     /// TAP (Test Anything Protocol) format.
     Tap,
+    /// GitHub Actions / GitLab CI workflow command annotations.
+    Github,
 }
 
 impl std::str::FromStr for ExportFormat {
@@ -30,11 +32,12 @@ impl std::str::FromStr for ExportFormat {
             #[cfg(not(feature = "junit"))]
             "junit" => Err("JUnit format requires the 'junit' feature".to_string()),
             "tap" => Ok(ExportFormat::Tap),
+            "github" | "gitlab" => Ok(ExportFormat::Github),
             _ => {
                 #[cfg(feature = "junit")]
-                let expected = "json, junit, tap";
+                let expected = "json, junit, tap, github";
                 #[cfg(not(feature = "junit"))]
-                let expected = "json, tap";
+                let expected = "json, tap, github";
                 Err(format!(
                     "unknown format '{}', expected one of: {}",
                     s, expected
@@ -73,6 +76,7 @@ impl Command for ExportCommand {
             #[cfg(feature = "junit")]
             ExportFormat::Junit => export_junit(&test_run)?,
             ExportFormat::Tap => export_tap(&test_run),
+            ExportFormat::Github => export_github(&test_run),
         };
 
         ui.output(&output)?;
@@ -84,7 +88,7 @@ impl Command for ExportCommand {
     }
 
     fn help(&self) -> &str {
-        "Export test results in standard formats (json, junit, tap)"
+        "Export test results in standard formats (json, junit, tap, github)"
     }
 }
 
@@ -166,6 +170,135 @@ fn export_junit(test_run: &TestRun) -> Result<String> {
     report
         .to_string()
         .map_err(|e| format!("JUnit serialization error: {}", e).into())
+}
+
+/// Emit a GitHub Actions / GitLab CI workflow-command annotation for each
+/// failing or errored test, e.g. `::error file=tests/foo.py,line=42::AssertionError`.
+///
+/// Tests that lack file/line information in their traceback are still
+/// reported as `::error` lines without `file=`/`line=` attributes so they
+/// surface in the workflow log.
+fn export_github(test_run: &TestRun) -> String {
+    let mut out = String::new();
+
+    let mut results: Vec<_> = test_run.results.values().collect();
+    results.sort_by_key(|r| r.test_id.as_str());
+
+    for result in results {
+        let level = match result.status {
+            TestStatus::Failure | TestStatus::Error | TestStatus::UnexpectedSuccess => "error",
+            _ => continue,
+        };
+
+        let location = result.details.as_deref().and_then(extract_source_location);
+
+        let message = result
+            .message
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.lines().next().unwrap_or(s).to_string())
+            .unwrap_or_else(|| result.status.to_string());
+
+        let mut params: Vec<String> = Vec::new();
+        if let Some(SourceLocation { file, line, col }) = &location {
+            params.push(format!("file={}", escape_param(file)));
+            params.push(format!("line={}", line));
+            if let Some(c) = col {
+                params.push(format!("col={}", c));
+            }
+        }
+        params.push(format!("title={}", escape_param(result.test_id.as_str())));
+
+        let _ = writeln!(
+            out,
+            "::{} {}::{}",
+            level,
+            params.join(","),
+            escape_data(&message)
+        );
+    }
+
+    out
+}
+
+/// File:line(:col) location parsed from a test's traceback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceLocation {
+    file: String,
+    line: u32,
+    col: Option<u32>,
+}
+
+/// Try to recover a source-file location from a test's traceback. Recognises
+/// the common Python (`File "x.py", line 42`), Rust panic
+/// (`thread '...' panicked at src/foo.rs:12:5`), and generic `path:line[:col]`
+/// formats. Returns the *last* match in the traceback (most-deeply-nested
+/// frame) so the annotation points at the failure site rather than the test
+/// harness entry-point.
+fn extract_source_location(details: &str) -> Option<SourceLocation> {
+    use regex::Regex;
+
+    static PATTERNS: std::sync::OnceLock<Vec<Regex>> = std::sync::OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        vec![
+            // Python: File "tests/foo.py", line 42, in test_bar
+            Regex::new(r#"File "(?P<file>[^"]+)", line (?P<line>\d+)"#).unwrap(),
+            // Rust panic / generic compiler: path/to/file.rs:LINE:COL
+            Regex::new(r#"(?P<file>[^\s:()'"<>]+\.[A-Za-z0-9]+):(?P<line>\d+):(?P<col>\d+)"#)
+                .unwrap(),
+            // Generic: path/to/file.ext:LINE
+            Regex::new(r#"(?P<file>[^\s:()'"<>]+\.[A-Za-z0-9]+):(?P<line>\d+)\b"#).unwrap(),
+        ]
+    });
+
+    let mut best: Option<SourceLocation> = None;
+    for re in patterns {
+        for caps in re.captures_iter(details) {
+            let file = caps.name("file")?.as_str().to_string();
+            let line = caps.name("line")?.as_str().parse().ok()?;
+            let col = caps
+                .name("col")
+                .and_then(|m| m.as_str().parse::<u32>().ok());
+            best = Some(SourceLocation { file, line, col });
+        }
+        if best.is_some() {
+            return best;
+        }
+    }
+    None
+}
+
+/// Escape the value of a workflow-command parameter (`file=`, `line=`, ...).
+/// GitHub uses URL-style percent-encoding for `%`, `\r`, `\n`, `:`, `,`.
+fn escape_param(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            '\r' => out.push_str("%0D"),
+            '\n' => out.push_str("%0A"),
+            ':' => out.push_str("%3A"),
+            ',' => out.push_str("%2C"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escape the message portion of a workflow command. Only `%`, `\r`, and
+/// `\n` need encoding; `:` and `,` are allowed in the message body.
+fn escape_data(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            '\r' => out.push_str("%0D"),
+            '\n' => out.push_str("%0A"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn export_tap(test_run: &TestRun) -> String {
@@ -467,7 +600,178 @@ ok 4 tests.unit.test_gamma # SKIP
         );
         assert_eq!("tap".parse::<ExportFormat>().unwrap(), ExportFormat::Tap);
         assert_eq!("JSON".parse::<ExportFormat>().unwrap(), ExportFormat::Json);
+        assert_eq!(
+            "github".parse::<ExportFormat>().unwrap(),
+            ExportFormat::Github
+        );
+        assert_eq!(
+            "gitlab".parse::<ExportFormat>().unwrap(),
+            ExportFormat::Github
+        );
         assert!("csv".parse::<ExportFormat>().is_err());
+    }
+
+    #[test]
+    fn test_extract_source_location_python() {
+        let details = "Traceback (most recent call last):\n  \
+            File \"tests/foo.py\", line 11, in setUp\n    self.x = 1\n  \
+            File \"tests/foo.py\", line 42, in test_bar\n    \
+            self.assertEqual(1, 2)\nAssertionError: 1 != 2";
+        let loc = extract_source_location(details).unwrap();
+        assert_eq!(loc.file, "tests/foo.py");
+        assert_eq!(loc.line, 42);
+        assert_eq!(loc.col, None);
+    }
+
+    #[test]
+    fn test_extract_source_location_rust_panic() {
+        let details = "thread 'main' panicked at src/foo.rs:12:5:\nassertion failed";
+        let loc = extract_source_location(details).unwrap();
+        assert_eq!(loc.file, "src/foo.rs");
+        assert_eq!(loc.line, 12);
+        assert_eq!(loc.col, Some(5));
+    }
+
+    #[test]
+    fn test_extract_source_location_generic() {
+        let details = "Error reading config\n  at lib/util.go:88: invalid token";
+        let loc = extract_source_location(details).unwrap();
+        assert_eq!(loc.file, "lib/util.go");
+        assert_eq!(loc.line, 88);
+    }
+
+    #[test]
+    fn test_extract_source_location_none() {
+        assert!(extract_source_location("just a plain message").is_none());
+    }
+
+    #[test]
+    fn test_export_github_basic() {
+        // make_test_run() provides: alpha (success), beta (failure with
+        // generic "Traceback:" details that don't carry a file/line),
+        // delta (error, no details), gamma (skip). So only beta and
+        // delta produce annotations, and neither has a usable location.
+        let test_run = make_test_run();
+        let out = export_github(&test_run);
+
+        assert_eq!(
+            out,
+            "::error title=tests.unit.test_beta::assertion failed\n\
+             ::error title=tests.unit.test_delta::timeout\n"
+        );
+    }
+
+    #[test]
+    fn test_export_github_with_python_location() {
+        let mut test_run = TestRun::new(RunId::new("0"));
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(
+            TestResult::failure("tests.test_x", "AssertionError: 1 != 2").with_details(
+                "Traceback (most recent call last):\n  \
+                 File \"tests/test_x.py\", line 42, in test_one\n    \
+                 self.assertEqual(1, 2)\nAssertionError: 1 != 2",
+            ),
+        );
+
+        let out = export_github(&test_run);
+        assert_eq!(
+            out,
+            "::error file=tests/test_x.py,line=42,title=tests.test_x::AssertionError: 1 != 2\n"
+        );
+    }
+
+    #[test]
+    fn test_export_github_with_rust_location() {
+        let mut test_run = TestRun::new(RunId::new("0"));
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(
+            TestResult::failure("crate::tests::it_works", "assertion failed").with_details(
+                "thread 'tests::it_works' panicked at src/lib.rs:99:9:\n\
+                 assertion `left == right` failed\n  left: 1\n right: 2",
+            ),
+        );
+
+        let out = export_github(&test_run);
+        assert_eq!(
+            out,
+            "::error file=src/lib.rs,line=99,col=9,title=crate%3A%3Atests%3A%3Ait_works::assertion failed\n"
+        );
+    }
+
+    #[test]
+    fn test_export_github_skips_passing() {
+        let mut test_run = TestRun::new(RunId::new("0"));
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(TestResult::success("a"));
+        test_run.add_result(TestResult::skip("b"));
+
+        let out = export_github(&test_run);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn test_export_github_escapes_message_newlines() {
+        let mut test_run = TestRun::new(RunId::new("0"));
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        // Multi-line `message` (rare, but possible). Only the first line
+        // should appear in the annotation; embedded `%` should be escaped.
+        test_run.add_result(TestResult::failure("t", "first line\nsecond line"));
+        test_run.add_result(TestResult::failure("u", "100% broken"));
+
+        let out = export_github(&test_run);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].ends_with("::first line"), "got: {}", lines[0]);
+        assert!(lines[1].ends_with("::100%25 broken"), "got: {}", lines[1]);
+    }
+
+    #[test]
+    fn test_export_github_falls_back_to_status() {
+        let mut test_run = TestRun::new(RunId::new("0"));
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        // No message at all — use status as the body so the annotation is
+        // still meaningful.
+        let mut result = TestResult::failure("t", "");
+        result.message = None;
+        test_run.add_result(result);
+
+        let out = export_github(&test_run);
+        assert_eq!(out, "::error title=t::failure\n");
+    }
+
+    #[test]
+    fn test_export_command_github() {
+        let temp = TempDir::new().unwrap();
+
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut test_run = TestRun::new(RunId::new("0"));
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        // Note: subunit roundtrip stores `details` only; `message` is
+        // reconstructed from the same bytes on read, so the first line of
+        // the details becomes the annotation body.
+        test_run
+            .add_result(TestResult::failure("test_x", "boom").with_details(
+                "File \"tests/x.py\", line 7, in test_x\n    raise AssertionError()",
+            ));
+        repo.insert_test_run(test_run).unwrap();
+
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let cmd = ExportCommand::new(
+            Some(temp.path().to_string_lossy().to_string()),
+            None,
+            ExportFormat::Github,
+        );
+        let result = cmd.execute(&mut ui);
+        assert_eq!(result.unwrap(), 0);
+
+        let output = ui.output.join("\n");
+        assert!(
+            output.contains("::error file=tests/x.py,line=7,title=test_x::"),
+            "got: {}",
+            output
+        );
     }
 
     #[cfg(feature = "junit")]

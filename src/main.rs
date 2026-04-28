@@ -39,7 +39,7 @@ enum Commands {
         #[arg(long, short = 'r', value_hint = ValueHint::Other)]
         run: Option<String>,
 
-        /// Output format: json, junit, or tap
+        /// Output format: json, junit, tap, or github
         #[arg(long, short = 'f', default_value = "json")]
         format: String,
     },
