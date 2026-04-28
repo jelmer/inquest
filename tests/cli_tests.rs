@@ -76,3 +76,23 @@ fn run_help_advertises_starting_with_flag() {
         "expected --starting-with/-s in help, got:\n{stdout}"
     );
 }
+
+#[test]
+fn bisect_help_shows_good_and_bad_overrides() {
+    let out = Command::new(inq_bin())
+        .arg("bisect")
+        .arg("--help")
+        .output()
+        .expect("run inq bisect --help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--good"),
+        "expected --good in help: {stdout}"
+    );
+    assert!(stdout.contains("--bad"), "expected --bad in help: {stdout}");
+    assert!(
+        stdout.contains("<TEST>"),
+        "expected positional TEST: {stdout}"
+    );
+}

@@ -7,6 +7,7 @@ use crate::ui::UI;
 
 pub mod analyze_isolation;
 pub mod auto;
+pub mod bisect;
 pub mod config;
 pub mod diff;
 pub mod export;
@@ -32,6 +33,7 @@ pub mod wait;
 
 pub use analyze_isolation::AnalyzeIsolationCommand;
 pub use auto::AutoCommand;
+pub use bisect::BisectCommand;
 pub use config::ConfigCommand;
 pub use diff::DiffCommand;
 pub use export::{ExportCommand, ExportFormat};
