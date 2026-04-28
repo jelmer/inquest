@@ -1388,6 +1388,66 @@ fn test_isolated_run_with_cancellation() {
 
 #[test]
 #[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
+fn test_isolated_run_does_not_deadlock_on_large_stderr() {
+    // Regression test for https://github.com/jelmer/inquest/issues/103
+    // run_isolated previously piped stderr without draining it, so a child
+    // writing more than the kernel pipe buffer (~64KB) would block forever.
+    use inquest::repository::inquest::InquestRepositoryFactory;
+    use inquest::test_executor::{TestExecutor, TestExecutorConfig};
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    // Write 128KB to the parent pipe via stderr, then exit. Comfortably
+    // over the typical 64KB pipe buffer so the bug-prior-to-fix would
+    // deadlock on the second write.
+    let config = "test_command = \"head -c 131072 /dev/zero >&2\"\n";
+    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+    let test_cmd = inquest::testcommand::TestCommand::from_directory(temp.path()).unwrap();
+
+    // Capture stderr so the 512KB of test noise doesn't pollute test output.
+    let stderr_capture = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let exec_config = TestExecutorConfig {
+        base_path: Some(base_path),
+        all_output: false,
+        test_args: None,
+        cancellation_token: None,
+        max_restarts: None,
+        stderr_capture: Some(stderr_capture.clone()),
+    };
+    let executor = TestExecutor::new(&exec_config);
+
+    let test_ids = vec![inquest::repository::TestId::new("noisy_test")];
+
+    let mut ui = TestUI::new();
+    let start = std::time::Instant::now();
+    let _output = executor
+        .run_isolated(
+            &mut ui,
+            &test_cmd,
+            &test_ids,
+            None,
+            Some(std::time::Duration::from_secs(30)),
+            RunId::new("0"),
+        )
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "isolated run took {:?} — likely deadlocked on stderr pipe",
+        elapsed
+    );
+    // Sanity: the stderr drainer ran and read the full 128KB.
+    assert_eq!(stderr_capture.lock().unwrap().len(), 131072);
+}
+
+#[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
 fn test_run_with_profile_persists_active_profile_in_metadata() {
     use inquest::commands::RunCommand;
     use inquest::repository::inquest::InquestRepositoryFactory;
