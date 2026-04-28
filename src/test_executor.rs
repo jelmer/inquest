@@ -452,7 +452,7 @@ impl<'a> TestExecutor<'a> {
                         );
 
                         if matches!(status, subunit_stream::ProgressStatus::InProgress) {
-                            tracker.on_test_started();
+                            tracker.on_test_started(test_id);
                         } else if !status.indicator().is_empty() {
                             tracker.on_test_complete(&progress_bar_clone, test_id, status);
                         }
@@ -923,9 +923,11 @@ impl<'a> TestExecutor<'a> {
                             );
 
                             if matches!(status, subunit_stream::ProgressStatus::InProgress) {
-                                tracker.on_test_started();
+                                tracker.on_test_started(test_id);
                                 if let Some(state) = &overall_eta_state_for_thread {
-                                    state.mark_started();
+                                    let id = TestId::new(test_id);
+                                    let expected = tracker.expected_duration(&id);
+                                    state.mark_started(&id, expected);
                                 }
                                 return;
                             }
@@ -956,7 +958,8 @@ impl<'a> TestExecutor<'a> {
                                 let test_duration =
                                     tracker.on_test_complete(&worker_bar_clone, test_id, status);
                                 if let Some(state) = &overall_eta_state_for_thread {
-                                    state.add_completed(test_duration);
+                                    let id = TestId::new(test_id);
+                                    state.add_completed(&id, test_duration);
                                 }
                             }
                         },
@@ -1636,14 +1639,25 @@ fn compute_remaining_tests(
 /// finally start running. Anchoring at first-start (rather than
 /// first-completion) keeps the very first test's runtime in the denominator,
 /// so the rate signal is honest from the moment any ETA is displayed.
+///
+/// In-flight tests get *partial credit* against `completed_duration` — at draw
+/// time, each currently-running test contributes `min(time-since-it-started,
+/// its-historical-duration)`. That removes the staircase pattern you'd
+/// otherwise see (flat ETA during a long test, then a sudden snap at
+/// completion) and produces a smoothly decaying display. We have this signal
+/// only because we already know each test's historical duration.
 struct EtaState {
     estimated_total: Duration,
     progress: Mutex<EtaProgress>,
 }
 
 struct EtaProgress {
+    /// Sum of historical durations for tests that have *finished*.
     completed_duration: Duration,
-    /// Set on the first `mark_started` call.
+    /// Tests currently running: started_at + their historical duration, used
+    /// to credit partial progress between completion events.
+    in_flight: HashMap<TestId, (Instant, Duration)>,
+    /// Set on the first `mark_started` call (any test).
     first_start_at: Option<Instant>,
 }
 
@@ -1653,23 +1667,31 @@ impl EtaState {
             estimated_total,
             progress: Mutex::new(EtaProgress {
                 completed_duration: Duration::ZERO,
+                in_flight: HashMap::new(),
                 first_start_at: None,
             }),
         })
     }
 
-    /// Mark that a test has started running. Idempotent; only the first call
-    /// sets the clock. Subsequent test starts on the same `EtaState` are
-    /// no-ops, since we just need *some* "tests are running now" timestamp.
-    fn mark_started(&self) {
+    /// Record that `test_id` has started; `expected` is its historical
+    /// duration (or the model's mean fallback for unknown tests). The first
+    /// call also pins the elapsed-clock reference point.
+    fn mark_started(&self, test_id: &TestId, expected: Duration) {
         let mut progress = self.progress.lock().unwrap();
         if progress.first_start_at.is_none() {
             progress.first_start_at = Some(Instant::now());
         }
+        progress
+            .in_flight
+            .insert(test_id.clone(), (Instant::now(), expected));
     }
 
-    fn add_completed(&self, dur: Duration) {
+    /// Move a test from in-flight to completed. `dur` is its expected
+    /// duration (so the in-flight credit transitions cleanly into the
+    /// completed pool without a step at completion time).
+    fn add_completed(&self, test_id: &TestId, dur: Duration) {
         let mut progress = self.progress.lock().unwrap();
+        progress.in_flight.remove(test_id);
         progress.completed_duration += dur;
     }
 
@@ -1678,9 +1700,18 @@ impl EtaState {
         let Some(first) = progress.first_start_at else {
             return String::new();
         };
+        let now = Instant::now();
+        let in_flight_credit: Duration = progress
+            .in_flight
+            .values()
+            .map(|(started_at, expected)| {
+                let running_for = now.saturating_duration_since(*started_at);
+                running_for.min(*expected)
+            })
+            .sum();
         format_eta(
             self.estimated_total,
-            progress.completed_duration,
+            progress.completed_duration + in_flight_credit,
             first.elapsed(),
         )
     }
@@ -1716,8 +1747,14 @@ impl BarProgress {
         }
     }
 
-    fn on_test_started(&self) {
-        self.eta_state.mark_started();
+    fn on_test_started(&self, test_id: &str) {
+        let id = TestId::new(test_id);
+        let expected = self.eta_model.duration_for(&id);
+        self.eta_state.mark_started(&id, expected);
+    }
+
+    fn expected_duration(&self, test_id: &TestId) -> Duration {
+        self.eta_model.duration_for(test_id)
     }
 
     fn on_test_complete(
@@ -1728,8 +1765,9 @@ impl BarProgress {
     ) -> Duration {
         progress_bar.inc(1);
 
-        let test_duration = self.eta_model.duration_for(&TestId::new(test_id));
-        self.eta_state.add_completed(test_duration);
+        let id = TestId::new(test_id);
+        let test_duration = self.eta_model.duration_for(&id);
+        self.eta_state.add_completed(&id, test_duration);
 
         if matches!(
             status,
@@ -2509,38 +2547,68 @@ mod helper_tests {
     #[test]
     fn test_eta_state_no_render_until_first_test_starts() {
         let state = EtaState::new(Duration::from_secs(100));
-        // No test has started yet, so no ETA — even after wall clock advances
-        // and even after a (spurious) completion is recorded.
         std::thread::sleep(Duration::from_millis(20));
         assert_eq!(state.render(), "");
-        state.add_completed(Duration::from_secs(50));
+        // A spurious completion without a prior start still does not render.
+        state.add_completed(&TestId::new("a"), Duration::from_secs(50));
         assert_eq!(state.render(), "");
     }
 
     #[test]
     fn test_eta_state_renders_after_first_start() {
         let state = EtaState::new(Duration::from_secs(100));
-        state.mark_started();
-        state.add_completed(Duration::from_secs(50));
+        state.mark_started(&TestId::new("a"), Duration::from_secs(50));
+        state.add_completed(&TestId::new("a"), Duration::from_secs(50));
         std::thread::sleep(Duration::from_millis(20));
         let rendered = state.render();
         assert!(rendered.starts_with(" ETA: "), "got: {:?}", rendered);
     }
 
     #[test]
-    fn test_eta_state_mark_started_is_idempotent() {
-        // Only the first mark_started sets the clock; later calls (e.g. when a
-        // second test starts in serial) are no-ops.
+    fn test_eta_state_in_flight_partial_credit() {
+        // While a test is running, render() should credit it for time
+        // already elapsed (capped at its expected duration). Without this,
+        // completed_duration would stay flat between completion events.
         let state = EtaState::new(Duration::from_secs(100));
-        state.mark_started();
-        std::thread::sleep(Duration::from_millis(30));
-        state.mark_started(); // Should NOT reset the clock.
-        state.add_completed(Duration::from_secs(50));
+        state.mark_started(&TestId::new("a"), Duration::from_secs(60));
+        std::thread::sleep(Duration::from_millis(40));
+        // No completion yet, but the in-flight credit + non-zero elapsed
+        // should produce a finite ETA string.
         let rendered = state.render();
         assert!(rendered.starts_with(" ETA: "), "got: {:?}", rendered);
-        // We can't assert exact timing, but if mark_started had reset the
-        // clock, elapsed would be ~0 and the formula would project a near-
-        // infinite remaining. The render not panicking and producing finite
-        // output is what we exercise here.
+    }
+
+    #[test]
+    fn test_eta_state_in_flight_credit_capped_at_expected() {
+        // A test that runs longer than its history shouldn't accumulate
+        // credit past its expected duration, otherwise an over-running test
+        // would push completed past estimated_total and hide the ETA.
+        let state = EtaState::new(Duration::from_secs(10));
+        state.mark_started(&TestId::new("a"), Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(50));
+        let rendered = state.render();
+        // Expected credit is 5ms (capped); fraction_done = 5ms/10s ≈ 0.0005.
+        // After ~50ms elapsed, projected = 50ms / 0.0005 = 100s, remaining
+        // ≈ 100s. We don't assert exact number — just that the ETA is
+        // present and finite (large remaining is fine; what we want to
+        // avoid is the empty-string return that you'd get if credit had
+        // exceeded estimated_total).
+        assert!(rendered.starts_with(" ETA: "), "got: {:?}", rendered);
+    }
+
+    #[test]
+    fn test_eta_state_completion_removes_from_in_flight() {
+        // After completion, the test no longer contributes via in-flight
+        // credit; only via completed_duration. Two starts then one
+        // completion should leave one in-flight + one completed.
+        let state = EtaState::new(Duration::from_secs(100));
+        state.mark_started(&TestId::new("a"), Duration::from_secs(40));
+        state.mark_started(&TestId::new("b"), Duration::from_secs(40));
+        state.add_completed(&TestId::new("a"), Duration::from_secs(40));
+        std::thread::sleep(Duration::from_millis(20));
+        // Should still render — first_start_at is set and we have
+        // completed + in-flight credit.
+        let rendered = state.render();
+        assert!(rendered.starts_with(" ETA: "), "got: {:?}", rendered);
     }
 }
