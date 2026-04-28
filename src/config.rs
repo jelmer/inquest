@@ -5,7 +5,7 @@
 //! - `.testr.conf` - legacy INI format with a `[DEFAULT]` section
 
 use crate::error::{Error, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -151,7 +151,7 @@ pub fn parse_duration_string(s: &str) -> Result<Duration> {
 pub const CONFIG_FILE_NAMES: &[&str] = &["inquest.toml", ".inquest.toml", ".testr.conf"];
 
 /// Configuration loaded from inquest.toml or .testr.conf
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct TestrConfig {
     /// Command line to run to execute tests
@@ -241,6 +241,13 @@ impl TestrConfig {
             .map_err(|e| Error::Config(format!("Failed to parse TOML config: {}", e)))?;
 
         Self::validate(config)
+    }
+
+    /// Serialize the configuration to a TOML string. Fields with `None` values
+    /// are omitted.
+    pub fn to_toml(&self) -> Result<String> {
+        toml::to_string(self)
+            .map_err(|e| Error::Config(format!("Failed to serialize TOML config: {}", e)))
     }
 
     /// Parse configuration from an INI string (legacy .testr.conf format)
