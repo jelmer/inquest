@@ -359,7 +359,7 @@ impl<'a> TestExecutor<'a> {
         let max_msg_len = layout.max_msg_len;
 
         let eta_state = if eta_model.has_history() {
-            Some(EtaState::new(estimated_total, start_time))
+            Some(EtaState::new(estimated_total))
         } else {
             None
         };
@@ -428,7 +428,7 @@ impl<'a> TestExecutor<'a> {
             let eta_model_for_thread = eta_model.clone();
             let eta_state_for_thread = eta_state
                 .clone()
-                .unwrap_or_else(|| EtaState::new(Duration::ZERO, start_time));
+                .unwrap_or_else(|| EtaState::new(Duration::ZERO));
 
             let parse_thread = std::thread::spawn(move || {
                 let progress_bar_for_bytes = progress_bar_clone.clone();
@@ -451,7 +451,9 @@ impl<'a> TestExecutor<'a> {
                             status,
                         );
 
-                        if !status.indicator().is_empty() {
+                        if matches!(status, subunit_stream::ProgressStatus::InProgress) {
+                            tracker.on_test_started();
+                        } else if !status.indicator().is_empty() {
                             tracker.on_test_complete(&progress_bar_clone, test_id, status);
                         }
                     },
@@ -743,7 +745,7 @@ impl<'a> TestExecutor<'a> {
         let overall_bar_width = overall_layout.bar_width;
 
         let overall_eta_state = if eta_model.has_history() {
-            Some(EtaState::new(overall_estimated_total, start_time))
+            Some(EtaState::new(overall_estimated_total))
         } else {
             None
         };
@@ -803,16 +805,10 @@ impl<'a> TestExecutor<'a> {
 
                 // Recompute per-iteration: after a restart, the partition holds
                 // only remaining tests, so the precomputed first-iteration
-                // total would over-estimate. The worker bar's elapsed clock
-                // resets each iteration, so anchor the EtaState to the same
-                // moment.
+                // total would over-estimate.
                 let worker_estimated_total = eta_model.estimated_total(partition.iter());
-                let worker_iteration_start = Instant::now();
                 let worker_eta_state = if eta_model.has_history() {
-                    Some(EtaState::new(
-                        worker_estimated_total,
-                        worker_iteration_start,
-                    ))
+                    Some(EtaState::new(worker_estimated_total))
                 } else {
                     None
                 };
@@ -901,7 +897,7 @@ impl<'a> TestExecutor<'a> {
                 let eta_model_for_worker = eta_model.clone();
                 let worker_eta_state_for_thread = worker_eta_state
                     .clone()
-                    .unwrap_or_else(|| EtaState::new(Duration::ZERO, start_time));
+                    .unwrap_or_else(|| EtaState::new(Duration::ZERO));
                 let overall_eta_state_for_thread = overall_eta_state.clone();
 
                 let output_filter_clone = output_filter;
@@ -925,6 +921,14 @@ impl<'a> TestExecutor<'a> {
                                 test_id,
                                 status,
                             );
+
+                            if matches!(status, subunit_stream::ProgressStatus::InProgress) {
+                                tracker.on_test_started();
+                                if let Some(state) = &overall_eta_state_for_thread {
+                                    state.mark_started();
+                                }
+                                return;
+                            }
 
                             if !status.indicator().is_empty() {
                                 overall_bar_clone.inc(1);
@@ -1623,29 +1627,62 @@ fn compute_remaining_tests(
 /// Shared state behind the `{eta_hist}` template key. Workers update
 /// `completed_duration` as tests finish; indicatif reads it on each draw, so
 /// the displayed ETA decays with elapsed time even when no test is completing.
+///
+/// The elapsed clock is rebased to the *first test start* (the first subunit
+/// `InProgress` event), not the moment we constructed the EtaState. Test
+/// commands typically spend a chunk of wall-clock time on discovery / import
+/// before emitting any subunit events; counting that warmup as elapsed would
+/// inflate the projected total and make the ETA collapse rapidly once tests
+/// finally start running. Anchoring at first-start (rather than
+/// first-completion) keeps the very first test's runtime in the denominator,
+/// so the rate signal is honest from the moment any ETA is displayed.
 struct EtaState {
-    start_time: Instant,
     estimated_total: Duration,
-    completed_duration: Mutex<Duration>,
+    progress: Mutex<EtaProgress>,
+}
+
+struct EtaProgress {
+    completed_duration: Duration,
+    /// Set on the first `mark_started` call.
+    first_start_at: Option<Instant>,
 }
 
 impl EtaState {
-    fn new(estimated_total: Duration, start_time: Instant) -> Arc<Self> {
+    fn new(estimated_total: Duration) -> Arc<Self> {
         Arc::new(EtaState {
-            start_time,
             estimated_total,
-            completed_duration: Mutex::new(Duration::ZERO),
+            progress: Mutex::new(EtaProgress {
+                completed_duration: Duration::ZERO,
+                first_start_at: None,
+            }),
         })
     }
 
+    /// Mark that a test has started running. Idempotent; only the first call
+    /// sets the clock. Subsequent test starts on the same `EtaState` are
+    /// no-ops, since we just need *some* "tests are running now" timestamp.
+    fn mark_started(&self) {
+        let mut progress = self.progress.lock().unwrap();
+        if progress.first_start_at.is_none() {
+            progress.first_start_at = Some(Instant::now());
+        }
+    }
+
     fn add_completed(&self, dur: Duration) {
-        let mut completed = self.completed_duration.lock().unwrap();
-        *completed += dur;
+        let mut progress = self.progress.lock().unwrap();
+        progress.completed_duration += dur;
     }
 
     fn render(&self) -> String {
-        let completed = *self.completed_duration.lock().unwrap();
-        format_eta(self.estimated_total, completed, self.start_time.elapsed())
+        let progress = self.progress.lock().unwrap();
+        let Some(first) = progress.first_start_at else {
+            return String::new();
+        };
+        format_eta(
+            self.estimated_total,
+            progress.completed_duration,
+            first.elapsed(),
+        )
     }
 }
 
@@ -1677,6 +1714,10 @@ impl BarProgress {
             eta_model,
             eta_state,
         }
+    }
+
+    fn on_test_started(&self) {
+        self.eta_state.mark_started();
     }
 
     fn on_test_complete(
@@ -2466,16 +2507,40 @@ mod helper_tests {
     }
 
     #[test]
-    fn test_eta_state_render_decays_with_elapsed() {
-        let state = EtaState::new(Duration::from_secs(100), Instant::now());
-        // No completion yet, no ETA.
+    fn test_eta_state_no_render_until_first_test_starts() {
+        let state = EtaState::new(Duration::from_secs(100));
+        // No test has started yet, so no ETA — even after wall clock advances
+        // and even after a (spurious) completion is recorded.
+        std::thread::sleep(Duration::from_millis(20));
         assert_eq!(state.render(), "");
         state.add_completed(Duration::from_secs(50));
-        // Completed half by predicted time; with elapsed close to zero the
-        // formula yields an ETA. Just ensure it's non-empty and includes the
-        // expected prefix.
+        assert_eq!(state.render(), "");
+    }
+
+    #[test]
+    fn test_eta_state_renders_after_first_start() {
+        let state = EtaState::new(Duration::from_secs(100));
+        state.mark_started();
+        state.add_completed(Duration::from_secs(50));
         std::thread::sleep(Duration::from_millis(20));
         let rendered = state.render();
         assert!(rendered.starts_with(" ETA: "), "got: {:?}", rendered);
+    }
+
+    #[test]
+    fn test_eta_state_mark_started_is_idempotent() {
+        // Only the first mark_started sets the clock; later calls (e.g. when a
+        // second test starts in serial) are no-ops.
+        let state = EtaState::new(Duration::from_secs(100));
+        state.mark_started();
+        std::thread::sleep(Duration::from_millis(30));
+        state.mark_started(); // Should NOT reset the clock.
+        state.add_completed(Duration::from_secs(50));
+        let rendered = state.render();
+        assert!(rendered.starts_with(" ETA: "), "got: {:?}", rendered);
+        // We can't assert exact timing, but if mark_started had reset the
+        // clock, elapsed would be ~0 and the formula would project a near-
+        // infinite remaining. The render not panicking and producing finite
+        // output is what we exercise here.
     }
 }
