@@ -847,6 +847,83 @@ impl Repository for InquestRepository {
         Ok(())
     }
 
+    fn prune_runs(&mut self, run_ids: &[RunId]) -> Result<Vec<RunId>> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut pruned = Vec::with_capacity(run_ids.len());
+
+        for run_id in run_ids {
+            // Skip in-progress runs — pruning their database row out from
+            // under the writer would corrupt the run.
+            if self.is_run_in_progress(run_id)? {
+                continue;
+            }
+
+            let numeric_id: i64 = match run_id.as_str().parse() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let exists: bool = self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM runs WHERE id = ?",
+                    params![numeric_id],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if !exists {
+                continue;
+            }
+
+            let tx = self.conn.transaction()?;
+            tx.execute(
+                "DELETE FROM failing_tests WHERE run_id = ?",
+                params![numeric_id],
+            )?;
+            tx.execute(
+                "DELETE FROM test_results WHERE run_id = ?",
+                params![numeric_id],
+            )?;
+            tx.execute("DELETE FROM runs WHERE id = ?", params![numeric_id])?;
+            tx.commit()?;
+
+            // Remove on-disk artifacts. Missing files are fine — older runs
+            // may not have stderr captures, and the subunit stream may have
+            // already been removed by a previous failed prune attempt.
+            let stream_path = self.run_file_path(run_id);
+            match fs::remove_file(&stream_path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+
+            for path in [
+                self.run_stderr_path(run_id),
+                self.legacy_run_stderr_path(run_id),
+            ] {
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+
+            pruned.push(run_id.clone());
+        }
+
+        // Flakiness counts depend on the per-run history, so any prune
+        // invalidates the materialized cache. Rebuild from the surviving
+        // results in one pass rather than tracking per-test deltas.
+        if !pruned.is_empty() {
+            rebuild_flakiness_cache(&self.conn)?;
+        }
+
+        Ok(pruned)
+    }
+
     fn get_flakiness(&self, min_runs: usize) -> Result<Vec<crate::repository::TestFlakiness>> {
         // Read directly from the materialized cache. Maintained incrementally
         // by `insert_test_results`, so this is O(distinct_tests) instead of

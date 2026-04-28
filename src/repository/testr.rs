@@ -463,6 +463,24 @@ impl Repository for FileRepository {
     fn count(&self) -> Result<usize> {
         Ok(self.list_run_ids()?.len())
     }
+
+    fn prune_runs(&mut self, run_ids: &[RunId]) -> Result<Vec<RunId>> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut pruned = Vec::with_capacity(run_ids.len());
+        for run_id in run_ids {
+            let path = self.get_run_path(run_id);
+            match fs::remove_file(&path) {
+                Ok(()) => pruned.push(run_id.clone()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        Ok(pruned)
+    }
 }
 
 #[cfg(test)]

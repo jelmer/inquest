@@ -211,6 +211,29 @@ enum Commands {
     #[command(name = "list-tests")]
     ListTests,
 
+    /// Drop older test runs from the repository
+    Prune {
+        /// Keep the N most recent runs and prune the rest
+        #[arg(long, value_name = "N", conflicts_with_all = ["older_than", "run", "all"])]
+        keep: Option<usize>,
+
+        /// Prune runs older than the given duration (e.g. "30d", "2w", "1h")
+        #[arg(long = "older-than", value_name = "DURATION", conflicts_with_all = ["run", "all"])]
+        older_than: Option<String>,
+
+        /// Prune the named run by ID. May be given multiple times.
+        #[arg(long = "run", value_name = "ID", conflicts_with = "all")]
+        run: Vec<String>,
+
+        /// Prune every run in the repository
+        #[arg(long)]
+        all: bool,
+
+        /// Show what would be pruned without modifying the repository
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Analyze test isolation issues using bisection
     #[command(name = "analyze-isolation")]
     AnalyzeIsolation {
@@ -564,6 +587,35 @@ fn main() {
         }
         Commands::ListTests => {
             let cmd = ListTestsCommand::new(cli.directory);
+            cmd.execute(&mut ui)
+        }
+        Commands::Prune {
+            keep,
+            older_than,
+            run,
+            all,
+            dry_run,
+        } => {
+            let selection = match (keep, older_than, run.is_empty(), all) {
+                (Some(n), None, true, false) => PruneSelection::Keep(n),
+                (None, Some(s), true, false) => {
+                    match inquest::commands::prune::parse_age_string(&s) {
+                        Ok(d) => PruneSelection::OlderThan(d),
+                        Err(e) => {
+                            tracing::error!("{}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                (None, None, false, false) => PruneSelection::Explicit(run),
+                (None, None, true, true) => PruneSelection::All,
+                (None, None, true, false) => {
+                    tracing::error!("specify one of --keep, --older-than, --run, or --all");
+                    std::process::exit(2);
+                }
+                _ => unreachable!("clap conflicts_with_all should reject combinations"),
+            };
+            let cmd = PruneCommand::new(cli.directory, selection, dry_run);
             cmd.execute(&mut ui)
         }
         Commands::AnalyzeIsolation { test } => {
