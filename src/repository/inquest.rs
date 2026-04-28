@@ -179,6 +179,8 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             PRIMARY KEY (run_id, test_id)
         );
 
+        CREATE INDEX test_results_test_id_run_id ON test_results (test_id, run_id);
+
         CREATE TABLE test_times (
             test_id TEXT PRIMARY KEY,
             duration_secs REAL NOT NULL
@@ -190,6 +192,15 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             status TEXT NOT NULL,
             message TEXT,
             details TEXT
+        );
+
+        CREATE TABLE test_flakiness (
+            test_id TEXT PRIMARY KEY,
+            runs INTEGER NOT NULL,
+            failures INTEGER NOT NULL,
+            transitions INTEGER NOT NULL,
+            last_run_id INTEGER NOT NULL,
+            last_failed INTEGER NOT NULL
         );
         ",
     )?;
@@ -218,7 +229,127 @@ fn migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
     add_column_if_missing(conn, "runs", "exit_code", "INTEGER");
     add_column_if_missing(conn, "runs", "git_dirty", "INTEGER");
     add_column_if_missing(conn, "runs", "test_args", "TEXT");
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS test_results_test_id_run_id \
+         ON test_results (test_id, run_id);
+         CREATE TABLE IF NOT EXISTS test_flakiness (
+             test_id TEXT PRIMARY KEY,
+             runs INTEGER NOT NULL,
+             failures INTEGER NOT NULL,
+             transitions INTEGER NOT NULL,
+             last_run_id INTEGER NOT NULL,
+             last_failed INTEGER NOT NULL
+         );",
+    )?;
+    backfill_flakiness_if_empty(conn)?;
     Ok(())
+}
+
+/// Populate `test_flakiness` from `test_results` if the cache is empty but
+/// results exist. Runs once after migration on a pre-cache database.
+fn backfill_flakiness_if_empty(conn: &rusqlite::Connection) -> Result<()> {
+    let cache_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM test_flakiness", [], |r| r.get(0))?;
+    if cache_count > 0 {
+        return Ok(());
+    }
+    let results_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM test_results", [], |r| r.get(0))?;
+    if results_count == 0 {
+        return Ok(());
+    }
+    rebuild_flakiness_cache(conn)
+}
+
+/// Recompute the entire `test_flakiness` cache from `test_results`. Used for
+/// initial backfill and as a defensive fallback if the cache is suspected
+/// stale. The query is a single sequential scan, ordered by the
+/// `(test_id, run_id)` index so transitions can be detected with a window.
+fn rebuild_flakiness_cache(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute("DELETE FROM test_flakiness", [])?;
+    let mut stmt = conn.prepare(
+        "SELECT test_id, run_id, status FROM test_results \
+         ORDER BY test_id ASC, run_id ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let test_id: String = row.get(0)?;
+        let run_id: i64 = row.get(1)?;
+        let status: String = row.get(2)?;
+        Ok((test_id, run_id, status))
+    })?;
+    let mut current: Option<(String, FlakinessAccum)> = None;
+    let mut insert = conn.prepare(
+        "INSERT INTO test_flakiness \
+         (test_id, runs, failures, transitions, last_run_id, last_failed) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )?;
+    for row in rows {
+        let (test_id, run_id, status_str) = row?;
+        let failed = str_to_status(&status_str).is_failure();
+        match &mut current {
+            Some((cur_id, accum)) if *cur_id == test_id => {
+                accum.add(run_id, failed);
+            }
+            _ => {
+                if let Some((cur_id, accum)) = current.take() {
+                    insert.execute(params![
+                        cur_id,
+                        accum.runs,
+                        accum.failures,
+                        accum.transitions,
+                        accum.last_run_id,
+                        accum.last_failed as i64,
+                    ])?;
+                }
+                current = Some((test_id, FlakinessAccum::new(run_id, failed)));
+            }
+        }
+    }
+    if let Some((cur_id, accum)) = current {
+        insert.execute(params![
+            cur_id,
+            accum.runs,
+            accum.failures,
+            accum.transitions,
+            accum.last_run_id,
+            accum.last_failed as i64,
+        ])?;
+    }
+    Ok(())
+}
+
+/// Per-test running aggregate used while scanning `test_results` ordered by
+/// `(test_id, run_id)`. `last_failed` lets us detect transitions in O(1).
+struct FlakinessAccum {
+    runs: u32,
+    failures: u32,
+    transitions: u32,
+    last_run_id: i64,
+    last_failed: bool,
+}
+
+impl FlakinessAccum {
+    fn new(run_id: i64, failed: bool) -> Self {
+        Self {
+            runs: 1,
+            failures: if failed { 1 } else { 0 },
+            transitions: 0,
+            last_run_id: run_id,
+            last_failed: failed,
+        }
+    }
+
+    fn add(&mut self, run_id: i64, failed: bool) {
+        self.runs += 1;
+        if failed {
+            self.failures += 1;
+        }
+        if failed != self.last_failed {
+            self.transitions += 1;
+        }
+        self.last_run_id = run_id;
+        self.last_failed = failed;
+    }
 }
 
 /// Inquest-native repository implementation.
@@ -635,26 +766,52 @@ impl Repository for InquestRepository {
     }
 
     fn get_flakiness(&self, min_runs: usize) -> Result<Vec<crate::repository::TestFlakiness>> {
-        // Single sequential scan grouped by test_id; transitions are computed
-        // in Rust over each per-test bucket, so the SQL stays trivial.
-        let mut stmt = self
-            .conn
-            .prepare("SELECT test_id, status FROM test_results ORDER BY test_id ASC, run_id ASC")?;
-        let mut history: HashMap<TestId, Vec<bool>> = HashMap::new();
-        let rows = stmt.query_map([], |row| {
+        // Read directly from the materialized cache. Maintained incrementally
+        // by `insert_test_results`, so this is O(distinct_tests) instead of
+        // O(runs × tests).
+        let mut stmt = self.conn.prepare(
+            "SELECT test_id, runs, failures, transitions FROM test_flakiness \
+             WHERE runs >= ? AND failures > 0",
+        )?;
+        let rows = stmt.query_map(params![min_runs as i64], |row| {
             let test_id: String = row.get(0)?;
-            let status: String = row.get(1)?;
-            Ok((test_id, status))
+            let runs: u32 = row.get(1)?;
+            let failures: u32 = row.get(2)?;
+            let transitions: u32 = row.get(3)?;
+            Ok((test_id, runs, failures, transitions))
         })?;
-        for row in rows {
-            let (test_id, status_str) = row?;
-            let status = str_to_status(&status_str);
-            history
-                .entry(TestId::new(test_id))
-                .or_default()
-                .push(status.is_failure());
-        }
-        Ok(crate::repository::summarise_flakiness(history, min_runs))
+        let mut out: Vec<crate::repository::TestFlakiness> = rows
+            .map(|r| {
+                r.map(|(test_id, runs, failures, transitions)| {
+                    let denom = runs.saturating_sub(1).max(1) as f64;
+                    let flakiness_score = transitions as f64 / denom;
+                    let failure_rate = if runs == 0 {
+                        0.0
+                    } else {
+                        failures as f64 / runs as f64
+                    };
+                    crate::repository::TestFlakiness {
+                        test_id: TestId::new(test_id),
+                        runs,
+                        failures,
+                        transitions,
+                        flakiness_score,
+                        failure_rate,
+                    }
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        out.sort_by(|a, b| {
+            b.transitions
+                .cmp(&a.transitions)
+                .then_with(|| {
+                    b.failure_rate
+                        .partial_cmp(&a.failure_rate)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.test_id.as_str().cmp(b.test_id.as_str()))
+        });
+        Ok(out)
     }
 }
 
@@ -688,6 +845,13 @@ fn insert_test_results(conn: &rusqlite::Connection, run_id: i64, run: &TestRun) 
     let mut stmt = conn.prepare(
         "INSERT OR REPLACE INTO test_results (run_id, test_id, status, duration_secs, message, details, tags) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )?;
+    let mut existing_stmt =
+        conn.prepare("SELECT status FROM test_results WHERE run_id = ? AND test_id = ?")?;
+
+    // Track tests where a prior `(run_id, test_id)` row was overwritten — for
+    // these we can't incrementally update the cache, since the change could
+    // have happened anywhere in the test's history. Recompute them at the end.
+    let mut needs_rebuild: Vec<TestId> = Vec::new();
 
     for result in run.results.values() {
         let tags = if result.tags.is_empty() {
@@ -695,6 +859,10 @@ fn insert_test_results(conn: &rusqlite::Connection, run_id: i64, run: &TestRun) 
         } else {
             Some(result.tags.join(","))
         };
+
+        let prior_status: Option<String> = existing_stmt
+            .query_row(params![run_id, result.test_id.as_str()], |row| row.get(0))
+            .ok();
 
         stmt.execute(params![
             run_id,
@@ -705,8 +873,137 @@ fn insert_test_results(conn: &rusqlite::Connection, run_id: i64, run: &TestRun) 
             result.details,
             tags,
         ])?;
+
+        if prior_status.is_some() {
+            needs_rebuild.push(result.test_id.clone());
+        } else {
+            update_flakiness_cache(
+                conn,
+                result.test_id.as_str(),
+                run_id,
+                result.status.is_failure(),
+            )?;
+        }
     }
 
+    drop(stmt);
+    drop(existing_stmt);
+    for test_id in needs_rebuild {
+        rebuild_flakiness_for_test(conn, test_id.as_str())?;
+    }
+
+    Ok(())
+}
+
+/// Apply a single new `(run_id, test_id)` result to the flakiness cache,
+/// without re-scanning history. Assumes no prior row existed at this run_id —
+/// callers must check that and fall back to [`rebuild_flakiness_for_test`]
+/// otherwise.
+fn update_flakiness_cache(
+    conn: &rusqlite::Connection,
+    test_id: &str,
+    run_id: i64,
+    failed: bool,
+) -> Result<()> {
+    let existing: Option<(u32, u32, u32, i64, i64)> = conn
+        .query_row(
+            "SELECT runs, failures, transitions, last_run_id, last_failed \
+             FROM test_flakiness WHERE test_id = ?",
+            params![test_id],
+            |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, u32>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .ok();
+
+    match existing {
+        None => {
+            conn.execute(
+                "INSERT INTO test_flakiness \
+                 (test_id, runs, failures, transitions, last_run_id, last_failed) \
+                 VALUES (?, 1, ?, 0, ?, ?)",
+                params![test_id, failed as i64, run_id, failed as i64],
+            )?;
+        }
+        Some((runs, failures, transitions, last_run_id, last_failed)) => {
+            if run_id > last_run_id {
+                let prev_failed = last_failed != 0;
+                let new_transitions = transitions + if failed != prev_failed { 1 } else { 0 };
+                let new_failures = failures + if failed { 1 } else { 0 };
+                conn.execute(
+                    "UPDATE test_flakiness \
+                     SET runs = ?, failures = ?, transitions = ?, \
+                         last_run_id = ?, last_failed = ? \
+                     WHERE test_id = ?",
+                    params![
+                        runs + 1,
+                        new_failures,
+                        new_transitions,
+                        run_id,
+                        failed as i64,
+                        test_id,
+                    ],
+                )?;
+            } else {
+                // Out-of-order insert: cheaper to just recompute this one test
+                // than to rederive transitions piecewise.
+                rebuild_flakiness_for_test(conn, test_id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Recompute the cache row for a single test by scanning its rows in
+/// `test_results`. Used when an in-place update or out-of-order insert makes
+/// incremental maintenance unsound.
+fn rebuild_flakiness_for_test(conn: &rusqlite::Connection, test_id: &str) -> Result<()> {
+    let mut stmt = conn
+        .prepare("SELECT run_id, status FROM test_results WHERE test_id = ? ORDER BY run_id ASC")?;
+    let rows = stmt.query_map(params![test_id], |row| {
+        let run_id: i64 = row.get(0)?;
+        let status: String = row.get(1)?;
+        Ok((run_id, status))
+    })?;
+    let mut accum: Option<FlakinessAccum> = None;
+    for row in rows {
+        let (run_id, status_str) = row?;
+        let failed = str_to_status(&status_str).is_failure();
+        match &mut accum {
+            Some(a) => a.add(run_id, failed),
+            None => accum = Some(FlakinessAccum::new(run_id, failed)),
+        }
+    }
+    drop(stmt);
+    match accum {
+        None => {
+            conn.execute(
+                "DELETE FROM test_flakiness WHERE test_id = ?",
+                params![test_id],
+            )?;
+        }
+        Some(a) => {
+            conn.execute(
+                "INSERT OR REPLACE INTO test_flakiness \
+                 (test_id, runs, failures, transitions, last_run_id, last_failed) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                params![
+                    test_id,
+                    a.runs,
+                    a.failures,
+                    a.transitions,
+                    a.last_run_id,
+                    a.last_failed as i64,
+                ],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1192,6 +1489,127 @@ mod tests {
         assert_eq!(duration_secs, Some(45.3));
         assert_eq!(exit_code, Some(0));
         assert_eq!(git_dirty, Some(false));
+    }
+
+    #[test]
+    fn test_migrate_backfills_flakiness_cache() {
+        let temp = TempDir::new().unwrap();
+        let repo_dir = temp.path().join(REPO_DIR);
+        fs::create_dir_all(repo_dir.join("runs")).unwrap();
+        fs::write(repo_dir.join("format"), FORMAT_VERSION).unwrap();
+
+        // Pre-cache schema: same as the migration test, no test_flakiness table.
+        let db_path = repo_dir.join("metadata.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (1);
+            CREATE TABLE runs (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                git_commit TEXT,
+                command TEXT,
+                concurrency INTEGER,
+                total_tests INTEGER NOT NULL DEFAULT 0,
+                failures INTEGER NOT NULL DEFAULT 0,
+                errors INTEGER NOT NULL DEFAULT 0,
+                skips INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE test_results (
+                run_id INTEGER NOT NULL REFERENCES runs(id),
+                test_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                duration_secs REAL,
+                message TEXT,
+                details TEXT,
+                tags TEXT,
+                PRIMARY KEY (run_id, test_id)
+            );
+            CREATE TABLE test_times (
+                test_id TEXT PRIMARY KEY,
+                duration_secs REAL NOT NULL
+            );
+            CREATE TABLE failing_tests (
+                test_id TEXT PRIMARY KEY,
+                run_id INTEGER NOT NULL REFERENCES runs(id),
+                status TEXT NOT NULL,
+                message TEXT,
+                details TEXT
+            );
+
+            INSERT INTO runs (id, timestamp) VALUES (0, '2024-01-01T00:00:00Z');
+            INSERT INTO runs (id, timestamp) VALUES (1, '2024-01-01T00:01:00Z');
+            INSERT INTO runs (id, timestamp) VALUES (2, '2024-01-01T00:02:00Z');
+            INSERT INTO test_results (run_id, test_id, status) VALUES (0, 'flap', 'success');
+            INSERT INTO test_results (run_id, test_id, status) VALUES (1, 'flap', 'failure');
+            INSERT INTO test_results (run_id, test_id, status) VALUES (2, 'flap', 'success');
+            INSERT INTO test_results (run_id, test_id, status) VALUES (0, 'broken', 'failure');
+            INSERT INTO test_results (run_id, test_id, status) VALUES (1, 'broken', 'failure');
+            INSERT INTO test_results (run_id, test_id, status) VALUES (2, 'broken', 'failure');
+            INSERT INTO test_results (run_id, test_id, status) VALUES (0, 'stable', 'success');
+            INSERT INTO test_results (run_id, test_id, status) VALUES (1, 'stable', 'success');
+            ",
+        )
+        .unwrap();
+        drop(conn);
+
+        let factory = InquestRepositoryFactory;
+        let repo = factory.open(temp.path()).unwrap();
+
+        let stats = repo.get_flakiness(2).unwrap();
+        // stable never failed, so it must not appear.
+        assert_eq!(stats.len(), 2);
+        let flap = stats.iter().find(|s| s.test_id.as_str() == "flap").unwrap();
+        assert_eq!(flap.runs, 3);
+        assert_eq!(flap.failures, 1);
+        assert_eq!(flap.transitions, 2);
+        let broken = stats
+            .iter()
+            .find(|s| s.test_id.as_str() == "broken")
+            .unwrap();
+        assert_eq!(broken.runs, 3);
+        assert_eq!(broken.failures, 3);
+        assert_eq!(broken.transitions, 0);
+    }
+
+    #[test]
+    fn test_flakiness_cache_handles_replaced_result() {
+        // If the same (run_id, test_id) is written twice — e.g., a partial
+        // re-run — the cache must reflect the latest status, not the sum of
+        // both writes.
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut run0 = TestRun::new(RunId::new("0"));
+        run0.timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        run0.add_result(TestResult::success("t"));
+        let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
+        subunit_stream::write_stream(&run0, &mut writer).unwrap();
+        drop(writer);
+        run0.id = run_id;
+        repo.replace_failing_tests(&run0).unwrap();
+
+        let mut run1 = TestRun::new(RunId::new("1"));
+        run1.timestamp = chrono::DateTime::from_timestamp(1_700_000_001, 0).unwrap();
+        run1.add_result(TestResult::failure("t", "boom"));
+        let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
+        subunit_stream::write_stream(&run1, &mut writer).unwrap();
+        drop(writer);
+        run1.id = run_id;
+        repo.replace_failing_tests(&run1).unwrap();
+
+        // Now overwrite run 1's result with a success — single transition and
+        // no failures left.
+        let mut run1b = TestRun::new(run1.id.clone());
+        run1b.timestamp = run1.timestamp;
+        run1b.add_result(TestResult::success("t"));
+        repo.replace_failing_tests(&run1b).unwrap();
+
+        let stats = repo.get_flakiness(2).unwrap();
+        // Both runs are now success; no failures means flakiness omits it.
+        assert!(stats.is_empty());
     }
 
     #[test]
