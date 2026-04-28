@@ -1693,6 +1693,7 @@ impl InquestMcpService {
                                     output,
                                     partial,
                                     &historical_times,
+                                    &[],
                                 ) {
                                     tracing::error!(
                                         "Failed to persist background run results: {}",

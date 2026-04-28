@@ -189,13 +189,32 @@ pub fn update_repository_failing_tests(
     Ok(())
 }
 
-/// Display a test run summary
-pub fn display_test_summary(ui: &mut dyn UI, run_id: &RunId, test_run: &TestRun) -> Result<()> {
-    let total = test_run.total_tests();
-    let failures = test_run.count_failures();
-    let successes = test_run.count_successes();
+/// Display a test run summary, optionally restricting the counts to a tag
+/// filter.
+pub fn display_test_summary(
+    ui: &mut dyn UI,
+    run_id: &RunId,
+    test_run: &TestRun,
+    filter_tags: &[String],
+) -> Result<()> {
+    let (total, successes, failures) = if filter_tags.is_empty() {
+        (
+            test_run.total_tests(),
+            test_run.count_successes(),
+            test_run.count_failures(),
+        )
+    } else {
+        (
+            test_run.total_tests_filtered(filter_tags),
+            test_run.count_successes_filtered(filter_tags),
+            test_run.count_failures_filtered(filter_tags),
+        )
+    };
 
     ui.output(&format!("\nTest run {}:", run_id))?;
+    if !filter_tags.is_empty() {
+        ui.output(&format!("  Tag filter: {}", filter_tags.join(", ")))?;
+    }
     ui.output(&format!("  Total:   {}", total))?;
     ui.output(&format!("  Passed:  {}", successes))?;
     ui.output(&format!("  Failed:  {}", failures))?;
@@ -278,6 +297,7 @@ pub fn persist_and_display_run(
     output: crate::test_executor::RunOutput,
     partial: bool,
     historical_times: &std::collections::HashMap<crate::repository::TestId, std::time::Duration>,
+    filter_tags: &[String],
 ) -> Result<(i32, RunId)> {
     let exit_code = output.exit_code();
     let crate::test_executor::RunOutput {
@@ -306,7 +326,7 @@ pub fn persist_and_display_run(
         Some(exit_code),
     )?;
 
-    display_test_summary(ui, &run_id, &combined_run)?;
+    display_test_summary(ui, &run_id, &combined_run, filter_tags)?;
     warn_slow_tests(ui, &combined_run, historical_times)?;
 
     Ok((exit_code, run_id))
@@ -566,12 +586,58 @@ mod tests {
         let mut ui = crate::ui::test_ui::TestUI::new();
         let historical = std::collections::HashMap::new();
         let (exit_code, run_id) =
-            persist_and_display_run(&mut ui, repo.as_mut(), output, false, &historical).unwrap();
+            persist_and_display_run(&mut ui, repo.as_mut(), output, false, &historical, &[])
+                .unwrap();
 
         assert_eq!(exit_code, 0);
         assert_eq!(run_id.as_str(), "1");
         let ui_text = ui.output.join("\n");
         assert!(ui_text.contains("Passed:  1"), "got: {}", ui_text);
+    }
+
+    #[test]
+    fn test_display_test_summary_with_filter_tags() {
+        let mut run = TestRun::new(RunId::new("7"));
+        run.add_result(crate::repository::TestResult::success("test1").with_tag("worker-0"));
+        run.add_result(crate::repository::TestResult::success("test2").with_tag("worker-1"));
+        run.add_result(
+            crate::repository::TestResult::failure("test3", "boom").with_tag("worker-0"),
+        );
+
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        display_test_summary(&mut ui, &RunId::new("7"), &run, &["worker-0".to_string()]).unwrap();
+
+        assert_eq!(
+            ui.output,
+            vec![
+                "\nTest run 7:".to_string(),
+                "  Tag filter: worker-0".to_string(),
+                "  Total:   2".to_string(),
+                "  Passed:  1".to_string(),
+                "  Failed:  1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_display_test_summary_with_excluded_tag() {
+        let mut run = TestRun::new(RunId::new("8"));
+        run.add_result(crate::repository::TestResult::success("fast1"));
+        run.add_result(crate::repository::TestResult::success("slow1").with_tag("slow"));
+
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        display_test_summary(&mut ui, &RunId::new("8"), &run, &["!slow".to_string()]).unwrap();
+
+        assert_eq!(
+            ui.output,
+            vec![
+                "\nTest run 8:".to_string(),
+                "  Tag filter: !slow".to_string(),
+                "  Total:   1".to_string(),
+                "  Passed:  1".to_string(),
+                "  Failed:  0".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -601,7 +667,8 @@ mod tests {
         let mut ui = crate::ui::test_ui::TestUI::new();
         let historical = std::collections::HashMap::new();
         let (exit_code, run_id) =
-            persist_and_display_run(&mut ui, repo.as_mut(), output, false, &historical).unwrap();
+            persist_and_display_run(&mut ui, repo.as_mut(), output, false, &historical, &[])
+                .unwrap();
 
         assert_eq!(exit_code, 1);
         assert_eq!(run_id.as_str(), "0");
