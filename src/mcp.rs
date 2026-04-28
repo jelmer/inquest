@@ -1810,19 +1810,32 @@ impl InquestMcpService {
                 })?
         };
 
-        // Pull out captured stderr once. Exposed only when the run failed —
-        // a successful run's noisy stderr is rarely useful and would just
-        // balloon the response.
-        let error_output = if cli_output.exit_code != 0 {
-            let bytes = stderr_capture.lock().map(|g| g.clone()).unwrap_or_default();
-            if bytes.is_empty() {
-                None
+        // The CLI persists captured stderr to the run record before draining
+        // the shared buffer, so prefer reading it back from the repo. The
+        // shared buffer is kept as a fallback for paths that don't allocate
+        // a run ID (e.g. discovery or auto-config failures).
+        let stderr_bytes_for_failure = if cli_output.exit_code != 0 {
+            let from_repo = cli_output
+                .run_id
+                .as_ref()
+                .and_then(|run_id| {
+                    let repo = self.open_repo().ok()?;
+                    repo.get_run_stderr(run_id).ok().flatten()
+                })
+                .unwrap_or_default();
+            if !from_repo.is_empty() {
+                from_repo
             } else {
-                let text = String::from_utf8_lossy(&bytes).into_owned();
-                Some(head_tail_truncate(&text, ERROR_OUTPUT_LINE_BUDGET))
+                stderr_capture.lock().map(|g| g.clone()).unwrap_or_default()
             }
         } else {
+            Vec::new()
+        };
+        let error_output = if stderr_bytes_for_failure.is_empty() {
             None
+        } else {
+            let text = String::from_utf8_lossy(&stderr_bytes_for_failure).into_owned();
+            Some(head_tail_truncate(&text, ERROR_OUTPUT_LINE_BUDGET))
         };
 
         if let Some(ref run_id) = cli_output.run_id {

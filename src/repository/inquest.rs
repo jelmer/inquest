@@ -373,6 +373,10 @@ impl InquestRepository {
     fn run_lock_path(&self, run_id: &RunId) -> PathBuf {
         self.runs_path().join(format!("{}.lock", run_id))
     }
+
+    fn run_stderr_path(&self, run_id: &RunId) -> PathBuf {
+        self.runs_path().join(format!("{}.stderr", run_id))
+    }
 }
 
 fn status_to_str(status: TestStatus) -> &'static str {
@@ -759,6 +763,29 @@ impl Repository for InquestRepository {
         }
         result.sort();
         Ok(result)
+    }
+
+    fn set_run_stderr(&mut self, run_id: &RunId, stderr: &[u8]) -> Result<()> {
+        let path = self.run_stderr_path(run_id);
+        if stderr.is_empty() {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            return Ok(());
+        }
+        fs::write(&path, stderr)?;
+        Ok(())
+    }
+
+    fn get_run_stderr(&self, run_id: &RunId) -> Result<Option<Vec<u8>>> {
+        let path = self.run_stderr_path(run_id);
+        match fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     fn set_run_metadata(&mut self, run_id: &RunId, metadata: RunMetadata) -> Result<()> {
@@ -1372,6 +1399,28 @@ mod tests {
         assert_eq!(concurrency, Some(4));
         assert_eq!(duration_secs, Some(12.5));
         assert_eq!(exit_code, Some(1));
+    }
+
+    #[test]
+    fn test_run_stderr_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let run = TestRun::new(RunId::new("0"));
+        let run_id = repo.insert_test_run(run).unwrap();
+
+        assert_eq!(repo.get_run_stderr(&run_id).unwrap(), None);
+
+        repo.set_run_stderr(&run_id, b"boom\nstacktrace\n").unwrap();
+        assert_eq!(
+            repo.get_run_stderr(&run_id).unwrap(),
+            Some(b"boom\nstacktrace\n".to_vec())
+        );
+
+        // Empty bytes should clear the file rather than leave a zero-byte one.
+        repo.set_run_stderr(&run_id, b"").unwrap();
+        assert_eq!(repo.get_run_stderr(&run_id).unwrap(), None);
     }
 
     #[test]

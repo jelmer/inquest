@@ -121,14 +121,17 @@ impl RunCommand {
         }
     }
 
-    fn executor_config(&self) -> TestExecutorConfig {
+    fn executor_config(
+        &self,
+        stderr_capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+    ) -> TestExecutorConfig {
         TestExecutorConfig {
             base_path: self.base_path.clone(),
             all_output: self.all_output,
             test_args: self.test_args.clone(),
             cancellation_token: self.cancellation_token.clone(),
             max_restarts: self.max_restarts,
-            stderr_capture: self.stderr_capture.clone(),
+            stderr_capture,
         }
     }
 }
@@ -162,6 +165,10 @@ impl RunCommand {
 
     /// Persist the executor output into the repository, display the summary,
     /// and repack the result as a `CliRunOutput`.
+    ///
+    /// If a `stderr_capture` buffer is supplied, its contents are persisted
+    /// alongside the run and the buffer is drained so the next iteration
+    /// starts clean.
     fn persist(
         &self,
         ui: &mut dyn UI,
@@ -169,6 +176,7 @@ impl RunCommand {
         output: crate::test_executor::RunOutput,
         historical_times: &std::collections::HashMap<crate::repository::TestId, Duration>,
         filter_tags: &[String],
+        stderr_capture: Option<&std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
     ) -> Result<CliRunOutput> {
         let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
             ui,
@@ -178,6 +186,13 @@ impl RunCommand {
             historical_times,
             filter_tags,
         )?;
+        if let Some(buf) = stderr_capture {
+            let bytes = match buf.lock() {
+                Ok(mut guard) => std::mem::take(&mut *guard),
+                Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+            };
+            repo.set_run_stderr(&run_id, &bytes)?;
+        }
         Ok(CliRunOutput {
             exit_code,
             run_id: Some(run_id),
@@ -361,7 +376,14 @@ impl RunCommand {
             test_ids = Some(apply_order(materialised, &resolved_order, &ctx)?);
         }
 
-        let config = self.executor_config();
+        // Always capture stderr so `inq last` / `inq info` can surface it
+        // when a runner crashes mid-run. Callers (e.g. the MCP server) may
+        // pre-supply a buffer to also receive a copy.
+        let stderr_capture = self
+            .stderr_capture
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        let config = self.executor_config(Some(stderr_capture.clone()));
         let executor = TestExecutor::new(&config);
 
         if self.subunit {
@@ -369,7 +391,14 @@ impl RunCommand {
             self.publish_run_id(&run_id);
             let output =
                 executor.run_subunit(ui, &test_cmd, test_ids.as_deref(), run_id, writer)?;
-            return self.persist(ui, repo.as_mut(), output, &historical_times, &filter_tags);
+            return self.persist(
+                ui,
+                repo.as_mut(),
+                output,
+                &historical_times,
+                &filter_tags,
+                Some(&stderr_capture),
+            );
         }
 
         let concurrency = if let Some(explicit_concurrency) = self.concurrency {
@@ -438,8 +467,14 @@ impl RunCommand {
                         max_duration_value,
                         iter_run_id,
                     )?;
-                    let result =
-                        self.persist(ui, repo.as_mut(), output, &historical_times, &filter_tags)?;
+                    let result = self.persist(
+                        ui,
+                        repo.as_mut(),
+                        output,
+                        &historical_times,
+                        &filter_tags,
+                        Some(&stderr_capture),
+                    )?;
 
                     if result.exit_code != 0 {
                         ui.output(&format!("\nTests failed on iteration {}", iteration))?;
@@ -457,7 +492,14 @@ impl RunCommand {
                     max_duration_value,
                     run_id,
                 )?;
-                self.persist(ui, repo.as_mut(), output, &historical_times, &filter_tags)
+                self.persist(
+                    ui,
+                    repo.as_mut(),
+                    output,
+                    &historical_times,
+                    &filter_tags,
+                    Some(&stderr_capture),
+                )
             }
         } else if self.until_failure {
             let mut iteration = 1;
@@ -504,8 +546,14 @@ impl RunCommand {
                     )?
                 };
 
-                let result =
-                    self.persist(ui, repo.as_mut(), output, &historical_times, &filter_tags)?;
+                let result = self.persist(
+                    ui,
+                    repo.as_mut(),
+                    output,
+                    &historical_times,
+                    &filter_tags,
+                    Some(&stderr_capture),
+                )?;
 
                 if result.exit_code != 0 {
                     ui.output(&format!("\nTests failed on iteration {}", iteration))?;
@@ -529,7 +577,14 @@ impl RunCommand {
                 &historical_times,
                 || repo.begin_test_run_raw().map(|(_, w)| w),
             )?;
-            self.persist(ui, repo.as_mut(), output, &historical_times, &filter_tags)
+            self.persist(
+                ui,
+                repo.as_mut(),
+                output,
+                &historical_times,
+                &filter_tags,
+                Some(&stderr_capture),
+            )
         } else {
             let (run_id, writer) = repo.begin_test_run_raw()?;
             self.publish_run_id(&run_id);
@@ -544,7 +599,14 @@ impl RunCommand {
                 writer,
                 &historical_times,
             )?;
-            self.persist(ui, repo.as_mut(), output, &historical_times, &filter_tags)
+            self.persist(
+                ui,
+                repo.as_mut(),
+                output,
+                &historical_times,
+                &filter_tags,
+                Some(&stderr_capture),
+            )
         }
     }
 }

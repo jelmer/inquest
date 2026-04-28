@@ -5,6 +5,32 @@ use crate::commands::Command;
 use crate::error::Result;
 use crate::ui::UI;
 
+/// Maximum number of stderr bytes to print inline. Beyond this, we show only
+/// the tail and tell the user how many bytes were elided.
+const STDERR_DISPLAY_LIMIT: usize = 16 * 1024;
+
+fn display_captured_stderr(ui: &mut dyn UI, stderr: &[u8]) -> Result<()> {
+    if stderr.is_empty() {
+        return Ok(());
+    }
+    ui.output("")?;
+    ui.output("Captured stderr:")?;
+    if stderr.len() > STDERR_DISPLAY_LIMIT {
+        let elided = stderr.len() - STDERR_DISPLAY_LIMIT;
+        ui.output(&format!(
+            "  [{} bytes elided, showing last {}]",
+            elided, STDERR_DISPLAY_LIMIT
+        ))?;
+        ui.output_bytes(&stderr[stderr.len() - STDERR_DISPLAY_LIMIT..])?;
+    } else {
+        ui.output_bytes(stderr)?;
+    }
+    if !stderr.ends_with(b"\n") {
+        ui.output("")?;
+    }
+    Ok(())
+}
+
 /// Command to display results from a test run.
 ///
 /// Shows test statistics and details about failed tests from a
@@ -143,6 +169,10 @@ impl Command for LastCommand {
             }
         }
 
+        if let Some(stderr) = repo.get_run_stderr(&run_id)? {
+            display_captured_stderr(ui, &stderr)?;
+        }
+
         if test_run.count_failures() > 0 {
             Ok(1)
         } else {
@@ -247,5 +277,63 @@ mod tests {
         // file attachments, there will be no detailed output to show.
         // The filtering only shows output for tests that have file attachments.
         assert_eq!(ui.bytes_output.len(), 0);
+    }
+
+    #[test]
+    fn test_last_command_shows_captured_stderr() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut test_run = TestRun::new(RunId::new("0"));
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test1"),
+            status: TestStatus::Success,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec![],
+        });
+        let run_id = repo.insert_test_run(test_run).unwrap();
+        repo.set_run_stderr(&run_id, b"runner crashed: oops\n")
+            .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = LastCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        cmd.execute(&mut ui).unwrap();
+
+        assert!(
+            ui.output.iter().any(|s| s == "Captured stderr:"),
+            "expected 'Captured stderr:' header in {:?}",
+            ui.output
+        );
+        let combined: Vec<u8> = ui.bytes_output.iter().flatten().copied().collect();
+        assert_eq!(combined, b"runner crashed: oops\n");
+    }
+
+    #[test]
+    fn test_last_command_skips_empty_stderr_file() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut test_run = TestRun::new(RunId::new("0"));
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test1"),
+            status: TestStatus::Success,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec![],
+        });
+        repo.insert_test_run(test_run).unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = LastCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        cmd.execute(&mut ui).unwrap();
+
+        assert!(!ui.output.iter().any(|s| s == "Captured stderr:"));
     }
 }

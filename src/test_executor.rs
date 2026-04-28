@@ -218,6 +218,12 @@ impl<'a> TestExecutor<'a> {
         })?;
 
         let mut stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let stderr_handle = crate::test_runner::spawn_stderr_forwarder(
+            stderr,
+            ProgressBar::hidden(),
+            self.config.stderr_capture.clone(),
+        );
 
         let mut buffer = Vec::new();
 
@@ -276,6 +282,13 @@ impl<'a> TestExecutor<'a> {
         let any_command_failed = !status.success();
 
         drop(_temp_file);
+
+        stderr_handle
+            .join()
+            .map_err(|_| {
+                crate::error::Error::CommandExecution("Stderr thread panicked".to_string())
+            })?
+            .map_err(crate::error::Error::Io)?;
 
         let test_run = subunit_stream::parse_stream(buffer.as_slice(), run_id.clone())?;
 
