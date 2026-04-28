@@ -66,6 +66,12 @@ impl Command for InfoCommand {
             ui.output(&format!("Total test time: {:.3}s", duration.as_secs_f64()))?;
         }
 
+        if let Some(stderr) = repo.get_run_stderr(&run_id)? {
+            if !stderr.is_empty() {
+                ui.output(&format!("Captured stderr: {} bytes", stderr.len()))?;
+            }
+        }
+
         Ok(0)
     }
 

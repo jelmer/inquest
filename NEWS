@@ -21,6 +21,12 @@ CHANGES
   wall-clock time, and an ETA derived from historical per-test
   durations. Closes #88. (Jelmer Vernooĳ)
 
+* ``inq last`` now prints captured stderr in full instead of truncating
+  to the trailing 16 KiB. Stderr is gzipped on disk so large captures
+  stay cheap to keep around. Existing uncompressed ``<id>.stderr``
+  files from prior versions are still read transparently.
+  (Jelmer Vernooĳ)
+
 * Add ``inq config``, which prints the resolved effective configuration
   (config file + CLI overrides + defaults) with each value annotated by
   its source. Closes #71. (Jelmer Vernooĳ)

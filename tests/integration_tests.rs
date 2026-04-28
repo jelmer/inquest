@@ -656,6 +656,51 @@ fn test_serial_run_with_no_output_timeout_kills_silent_process() {
     assert_eq!(result.unwrap(), 1);
 }
 
+#[test]
+#[cfg_attr(target_os = "windows", ignore = "sh does not handle Windows paths")]
+fn test_run_persists_stderr_for_crashing_runner() {
+    use inquest::commands::RunCommand;
+    use inquest::repository::inquest::InquestRepositoryFactory;
+
+    let temp = TempDir::new().unwrap();
+    let base_path = temp.path().to_string_lossy().to_string();
+
+    let factory = InquestRepositoryFactory;
+    factory.initialise(temp.path()).unwrap();
+
+    // A "test runner" that prints a marker line to stderr and exits with
+    // a non-zero status without producing any subunit output.
+    let config = "test_command = \"echo runner-crashed-marker 1>&2; exit 7\"\n";
+    fs::write(temp.path().join("inquest.toml"), config).unwrap();
+
+    let load_list_path = temp.path().join("test_ids.txt");
+    fs::write(&load_list_path, "fake_test\n").unwrap();
+
+    let mut ui = TestUI::new();
+    let cmd = RunCommand {
+        base_path: Some(base_path.clone()),
+        load_list: Some(load_list_path.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+    let exit_code = cmd.execute(&mut ui).unwrap();
+    assert_ne!(exit_code, 0);
+
+    let factory = InquestRepositoryFactory;
+    let repo = factory.open(temp.path()).unwrap();
+    let latest = repo.get_latest_run().unwrap();
+    let stderr = repo
+        .get_run_stderr(&latest.id)
+        .unwrap()
+        .expect("stderr should be persisted");
+    assert!(
+        stderr
+            .windows(b"runner-crashed-marker".len())
+            .any(|w| w == b"runner-crashed-marker"),
+        "stderr did not contain the marker, got: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+}
+
 /// Generate subunit v2 binary bytes for an InProgress event.
 fn subunit_inprogress(test_id: &str) -> Vec<u8> {
     use subunit::serialize::Serializable;

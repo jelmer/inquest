@@ -196,6 +196,21 @@ pub trait Repository {
         Ok(None)
     }
 
+    /// Persist the captured stderr output of a test run.
+    ///
+    /// Backends that don't support stderr capture may discard the bytes.
+    fn set_run_stderr(&mut self, _run_id: &RunId, _stderr: &[u8]) -> Result<()> {
+        Ok(())
+    }
+
+    /// Read back the stderr output captured for a test run, if any.
+    ///
+    /// Returns `Ok(None)` when no stderr was captured (or when the backend
+    /// doesn't store stderr at all).
+    fn get_run_stderr(&self, _run_id: &RunId) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     /// Compute per-test flakiness statistics across all recorded runs.
     ///
     /// Tests are considered in the order returned by [`Self::list_run_ids`]

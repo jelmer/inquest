@@ -373,6 +373,18 @@ impl InquestRepository {
     fn run_lock_path(&self, run_id: &RunId) -> PathBuf {
         self.runs_path().join(format!("{}.lock", run_id))
     }
+
+    /// Path to the gzipped captured-stderr file for a run. Current format.
+    fn run_stderr_path(&self, run_id: &RunId) -> PathBuf {
+        self.runs_path().join(format!("{}.stderr.gz", run_id))
+    }
+
+    /// Path to the uncompressed captured-stderr file written by older
+    /// versions. Read-only fallback so existing repositories keep working;
+    /// new writes go to `run_stderr_path` and clean this up on the side.
+    fn legacy_run_stderr_path(&self, run_id: &RunId) -> PathBuf {
+        self.runs_path().join(format!("{}.stderr", run_id))
+    }
 }
 
 fn status_to_str(status: TestStatus) -> &'static str {
@@ -759,6 +771,57 @@ impl Repository for InquestRepository {
         }
         result.sort();
         Ok(result)
+    }
+
+    fn set_run_stderr(&mut self, run_id: &RunId, stderr: &[u8]) -> Result<()> {
+        let path = self.run_stderr_path(run_id);
+        let legacy_path = self.legacy_run_stderr_path(run_id);
+
+        // Always remove any pre-existing legacy uncompressed file so we
+        // don't leave a stale shadow next to the gzip artifact.
+        match fs::remove_file(&legacy_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        if stderr.is_empty() {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            return Ok(());
+        }
+
+        let file = File::create(&path)?;
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        encoder.write_all(stderr)?;
+        encoder.finish()?;
+        Ok(())
+    }
+
+    fn get_run_stderr(&self, run_id: &RunId) -> Result<Option<Vec<u8>>> {
+        let path = self.run_stderr_path(run_id);
+        match File::open(&path) {
+            Ok(file) => {
+                let mut decoder = flate2::read::GzDecoder::new(file);
+                let mut buf = Vec::new();
+                std::io::Read::read_to_end(&mut decoder, &mut buf)?;
+                Ok(Some(buf))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Fall back to the pre-compression filename so older
+                // repositories still surface their captured stderr.
+                let legacy = self.legacy_run_stderr_path(run_id);
+                match fs::read(&legacy) {
+                    Ok(bytes) => Ok(Some(bytes)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(e.into()),
+                }
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     fn set_run_metadata(&mut self, run_id: &RunId, metadata: RunMetadata) -> Result<()> {
@@ -1372,6 +1435,118 @@ mod tests {
         assert_eq!(concurrency, Some(4));
         assert_eq!(duration_secs, Some(12.5));
         assert_eq!(exit_code, Some(1));
+    }
+
+    #[test]
+    fn test_run_stderr_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let run = TestRun::new(RunId::new("0"));
+        let run_id = repo.insert_test_run(run).unwrap();
+
+        assert_eq!(repo.get_run_stderr(&run_id).unwrap(), None);
+
+        repo.set_run_stderr(&run_id, b"boom\nstacktrace\n").unwrap();
+        assert_eq!(
+            repo.get_run_stderr(&run_id).unwrap(),
+            Some(b"boom\nstacktrace\n".to_vec())
+        );
+
+        // Empty bytes should clear the file rather than leave a zero-byte one.
+        repo.set_run_stderr(&run_id, b"").unwrap();
+        assert_eq!(repo.get_run_stderr(&run_id).unwrap(), None);
+    }
+
+    #[test]
+    fn test_run_stderr_compressed_on_disk() {
+        // Repeating text compresses heavily; verify the on-disk file is
+        // smaller than the original bytes and that we round-trip exactly.
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let run = TestRun::new(RunId::new("0"));
+        let run_id = repo.insert_test_run(run).unwrap();
+
+        let payload = "panic at the disco\n".repeat(10_000);
+        repo.set_run_stderr(&run_id, payload.as_bytes()).unwrap();
+
+        let on_disk = temp
+            .path()
+            .join(REPO_DIR)
+            .join("runs")
+            .join(format!("{}.stderr.gz", run_id));
+        let on_disk_size = std::fs::metadata(&on_disk).unwrap().len() as usize;
+        assert!(
+            on_disk_size < payload.len() / 4,
+            "expected on-disk file to compress well, got {} bytes for {} input",
+            on_disk_size,
+            payload.len()
+        );
+
+        let read_back = repo.get_run_stderr(&run_id).unwrap().unwrap();
+        assert_eq!(read_back, payload.as_bytes());
+    }
+
+    #[test]
+    fn test_run_stderr_reads_legacy_uncompressed_file() {
+        // Repositories created before stderr was gzipped wrote `<id>.stderr`
+        // without a `.gz` suffix. Verify those still read back correctly so
+        // existing repos don't lose history.
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let run = TestRun::new(RunId::new("0"));
+        let run_id = repo.insert_test_run(run).unwrap();
+
+        let legacy_path = temp
+            .path()
+            .join(REPO_DIR)
+            .join("runs")
+            .join(format!("{}.stderr", run_id));
+        std::fs::write(&legacy_path, b"legacy boom\n").unwrap();
+
+        assert_eq!(
+            repo.get_run_stderr(&run_id).unwrap(),
+            Some(b"legacy boom\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_run_stderr_set_clears_legacy_file() {
+        // Writing fresh stderr should remove any existing uncompressed
+        // shadow so we don't end up reading stale data from the legacy
+        // file later.
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let run = TestRun::new(RunId::new("0"));
+        let run_id = repo.insert_test_run(run).unwrap();
+
+        let legacy_path = temp
+            .path()
+            .join(REPO_DIR)
+            .join("runs")
+            .join(format!("{}.stderr", run_id));
+        std::fs::write(&legacy_path, b"stale legacy data\n").unwrap();
+
+        repo.set_run_stderr(&run_id, b"fresh data\n").unwrap();
+        assert!(!legacy_path.exists(), "legacy file should be removed");
+        assert_eq!(
+            repo.get_run_stderr(&run_id).unwrap(),
+            Some(b"fresh data\n".to_vec())
+        );
+
+        // Clearing should also wipe the legacy file when it's the only
+        // copy.
+        std::fs::write(&legacy_path, b"reappeared\n").unwrap();
+        repo.set_run_stderr(&run_id, b"").unwrap();
+        assert!(!legacy_path.exists());
+        assert_eq!(repo.get_run_stderr(&run_id).unwrap(), None);
     }
 
     #[test]
