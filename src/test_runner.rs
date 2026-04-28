@@ -147,6 +147,12 @@ impl Read for ChannelReader {
 /// When `capture` is `Some`, each chunk read from stderr is also appended to the
 /// shared buffer so the caller can recover the output after the child exits.
 /// The terminal forwarding happens regardless.
+///
+/// Bytes are passed through an [`AnsiFilter`] before display so the child's
+/// own cursor-movement and screen-erasure escapes don't fight our progress
+/// bar — only colors and plain text reach the terminal. The captured copy
+/// stores the *raw* bytes (post-filter would lose information that's useful
+/// for `inq last` and friends).
 pub fn spawn_stderr_forwarder<R: Read + Send + 'static>(
     mut stderr: R,
     progress_bar: ProgressBar,
@@ -155,6 +161,8 @@ pub fn spawn_stderr_forwarder<R: Read + Send + 'static>(
     std::thread::spawn(move || -> std::io::Result<()> {
         use std::io::Write;
         let mut buffer = [0u8; 8192];
+        let mut filter = AnsiFilter::new();
+        let mut filtered = Vec::with_capacity(8192);
         loop {
             match stderr.read(&mut buffer) {
                 Ok(0) => break, // EOF
@@ -163,14 +171,21 @@ pub fn spawn_stderr_forwarder<R: Read + Send + 'static>(
                 #[cfg(unix)]
                 Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
                 Ok(n) => {
-                    // Write stderr output directly to stderr via progress bar suspension
+                    let raw = &buffer[..n];
+                    filtered.clear();
+                    filter.filter(raw, &mut filtered);
+
+                    // Write filtered output to stderr while the bar is
+                    // suspended so it can redraw cleanly afterwards.
                     progress_bar.suspend(|| {
-                        let _ = std::io::stderr().write_all(&buffer[..n]);
+                        let _ = std::io::stderr().write_all(&filtered);
                         let _ = std::io::stderr().flush();
                     });
                     if let Some(ref cap) = capture {
                         if let Ok(mut buf) = cap.lock() {
-                            buf.extend_from_slice(&buffer[..n]);
+                            // Capture the *raw* bytes so post-mortem tools
+                            // see exactly what the child wrote.
+                            buf.extend_from_slice(raw);
                         }
                     }
                 }
@@ -179,6 +194,126 @@ pub fn spawn_stderr_forwarder<R: Read + Send + 'static>(
         }
         Ok(())
     })
+}
+
+/// Streaming filter that drops cursor-movement / screen-erasure ANSI escapes
+/// while preserving SGR (color/style) and plain text. Used to keep the
+/// child's own progress animations from interfering with our progress bar.
+///
+/// Operates byte-at-a-time so it survives chunk boundaries that fall inside
+/// an escape sequence — common when reading from a pty master.
+pub struct AnsiFilter {
+    state: AnsiState,
+    /// Bytes of an escape sequence currently being parsed. Flushed to the
+    /// output (or dropped) once the sequence is complete.
+    pending: Vec<u8>,
+}
+
+enum AnsiState {
+    Plain,
+    /// Just saw 0x1B (ESC); next byte determines the kind.
+    Escape,
+    /// Inside a CSI: `ESC [ … <final>` where final is in 0x40..=0x7E.
+    Csi,
+    /// Inside an OSC: `ESC ] … ( BEL | ESC \ )`.
+    Osc,
+    /// Inside an OSC and the previous byte was ESC; next byte completes
+    /// the ST terminator if it's a backslash.
+    OscEsc,
+}
+
+impl Default for AnsiFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AnsiFilter {
+    /// Build a filter in the initial "plain text" state.
+    pub fn new() -> Self {
+        AnsiFilter {
+            state: AnsiState::Plain,
+            pending: Vec::new(),
+        }
+    }
+
+    /// Filter `input` into `out`. Multiple calls are stitched together so
+    /// escapes spanning chunks are handled correctly.
+    pub fn filter(&mut self, input: &[u8], out: &mut Vec<u8>) {
+        for &b in input {
+            self.feed(b, out);
+        }
+    }
+
+    fn feed(&mut self, b: u8, out: &mut Vec<u8>) {
+        match self.state {
+            AnsiState::Plain => match b {
+                // Drop bare carriage returns so child spinners (cargo's
+                // "Building" line, pytest's progress) don't overdraw our
+                // bar. CRLF terminals work fine with bare LF.
+                0x0D => {}
+                // Drop bell — purely an annoyance, never useful here.
+                0x07 => {}
+                0x1B => {
+                    self.state = AnsiState::Escape;
+                    self.pending.clear();
+                    self.pending.push(b);
+                }
+                _ => out.push(b),
+            },
+            AnsiState::Escape => {
+                self.pending.push(b);
+                match b {
+                    b'[' => self.state = AnsiState::Csi,
+                    b']' => self.state = AnsiState::Osc,
+                    // Two-byte escape sequence (no parameters). Keep
+                    // everything except the screen-affecting ones.
+                    b'c' | b'D' | b'E' | b'H' | b'M' => {
+                        // Reset, IND, NEL, HTS, RI — drop, all touch the
+                        // cursor or scroll the screen.
+                        self.state = AnsiState::Plain;
+                    }
+                    _ => {
+                        // Unknown short escape — pass through verbatim
+                        // rather than corrupting the byte stream.
+                        out.extend_from_slice(&self.pending);
+                        self.state = AnsiState::Plain;
+                    }
+                }
+            }
+            AnsiState::Csi => {
+                self.pending.push(b);
+                // CSI parameter / intermediate bytes are 0x20..=0x3F;
+                // final byte is 0x40..=0x7E.
+                if (0x40..=0x7E).contains(&b) {
+                    if b == b'm' {
+                        // SGR — keep colors and styles.
+                        out.extend_from_slice(&self.pending);
+                    }
+                    // All other CSI finals (cursor moves, erase, scroll,
+                    // save/restore, etc.) — drop.
+                    self.state = AnsiState::Plain;
+                }
+                // else: still inside parameters, keep accumulating.
+            }
+            AnsiState::Osc => match b {
+                // BEL terminates an OSC.
+                0x07 => self.state = AnsiState::Plain,
+                0x1B => self.state = AnsiState::OscEsc,
+                _ => {} // Drop OSC payload.
+            },
+            AnsiState::OscEsc => {
+                if b == b'\\' {
+                    // String Terminator (ESC \) closes the OSC.
+                    self.state = AnsiState::Plain;
+                } else {
+                    // ESC inside OSC followed by something else — be
+                    // conservative and keep parsing as OSC.
+                    self.state = AnsiState::Osc;
+                }
+            }
+        }
+    }
 }
 
 /// Spawn a thread to tee stdout to both storage and parsing
@@ -214,6 +349,76 @@ pub fn spawn_stdout_tee_tracked<R: Read + Send + 'static, W: Write + Send + 'sta
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    fn ansi_filter(input: &[u8]) -> Vec<u8> {
+        let mut filter = AnsiFilter::new();
+        let mut out = Vec::new();
+        filter.filter(input, &mut out);
+        out
+    }
+
+    #[test]
+    fn ansi_keeps_plain_text() {
+        assert_eq!(ansi_filter(b"hello\nworld\n"), b"hello\nworld\n");
+    }
+
+    #[test]
+    fn ansi_keeps_sgr() {
+        // Red "x" reset.
+        let input = b"\x1b[31mx\x1b[0m\n";
+        assert_eq!(ansi_filter(input), input);
+    }
+
+    #[test]
+    fn ansi_drops_carriage_return() {
+        // cargo-style "spinner" overdraw becomes stacked output.
+        assert_eq!(ansi_filter(b"foo\rbar\n"), b"foobar\n");
+    }
+
+    #[test]
+    fn ansi_drops_erase_line() {
+        // ESC [ K (erase in line) — would clear the bar's line.
+        assert_eq!(ansi_filter(b"\x1b[Khello\n"), b"hello\n");
+    }
+
+    #[test]
+    fn ansi_drops_cursor_movement() {
+        // ESC [ 2A (up two lines), ESC [ H (home), ESC [ 1;1f (move).
+        assert_eq!(ansi_filter(b"\x1b[2Ax"), b"x");
+        assert_eq!(ansi_filter(b"\x1b[Hy"), b"y");
+        assert_eq!(ansi_filter(b"\x1b[1;1fz"), b"z");
+    }
+
+    #[test]
+    fn ansi_drops_osc() {
+        // OSC for setting the window title, terminated by BEL.
+        assert_eq!(ansi_filter(b"\x1b]0;title\x07hi"), b"hi");
+        // OSC terminated by ESC \\ (ST).
+        assert_eq!(ansi_filter(b"\x1b]0;title\x1b\\hi"), b"hi");
+    }
+
+    #[test]
+    fn ansi_handles_chunk_boundary_inside_csi() {
+        // Splitting "\x1b[31mX" across a chunk boundary should still
+        // produce the same output.
+        let mut filter = AnsiFilter::new();
+        let mut out = Vec::new();
+        filter.filter(b"\x1b[3", &mut out);
+        filter.filter(b"1mX", &mut out);
+        assert_eq!(out, b"\x1b[31mX");
+    }
+
+    #[test]
+    fn ansi_keeps_unknown_short_escape() {
+        // ESC = (DECKPAM) and similar — we don't recognise them but they
+        // shouldn't be silently swallowed.
+        assert_eq!(ansi_filter(b"\x1b=hi"), b"\x1b=hi");
+    }
+
+    #[test]
+    fn ansi_drops_bell() {
+        assert_eq!(ansi_filter(b"a\x07b"), b"ab");
+    }
 
     #[test]
     fn test_tee_writer() {
