@@ -79,6 +79,7 @@ pub mod abbreviation;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod eta;
 pub mod grouping;
 #[cfg(feature = "mcp")]
 pub mod mcp;

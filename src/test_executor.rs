@@ -8,12 +8,13 @@ use crate::config::{
     TimeoutSetting, AUTO_MAX_DURATION_MINIMUM, AUTO_TIMEOUT_MULTIPLIER, MAX_TEST_RESTARTS,
 };
 use crate::error::Result;
+use crate::eta::{EtaModel, EtaState};
 use crate::repository::{RunId, TestId, TestResult, TestRun};
 use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 use crate::ui::UI;
 use crate::watchdog::{wait_with_timeout_and_cancel, TestWatchdog, TimeoutReason};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -320,19 +321,35 @@ impl<'a> TestExecutor<'a> {
         raw_writer: Box<dyn std::io::Write + Send>,
         historical_times: &HashMap<TestId, Duration>,
     ) -> Result<RunOutput> {
-        let historical_times = Arc::new(historical_times.clone());
-        let estimated_total: Duration = historical_times.values().sum();
-
         let mut remaining_tests: Option<Vec<TestId>> = test_ids.map(|ids| ids.to_vec());
         let mut all_results: HashMap<TestId, TestResult> = HashMap::new();
         let mut restarts = 0;
         let mut any_command_failed = false;
 
-        let total_test_count = if let Some(ids) = test_ids {
-            ids.len()
+        // Discover tests up-front when the caller didn't specify any, so we can
+        // bound the EtaModel to this run's tests.
+        let discovered_for_count: Option<Vec<TestId>> = if test_ids.is_some() {
+            None
         } else {
-            test_cmd.list_tests()?.len()
+            Some(test_cmd.list_tests()?)
         };
+        let known_tests: &[TestId] = match (test_ids, discovered_for_count.as_deref()) {
+            (Some(ids), _) => ids,
+            (None, Some(d)) => d,
+            (None, None) => &[],
+        };
+        let total_test_count = known_tests.len();
+
+        let test_set: HashSet<&TestId> = known_tests.iter().collect();
+        let durations: Arc<HashMap<TestId, Duration>> = Arc::new(
+            historical_times
+                .iter()
+                .filter(|(id, _)| test_set.contains(id))
+                .map(|(id, d)| (id.clone(), *d))
+                .collect(),
+        );
+        let eta_model = EtaModel::new(durations);
+        let estimated_total: Duration = eta_model.estimated_total(known_tests);
 
         let start_time = std::time::Instant::now();
         let mut next_raw_writer: Option<Box<dyn std::io::Write + Send>> = Some(raw_writer);
@@ -342,7 +359,14 @@ impl<'a> TestExecutor<'a> {
         let bar_width = layout.bar_width;
         let max_msg_len = layout.max_msg_len;
 
-        let progress_bar = create_progress_bar(total_test_count as u64, bar_width);
+        let eta_state = if eta_model.has_history() {
+            Some(EtaState::new(estimated_total))
+        } else {
+            None
+        };
+
+        let progress_bar =
+            create_progress_bar(total_test_count as u64, bar_width, eta_state.clone());
         progress_bar.set_position(all_results.len() as u64);
 
         let output_filter = self.config.output_filter();
@@ -402,17 +426,19 @@ impl<'a> TestExecutor<'a> {
             let progress_bar_clone = progress_bar.clone();
             let run_id_clone = run_id.clone();
             let channel_reader = crate::test_runner::ChannelReader::new(rx);
-            let historical_times_for_thread = Arc::clone(&historical_times);
+            let eta_model_for_thread = eta_model.clone();
+            let eta_state_for_thread = eta_state
+                .clone()
+                .unwrap_or_else(|| EtaState::new(Duration::ZERO));
 
             let parse_thread = std::thread::spawn(move || {
-                let historical_times = historical_times_for_thread;
                 let progress_bar_for_bytes = progress_bar_clone.clone();
-                let mut tracker = ProgressTracker::new(
+                let mut tracker = BarProgress::new(
                     bar_width,
                     max_msg_len,
-                    estimated_total,
-                    start_time,
                     false,
+                    eta_model_for_thread,
+                    eta_state_for_thread,
                 );
 
                 subunit_stream::parse_stream_with_progress(
@@ -426,13 +452,10 @@ impl<'a> TestExecutor<'a> {
                             status,
                         );
 
-                        if !status.indicator().is_empty() {
-                            tracker.on_test_complete(
-                                &progress_bar_clone,
-                                test_id,
-                                status,
-                                &historical_times,
-                            );
+                        if matches!(status, subunit_stream::ProgressStatus::InProgress) {
+                            tracker.on_test_started(test_id);
+                        } else if !status.indicator().is_empty() {
+                            tracker.on_test_complete(&progress_bar_clone, test_id, status);
                         }
                     },
                     |bytes| {
@@ -705,6 +728,8 @@ impl<'a> TestExecutor<'a> {
                 .map(|(id, d)| (id.clone(), *d))
                 .collect(),
         );
+        let eta_model = EtaModel::new(Arc::clone(&durations));
+        let overall_estimated_total: Duration = eta_model.estimated_total(all_tests.iter());
 
         let group_regex = test_cmd.config().group_regex.as_deref();
 
@@ -716,19 +741,21 @@ impl<'a> TestExecutor<'a> {
         )
         .map_err(|e| crate::error::Error::Config(format!("Invalid group_regex pattern: {}", e)))?;
 
-        let partition_estimated_totals: Vec<Duration> = initial_partitions
-            .iter()
-            .map(|partition| partition.iter().filter_map(|id| durations.get(id)).sum())
-            .collect();
-
         let term_width = console::Term::stdout().size().1 as usize;
         let overall_layout = compute_progress_layout(term_width);
         let overall_bar_width = overall_layout.bar_width;
+
+        let overall_eta_state = if eta_model.has_history() {
+            Some(EtaState::new(overall_estimated_total))
+        } else {
+            None
+        };
 
         let multi_progress = indicatif::MultiProgress::new();
         let overall_bar = multi_progress.add(create_progress_bar(
             all_tests.len() as u64,
             overall_bar_width,
+            overall_eta_state.clone(),
         ));
 
         let total_failures = Arc::new(AtomicUsize::new(0));
@@ -777,16 +804,22 @@ impl<'a> TestExecutor<'a> {
                     .saturating_sub(worker_bar_width + PROGRESS_FIXED_WIDTH)
                     .max(20);
 
+                // Recompute per-iteration: after a restart, the partition holds
+                // only remaining tests, so the precomputed first-iteration
+                // total would over-estimate.
+                let worker_estimated_total = eta_model.estimated_total(partition.iter());
+                let worker_eta_state = if eta_model.has_history() {
+                    Some(EtaState::new(worker_estimated_total))
+                } else {
+                    None
+                };
+
                 let worker_bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
-                worker_bar.set_style(
-                    ProgressStyle::default_bar()
-                        .template(&format!(
-                            "Worker {}: [{{elapsed_precise}}] [{{bar:{}.green/blue}}] {{pos}}/{{len}} {{msg}}",
-                            worker_id, worker_bar_width
-                        ))
-                        .unwrap()
-                        .progress_chars("█▓▒░  "),
-                );
+                worker_bar.set_style(make_worker_style(
+                    worker_id,
+                    worker_bar_width,
+                    worker_eta_state.clone(),
+                ));
 
                 let instance_id = instance_ids.get(worker_id).map(|s| s.as_str());
                 let (cmd_str, temp_file) = test_cmd.build_command_full(
@@ -862,22 +895,21 @@ impl<'a> TestExecutor<'a> {
                 let overall_bar_clone = overall_bar.clone();
                 let worker_run_id_clone = worker_run_id.clone();
                 let total_failures_clone = Arc::clone(&total_failures);
-                let worker_durations = Arc::clone(&durations);
-                let worker_estimated_total = partition_estimated_totals
-                    .get(worker_id)
-                    .copied()
-                    .unwrap_or_default();
+                let eta_model_for_worker = eta_model.clone();
+                let worker_eta_state_for_thread = worker_eta_state
+                    .clone()
+                    .unwrap_or_else(|| EtaState::new(Duration::ZERO));
+                let overall_eta_state_for_thread = overall_eta_state.clone();
 
                 let output_filter_clone = output_filter;
-                let worker_start_time = std::time::Instant::now();
                 let parse_thread = std::thread::spawn(move || {
                     let worker_bar_for_bytes = worker_bar_clone.clone();
-                    let mut tracker = ProgressTracker::new(
+                    let mut tracker = BarProgress::new(
                         worker_bar_width,
                         worker_max_msg,
-                        worker_estimated_total,
-                        worker_start_time,
                         true,
+                        eta_model_for_worker,
+                        worker_eta_state_for_thread,
                     );
 
                     subunit_stream::parse_stream_with_progress(
@@ -890,6 +922,16 @@ impl<'a> TestExecutor<'a> {
                                 test_id,
                                 status,
                             );
+
+                            if matches!(status, subunit_stream::ProgressStatus::InProgress) {
+                                tracker.on_test_started(test_id);
+                                if let Some(state) = &overall_eta_state_for_thread {
+                                    let id = TestId::new(test_id);
+                                    let expected = tracker.expected_duration(&id);
+                                    state.mark_started(&id, expected);
+                                }
+                                return;
+                            }
 
                             if !status.indicator().is_empty() {
                                 overall_bar_clone.inc(1);
@@ -906,6 +948,7 @@ impl<'a> TestExecutor<'a> {
                                         overall_bar_width,
                                         completed,
                                         total,
+                                        overall_eta_state_for_thread.clone(),
                                     );
                                     let msg = console::style(format!("failures: {}", total))
                                         .red()
@@ -913,12 +956,12 @@ impl<'a> TestExecutor<'a> {
                                     overall_bar_clone.set_message(msg);
                                 }
 
-                                tracker.on_test_complete(
-                                    &worker_bar_clone,
-                                    test_id,
-                                    status,
-                                    &worker_durations,
-                                );
+                                let test_duration =
+                                    tracker.on_test_complete(&worker_bar_clone, test_id, status);
+                                if let Some(state) = &overall_eta_state_for_thread {
+                                    let id = TestId::new(test_id);
+                                    state.add_completed(&id, test_duration);
+                                }
                             }
                         },
                         |bytes| {
@@ -1357,55 +1400,13 @@ fn get_progress_bar_colors(failure_rate: f64) -> (&'static str, &'static str) {
     }
 }
 
-/// Format a duration as a human-readable string (e.g., "1m 23s", "45s", "2h 05m").
-fn format_duration_short(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs >= 3600 {
-        let hours = secs / 3600;
-        let mins = (secs % 3600) / 60;
-        format!("{}h {:02}m", hours, mins)
-    } else if secs >= 60 {
-        let mins = secs / 60;
-        let remaining_secs = secs % 60;
-        format!("{}m {:02}s", mins, remaining_secs)
-    } else {
-        format!("{}s", secs)
-    }
-}
-
-/// Format an ETA string based on historical test times.
-fn format_eta(
-    estimated_total: Duration,
-    completed_duration: Duration,
-    elapsed: Duration,
-) -> String {
-    if estimated_total.is_zero() || elapsed.is_zero() {
-        return String::new();
-    }
-
-    let fraction_done = completed_duration.as_secs_f64() / estimated_total.as_secs_f64();
-    if fraction_done <= 0.0 || fraction_done > 1.0 {
-        return String::new();
-    }
-
-    let projected_total = elapsed.as_secs_f64() / fraction_done;
-    let remaining = projected_total - elapsed.as_secs_f64();
-    if remaining <= 0.0 {
-        return String::new();
-    }
-
-    format!(
-        " ETA: {}",
-        format_duration_short(Duration::from_secs_f64(remaining))
-    )
-}
-
 /// Update progress bar style based on current failure rate.
 fn update_progress_bar_style(
     progress_bar: &ProgressBar,
     bar_width: usize,
     completed: u64,
     failures: usize,
+    eta_state: Option<Arc<EtaState>>,
 ) {
     let failure_rate = if completed > 0 {
         failures as f64 / completed as f64
@@ -1415,15 +1416,14 @@ fn update_progress_bar_style(
 
     let (filled_color, empty_color) = get_progress_bar_colors(failure_rate);
 
-    progress_bar.set_style(
-        ProgressStyle::default_bar()
-            .template(&format!(
-                "[{{elapsed_precise}}] {{bar:{}.{}/{}}} {{pos}}/{{len}} {{msg}}",
-                bar_width, filled_color, empty_color
-            ))
-            .unwrap()
-            .progress_chars("█▓▒░  "),
-    );
+    let style = ProgressStyle::default_bar()
+        .template(&format!(
+            "[{{elapsed_precise}}{{eta_hist}}] {{bar:{}.{}/{}}} {{pos}}/{{len}} {{msg}}",
+            bar_width, filled_color, empty_color
+        ))
+        .unwrap()
+        .progress_chars("█▓▒░  ");
+    progress_bar.set_style(attach_eta_key(style, eta_state));
 }
 
 /// Computed progress bar layout dimensions for a terminal.
@@ -1447,18 +1447,57 @@ fn compute_progress_layout(term_width: usize) -> ProgressLayout {
 }
 
 /// Create a progress bar with the standard style.
-fn create_progress_bar(total: u64, bar_width: usize) -> ProgressBar {
+///
+/// When `eta_state` is `Some`, the template includes a history-driven ETA that
+/// indicatif redraws on each tick. When `None`, no ETA is shown.
+fn create_progress_bar(
+    total: u64,
+    bar_width: usize,
+    eta_state: Option<Arc<EtaState>>,
+) -> ProgressBar {
     let pb = ProgressBar::new(total);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(&format!(
-                "[{{elapsed_precise}}] {{bar:{}.cyan/blue}} {{pos}}/{{len}} {{msg}}",
-                bar_width
-            ))
-            .unwrap()
-            .progress_chars("█▓▒░  "),
+    let template = format!(
+        "[{{elapsed_precise}}{{eta_hist}}] {{bar:{}.cyan/blue}} {{pos}}/{{len}} {{msg}}",
+        bar_width
     );
+    let style = ProgressStyle::default_bar()
+        .template(&template)
+        .unwrap()
+        .progress_chars("█▓▒░  ");
+    let style = attach_eta_key(style, eta_state);
+    pb.set_style(style);
     pb
+}
+
+/// Attach the `{eta_hist}` custom template key. When `eta_state` is `None` the
+/// key still has to exist (the template references it), but renders nothing.
+fn attach_eta_key(style: ProgressStyle, eta_state: Option<Arc<EtaState>>) -> ProgressStyle {
+    style.with_key(
+        "eta_hist",
+        move |_state: &ProgressState, w: &mut dyn std::fmt::Write| {
+            if let Some(s) = &eta_state {
+                let _ = w.write_str(&s.render());
+            }
+        },
+    )
+}
+
+/// Style a parallel worker's progress bar. Mirrors the look of the overall bar
+/// but tints it green and prefixes the worker id.
+fn make_worker_style(
+    worker_id: usize,
+    bar_width: usize,
+    eta_state: Option<Arc<EtaState>>,
+) -> ProgressStyle {
+    let template = format!(
+        "Worker {}: [{{elapsed_precise}}{{eta_hist}}] [{{bar:{}.green/blue}}] {{pos}}/{{len}} {{msg}}",
+        worker_id, bar_width
+    );
+    let style = ProgressStyle::default_bar()
+        .template(&template)
+        .unwrap()
+        .progress_chars("█▓▒░  ");
+    attach_eta_key(style, eta_state)
 }
 
 /// Create a timeout error result for a test that was killed.
@@ -1496,34 +1535,44 @@ fn compute_remaining_tests(
         .collect()
 }
 
-/// Update the progress bar message after a test completes.
-struct ProgressTracker {
+/// Updates a single progress bar's message and style as tests complete on it.
+/// ETA goes through a shared `EtaState` rendered by the template, not the
+/// per-bar message, so it can be aggregated across workers.
+struct BarProgress {
     failures: usize,
-    completed_duration: Duration,
     bar_width: usize,
     max_msg_len: usize,
-    estimated_total: Duration,
-    start_time: std::time::Instant,
     short_fail_label: bool,
+    eta_model: EtaModel,
+    eta_state: Arc<EtaState>,
 }
 
-impl ProgressTracker {
+impl BarProgress {
     fn new(
         bar_width: usize,
         max_msg_len: usize,
-        estimated_total: Duration,
-        start_time: std::time::Instant,
         short_fail_label: bool,
+        eta_model: EtaModel,
+        eta_state: Arc<EtaState>,
     ) -> Self {
-        ProgressTracker {
+        BarProgress {
             failures: 0,
-            completed_duration: Duration::ZERO,
             bar_width,
             max_msg_len,
-            estimated_total,
-            start_time,
             short_fail_label,
+            eta_model,
+            eta_state,
         }
+    }
+
+    fn on_test_started(&self, test_id: &str) {
+        let id = TestId::new(test_id);
+        let expected = self.eta_model.duration_for(&id);
+        self.eta_state.mark_started(&id, expected);
+    }
+
+    fn expected_duration(&self, test_id: &TestId) -> Duration {
+        self.eta_model.duration_for(test_id)
     }
 
     fn on_test_complete(
@@ -1531,13 +1580,13 @@ impl ProgressTracker {
         progress_bar: &ProgressBar,
         test_id: &str,
         status: subunit_stream::ProgressStatus,
-        historical_times: &HashMap<TestId, Duration>,
-    ) {
+    ) -> Duration {
         progress_bar.inc(1);
 
-        if let Some(&dur) = historical_times.get(&TestId::new(test_id)) {
-            self.completed_duration += dur;
-        }
+        let id = TestId::new(test_id);
+        let test_duration = self.eta_model.duration_for(&id);
+        self.eta_state.add_completed(&id, test_duration);
+
         if matches!(
             status,
             subunit_stream::ProgressStatus::Failed
@@ -1547,14 +1596,15 @@ impl ProgressTracker {
         }
 
         let completed = progress_bar.position();
-        update_progress_bar_style(progress_bar, self.bar_width, completed, self.failures);
+        update_progress_bar_style(
+            progress_bar,
+            self.bar_width,
+            completed,
+            self.failures,
+            Some(Arc::clone(&self.eta_state)),
+        );
 
         let fail_msg = format_failure_msg(self.failures, self.short_fail_label);
-        let eta_msg = format_eta(
-            self.estimated_total,
-            self.completed_duration,
-            self.start_time.elapsed(),
-        );
         let extra_len = if self.failures > 0 {
             let label = if self.short_fail_label {
                 "fail"
@@ -1564,14 +1614,13 @@ impl ProgressTracker {
             3 + label.len() + self.failures.to_string().len()
         } else {
             0
-        } + eta_msg.len();
+        };
         let short_name = truncate_test_name(test_id, self.max_msg_len, extra_len);
 
         let indicator = status.indicator();
-        progress_bar.set_message(format!(
-            "{} {}{}{}",
-            indicator, short_name, fail_msg, eta_msg
-        ));
+        progress_bar.set_message(format!("{} {}{}", indicator, short_name, fail_msg));
+
+        test_duration
     }
 }
 
@@ -2176,11 +2225,11 @@ mod helper_tests {
     fn test_update_progress_bar_style_doesnt_panic() {
         let pb = ProgressBar::new(10);
 
-        update_progress_bar_style(&pb, 50, 5, 0);
-        update_progress_bar_style(&pb, 50, 5, 1);
-        update_progress_bar_style(&pb, 50, 5, 3);
-        update_progress_bar_style(&pb, 50, 5, 5);
-        update_progress_bar_style(&pb, 50, 0, 0);
+        update_progress_bar_style(&pb, 50, 5, 0, None);
+        update_progress_bar_style(&pb, 50, 5, 1, None);
+        update_progress_bar_style(&pb, 50, 5, 3, None);
+        update_progress_bar_style(&pb, 50, 5, 5, None);
+        update_progress_bar_style(&pb, 50, 0, 0, None);
     }
 
     #[test]
@@ -2216,61 +2265,5 @@ mod helper_tests {
         let result = truncate_test_name(name, 5, 0);
         assert_eq!(result.len(), 3);
         assert_eq!(result, "ame");
-    }
-
-    #[test]
-    fn test_format_duration_short_seconds() {
-        assert_eq!(format_duration_short(Duration::from_secs(45)), "45s");
-    }
-
-    #[test]
-    fn test_format_duration_short_minutes() {
-        assert_eq!(format_duration_short(Duration::from_secs(90)), "1m 30s");
-    }
-
-    #[test]
-    fn test_format_duration_short_hours() {
-        assert_eq!(format_duration_short(Duration::from_secs(3661)), "1h 01m");
-    }
-
-    #[test]
-    fn test_format_duration_short_zero() {
-        assert_eq!(format_duration_short(Duration::ZERO), "0s");
-    }
-
-    #[test]
-    fn test_format_eta_with_history() {
-        let eta = format_eta(
-            Duration::from_secs(100),
-            Duration::from_secs(50),
-            Duration::from_secs(60),
-        );
-        assert_eq!(eta, " ETA: 1m 00s");
-    }
-
-    #[test]
-    fn test_format_eta_no_history() {
-        let eta = format_eta(Duration::ZERO, Duration::ZERO, Duration::from_secs(10));
-        assert_eq!(eta, "");
-    }
-
-    #[test]
-    fn test_format_eta_no_elapsed() {
-        let eta = format_eta(
-            Duration::from_secs(100),
-            Duration::from_secs(10),
-            Duration::ZERO,
-        );
-        assert_eq!(eta, "");
-    }
-
-    #[test]
-    fn test_format_eta_nearly_done() {
-        let eta = format_eta(
-            Duration::from_secs(100),
-            Duration::from_secs(120),
-            Duration::from_secs(90),
-        );
-        assert_eq!(eta, "");
     }
 }
