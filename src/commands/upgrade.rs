@@ -1,18 +1,22 @@
 //! Upgrade a legacy .testrepository/ to the new .inquest/ format
 
 use crate::commands::Command;
+use crate::config::TestrConfig;
 use crate::error::{Error, Result};
 use crate::repository::inquest::InquestRepositoryFactory;
 use crate::repository::testr::FileRepositoryFactory;
 use crate::repository::{Repository, RepositoryFactory};
 use crate::ui::UI;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Command to upgrade a legacy .testrepository/ repository to the new .inquest/ format.
+/// Command to upgrade a legacy `.testrepository/` repository and/or
+/// `.testr.conf` file to the new `.inquest/` directory and `inquest.toml`.
 ///
 /// Copies all test run data, failing tests, and timing information from the
 /// old format into a new `.inquest/` directory with SQLite metadata storage.
+/// If a legacy `.testr.conf` is present and no TOML config file already
+/// exists, it is rewritten as `inquest.toml`.
 pub struct UpgradeCommand {
     base_path: Option<String>,
 }
@@ -37,58 +41,39 @@ impl Command for UpgradeCommand {
 
         let old_path = base.join(".testrepository");
         let new_path = base.join(".inquest");
+        let testr_conf_path = base.join(".testr.conf");
 
-        // Check that old repository exists
-        let old_factory = FileRepositoryFactory;
-        let old_repo = old_factory
-            .open(base)
-            .map_err(|_| Error::RepositoryNotFound(old_path.clone()))?;
+        let has_old_repo = old_path.exists();
+        let has_testr_conf = testr_conf_path.exists();
 
-        // Check that new repository does not already exist
-        if new_path.exists() {
-            return Err(Error::RepositoryExists(new_path));
+        if !has_old_repo && !has_testr_conf {
+            return Err(Error::RepositoryNotFound(old_path));
         }
 
-        // Create new repository
-        let new_factory = InquestRepositoryFactory;
-        let mut new_repo = new_factory.initialise(base)?;
+        let mut did_anything = false;
 
-        // Migrate all test runs
-        let run_ids = old_repo.list_run_ids()?;
-        let total_runs = run_ids.len();
-        ui.output(&format!(
-            "Upgrading {} test run{} from {} to {}",
-            total_runs,
-            if total_runs == 1 { "" } else { "s" },
-            old_path.display(),
-            new_path.display(),
-        ))?;
-
-        let progress = make_progress_bar(total_runs as u64);
-        for run_id in &run_ids {
-            let test_run = old_repo.get_test_run(run_id)?;
-            new_repo.insert_test_run(test_run)?;
-            progress.inc(1);
-        }
-        progress.finish_and_clear();
-
-        // Restore the correct failing tests state from the old repo.
-        // During run migration, each insert_test_run called replace_failing_tests,
-        // so the new repo's state reflects the last run. We need to overwrite with
-        // the old repo's actual failing state.
-        migrate_failing_tests(&*old_repo, new_repo.as_mut(), &run_ids)?;
-
-        // Try to migrate any additional test times that the old repo may have
-        // beyond what was extracted from individual runs.
-        let times = old_repo.get_test_times()?;
-        if !times.is_empty() {
-            new_repo.update_test_times(&times)?;
+        if has_old_repo {
+            upgrade_repository(base, &old_path, &new_path, ui)?;
+            did_anything = true;
         }
 
-        ui.output(&format!(
-            "Upgrade complete. You can remove {} when satisfied.",
-            old_path.display(),
-        ))?;
+        if has_testr_conf {
+            if let Some(written) = upgrade_config(base, &testr_conf_path, ui)? {
+                ui.output(&format!(
+                    "Rewrote {} as {}. You can remove {} when satisfied.",
+                    testr_conf_path.display(),
+                    written.display(),
+                    testr_conf_path.display(),
+                ))?;
+                did_anything = true;
+            }
+        }
+
+        if !did_anything {
+            // Old repo was absent and the .testr.conf rewrite was skipped
+            // because a TOML config already existed. Nothing to do.
+            ui.output("Nothing to upgrade.")?;
+        }
 
         Ok(0)
     }
@@ -98,8 +83,97 @@ impl Command for UpgradeCommand {
     }
 
     fn help(&self) -> &str {
-        "Upgrade a .testrepository/ to .inquest/ format"
+        "Upgrade legacy .testrepository/ and/or .testr.conf to the new format"
     }
+}
+
+/// Migrate `.testrepository/` to `.inquest/`.
+fn upgrade_repository(
+    base: &Path,
+    old_path: &Path,
+    new_path: &Path,
+    ui: &mut dyn UI,
+) -> Result<()> {
+    let old_factory = FileRepositoryFactory;
+    let old_repo = old_factory
+        .open(base)
+        .map_err(|_| Error::RepositoryNotFound(old_path.to_path_buf()))?;
+
+    if new_path.exists() {
+        return Err(Error::RepositoryExists(new_path.to_path_buf()));
+    }
+
+    let new_factory = InquestRepositoryFactory;
+    let mut new_repo = new_factory.initialise(base)?;
+
+    let run_ids = old_repo.list_run_ids()?;
+    let total_runs = run_ids.len();
+    ui.output(&format!(
+        "Upgrading {} test run{} from {} to {}",
+        total_runs,
+        if total_runs == 1 { "" } else { "s" },
+        old_path.display(),
+        new_path.display(),
+    ))?;
+
+    let progress = make_progress_bar(total_runs as u64);
+    for run_id in &run_ids {
+        let test_run = old_repo.get_test_run(run_id)?;
+        new_repo.insert_test_run(test_run)?;
+        progress.inc(1);
+    }
+    progress.finish_and_clear();
+
+    // Restore the correct failing tests state from the old repo.
+    // During run migration, each insert_test_run called replace_failing_tests,
+    // so the new repo's state reflects the last run. We need to overwrite with
+    // the old repo's actual failing state.
+    migrate_failing_tests(&*old_repo, new_repo.as_mut(), &run_ids)?;
+
+    // Try to migrate any additional test times that the old repo may have
+    // beyond what was extracted from individual runs.
+    let times = old_repo.get_test_times()?;
+    if !times.is_empty() {
+        new_repo.update_test_times(&times)?;
+    }
+
+    ui.output(&format!(
+        "Upgrade complete. You can remove {} when satisfied.",
+        old_path.display(),
+    ))?;
+
+    Ok(())
+}
+
+/// Rewrite `.testr.conf` as `inquest.toml`. Returns the path written, or
+/// `None` if a TOML config already exists and the rewrite was skipped.
+fn upgrade_config(base: &Path, testr_conf_path: &Path, ui: &mut dyn UI) -> Result<Option<PathBuf>> {
+    let toml_path = base.join("inquest.toml");
+    let dot_toml_path = base.join(".inquest.toml");
+
+    if toml_path.exists() {
+        ui.warning(&format!(
+            "{} already exists; skipping rewrite of {}",
+            toml_path.display(),
+            testr_conf_path.display(),
+        ))?;
+        return Ok(None);
+    }
+    if dot_toml_path.exists() {
+        ui.warning(&format!(
+            "{} already exists; skipping rewrite of {}",
+            dot_toml_path.display(),
+            testr_conf_path.display(),
+        ))?;
+        return Ok(None);
+    }
+
+    let config = TestrConfig::load_from_file(testr_conf_path)?;
+    let toml_content = config.to_toml()?;
+    std::fs::write(&toml_path, toml_content)
+        .map_err(|e| Error::Config(format!("Failed to write {}: {}", toml_path.display(), e)))?;
+
+    Ok(Some(toml_path))
 }
 
 fn make_progress_bar(total: u64) -> ProgressBar {
@@ -337,5 +411,128 @@ mod tests {
         let cmd = UpgradeCommand::new(Some(temp.path().to_string_lossy().to_string()));
         let result = cmd.execute(&mut ui);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_upgrade_only_testr_conf() {
+        let temp = TempDir::new().unwrap();
+
+        // Only a .testr.conf, no .testrepository/
+        std::fs::write(
+            temp.path().join(".testr.conf"),
+            "[DEFAULT]\n\
+             test_command=python -m subunit.run discover\n\
+             test_id_option=--load-list $IDFILE\n",
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = UpgradeCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        assert_eq!(cmd.execute(&mut ui).unwrap(), 0);
+
+        // .inquest/ should not be created (no .testrepository/ to migrate)
+        assert!(!temp.path().join(".inquest").exists());
+
+        // inquest.toml should be created with the same settings
+        let toml_path = temp.path().join("inquest.toml");
+        assert!(toml_path.exists());
+
+        let parsed = TestrConfig::load_from_file(&toml_path).unwrap();
+        assert_eq!(parsed.test_command, "python -m subunit.run discover");
+        assert_eq!(
+            parsed.test_id_option.as_deref(),
+            Some("--load-list $IDFILE")
+        );
+
+        let output = ui.output.join("\n");
+        assert!(output.contains("Rewrote"), "got: {}", output);
+        assert!(output.contains(".testr.conf"), "got: {}", output);
+    }
+
+    #[test]
+    fn test_upgrade_both_testr_conf_and_testrepository() {
+        let temp = TempDir::new().unwrap();
+
+        // Old-format repository AND .testr.conf
+        let factory = FileRepositoryFactory;
+        factory.initialise(temp.path()).unwrap();
+
+        std::fs::write(
+            temp.path().join(".testr.conf"),
+            "[DEFAULT]\ntest_command=cargo test\n",
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = UpgradeCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        assert_eq!(cmd.execute(&mut ui).unwrap(), 0);
+
+        // Both .inquest/ and inquest.toml should now exist
+        assert!(temp.path().join(".inquest").exists());
+        let toml_path = temp.path().join("inquest.toml");
+        assert!(toml_path.exists());
+
+        let parsed = TestrConfig::load_from_file(&toml_path).unwrap();
+        assert_eq!(parsed.test_command, "cargo test");
+    }
+
+    #[test]
+    fn test_upgrade_testr_conf_skipped_when_toml_exists() {
+        let temp = TempDir::new().unwrap();
+
+        let factory = FileRepositoryFactory;
+        factory.initialise(temp.path()).unwrap();
+
+        std::fs::write(
+            temp.path().join(".testr.conf"),
+            "[DEFAULT]\ntest_command=from-testr\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("inquest.toml"),
+            "test_command = \"from-toml\"\n",
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = UpgradeCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        assert_eq!(cmd.execute(&mut ui).unwrap(), 0);
+
+        // inquest.toml must be untouched
+        let parsed = TestrConfig::load_from_file(&temp.path().join("inquest.toml")).unwrap();
+        assert_eq!(parsed.test_command, "from-toml");
+
+        // A warning should have been emitted about the skipped rewrite
+        let warnings = ui.errors.join("\n");
+        assert!(
+            warnings.contains("inquest.toml") && warnings.contains("skipping"),
+            "got: {}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_upgrade_only_testr_conf_with_existing_inquest_toml() {
+        let temp = TempDir::new().unwrap();
+
+        // Only the legacy config exists, but a TOML config is also present.
+        // Nothing to migrate (no .testrepository/) and the rewrite is skipped.
+        std::fs::write(
+            temp.path().join(".testr.conf"),
+            "[DEFAULT]\ntest_command=from-testr\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("inquest.toml"),
+            "test_command = \"from-toml\"\n",
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = UpgradeCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        assert_eq!(cmd.execute(&mut ui).unwrap(), 0);
+
+        let output = ui.output.join("\n");
+        assert!(output.contains("Nothing to upgrade"), "got: {}", output);
     }
 }
