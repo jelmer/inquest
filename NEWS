@@ -16,6 +16,11 @@ CHANGES
   test arguments captured from that run's metadata. Closes #69.
   (Jelmer Vernooĳ)
 
+* ``inq running`` now reports live progress for each in-progress run,
+  including observed/expected test counts, percent complete, elapsed
+  wall-clock time, and an ETA derived from historical per-test
+  durations. Closes #88. (Jelmer Vernooĳ)
+
 * Add ``inq config``, which prints the resolved effective configuration
   (config file + CLI overrides + defaults) with each value annotated by
   its source. Closes #71. (Jelmer Vernooĳ)

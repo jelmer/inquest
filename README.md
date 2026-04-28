@@ -158,7 +158,10 @@ Options:
 
 ### `inq running`
 
-Show currently in-progress test runs, including live test counts. Uses lock files to track active runs.
+Show currently in-progress test runs. Tails the in-progress subunit stream
+on disk to report live test counts (passed/failed), percent complete versus
+the historical test count, elapsed wall-clock time, and an ETA derived from
+each test's historical duration. Uses lock files to track active runs.
 
 ### `inq config`
 

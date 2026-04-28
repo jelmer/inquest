@@ -14,7 +14,8 @@ pub mod test_run;
 pub mod testr;
 
 pub use test_run::{
-    RunId, RunMetadata, StreamInterruption, TestFlakiness, TestId, TestResult, TestRun, TestStatus,
+    estimate_progress, RunId, RunMetadata, StreamInterruption, TestFlakiness, TestId, TestResult,
+    TestRun, TestStatus,
 };
 
 /// Abstract repository trait for test result storage
@@ -183,6 +184,16 @@ pub trait Repository {
     /// don't support extended metadata.
     fn get_run_metadata(&self, _run_id: &RunId) -> Result<RunMetadata> {
         Ok(RunMetadata::default())
+    }
+
+    /// Return the wall-clock timestamp when a run was started, if known.
+    ///
+    /// Distinct from [`TestRun::timestamp`], which is only populated when a
+    /// run is constructed in memory and is `Utc::now()` for runs read back
+    /// from disk. Backends that record a start time should override this so
+    /// callers can compute elapsed time for in-progress runs.
+    fn get_run_started_at(&self, _run_id: &RunId) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        Ok(None)
     }
 
     /// Compute per-test flakiness statistics across all recorded runs.

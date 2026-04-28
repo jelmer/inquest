@@ -486,6 +486,80 @@ impl TestRun {
     }
 }
 
+/// Estimate progress for an in-progress test run using historical timings.
+///
+/// Returns `(total_expected, percent_complete, estimated_remaining_secs)`
+/// where `percent_complete` is in `[0, 1]`. All three are `None` when no
+/// historical data is available (first run in a new repo).
+///
+/// `estimated_remaining_secs` projects wall-clock time remaining by scaling
+/// the observed pace: if the tests completed so far account for fraction `f`
+/// of the historical total test-time, and `elapsed` wall-clock seconds have
+/// passed, the run is projected to take `elapsed / f` total wall-clock
+/// seconds. This automatically captures parallelism, machine speed, and
+/// per-run overhead — the same algorithm `inq run` uses for its live ETA.
+///
+/// When `elapsed` is `None` or zero, falls back to the sum of historical
+/// durations of tests not yet observed (test-time, not wall-time), which is
+/// only meaningful for serial runs but is better than nothing for callers
+/// that don't know elapsed time.
+pub fn estimate_progress(
+    historical: &HashMap<TestId, Duration>,
+    test_run: &TestRun,
+    elapsed: Option<Duration>,
+) -> (Option<usize>, Option<f64>, Option<f64>) {
+    if historical.is_empty() {
+        return (None, None, None);
+    }
+    let total_expected = historical.len();
+    let observed = test_run.total_tests();
+    let percent = if total_expected > 0 {
+        Some((observed as f64 / total_expected as f64).min(1.0))
+    } else {
+        None
+    };
+
+    // Sum historical durations of tests already completed in this run, and
+    // of tests still outstanding. We use historical durations on both sides
+    // so the ratio is meaningful even when the current run hasn't recorded
+    // its own per-test timings yet.
+    let mut completed_test_time = Duration::ZERO;
+    let mut total_test_time = Duration::ZERO;
+    for (id, dur) in historical {
+        total_test_time += *dur;
+        if test_run.results.contains_key(id) {
+            completed_test_time += *dur;
+        }
+    }
+
+    let remaining_secs = match elapsed {
+        Some(elapsed) if !elapsed.is_zero() && !total_test_time.is_zero() => {
+            let fraction_done = completed_test_time.as_secs_f64() / total_test_time.as_secs_f64();
+            if fraction_done > 0.0 && fraction_done < 1.0 {
+                let projected_total = elapsed.as_secs_f64() / fraction_done;
+                Some((projected_total - elapsed.as_secs_f64()).max(0.0))
+            } else if fraction_done >= 1.0 {
+                Some(0.0)
+            } else {
+                // No completed tests yet — can't project from observed pace.
+                Some(total_test_time.as_secs_f64())
+            }
+        }
+        _ => {
+            // No elapsed time available: fall back to summing historical
+            // durations of unobserved tests. Pessimistic for parallel runs.
+            let remaining: Duration = historical
+                .iter()
+                .filter(|(id, _)| !test_run.results.contains_key(*id))
+                .map(|(_, d)| *d)
+                .sum();
+            Some(remaining.as_secs_f64())
+        }
+    };
+
+    (Some(total_expected), percent, remaining_secs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,5 +806,88 @@ mod tests {
 
         let filter = vec!["!slow".to_string()];
         assert_eq!(run.total_tests_filtered(&filter), 1);
+    }
+
+    fn historical_2s(n: usize) -> HashMap<TestId, Duration> {
+        (0..n)
+            .map(|i| (TestId::new(format!("test_{i}")), Duration::from_secs(2)))
+            .collect()
+    }
+
+    #[test]
+    fn test_estimate_progress_no_history() {
+        let run = TestRun::new(RunId::new("0"));
+        let (total, pct, eta) =
+            estimate_progress(&HashMap::new(), &run, Some(Duration::from_secs(10)));
+        assert_eq!(total, None);
+        assert_eq!(pct, None);
+        assert_eq!(eta, None);
+    }
+
+    #[test]
+    fn test_estimate_progress_projects_from_observed_pace() {
+        // 4 tests in history, each 2s historical. We've completed 1 in 5
+        // wall-clock seconds. Fraction done by historical test-time = 1/4 =
+        // 0.25. Projected total wall = 5 / 0.25 = 20s. Remaining = 15s.
+        let historical = historical_2s(4);
+        let mut run = TestRun::new(RunId::new("0"));
+        run.add_result(TestResult::success("test_0"));
+
+        let (total, pct, eta) = estimate_progress(&historical, &run, Some(Duration::from_secs(5)));
+        assert_eq!(total, Some(4));
+        assert!((pct.unwrap() - 0.25).abs() < 1e-9);
+        assert!((eta.unwrap() - 15.0).abs() < 1e-6, "got {:?}", eta);
+    }
+
+    #[test]
+    fn test_estimate_progress_parallel_speedup_visible_in_eta() {
+        // 4 tests × 2s = 8s historical test-time. If 2 tests completed in
+        // only 1s wall-clock (parallel run), fraction done by test-time =
+        // 4/8 = 0.5. Projected total wall = 1 / 0.5 = 2s. Remaining = 1s.
+        // The naive sum-of-unobserved approach would say 4s remaining.
+        let historical = historical_2s(4);
+        let mut run = TestRun::new(RunId::new("0"));
+        run.add_result(TestResult::success("test_0"));
+        run.add_result(TestResult::success("test_1"));
+
+        let (_, _, eta) = estimate_progress(&historical, &run, Some(Duration::from_secs(1)));
+        assert!((eta.unwrap() - 1.0).abs() < 1e-6, "got {:?}", eta);
+    }
+
+    #[test]
+    fn test_estimate_progress_no_elapsed_falls_back() {
+        // Without elapsed time, fall back to summing unobserved historical
+        // durations: 3 unobserved × 2s = 6s.
+        let historical = historical_2s(4);
+        let mut run = TestRun::new(RunId::new("0"));
+        run.add_result(TestResult::success("test_0"));
+
+        let (_, _, eta) = estimate_progress(&historical, &run, None);
+        assert!((eta.unwrap() - 6.0).abs() < 1e-6, "got {:?}", eta);
+    }
+
+    #[test]
+    fn test_estimate_progress_zero_elapsed_falls_back() {
+        // Zero elapsed should also use the fallback rather than divide by
+        // zero or return a meaningless projection.
+        let historical = historical_2s(4);
+        let mut run = TestRun::new(RunId::new("0"));
+        run.add_result(TestResult::success("test_0"));
+
+        let (_, _, eta) = estimate_progress(&historical, &run, Some(Duration::ZERO));
+        assert!((eta.unwrap() - 6.0).abs() < 1e-6, "got {:?}", eta);
+    }
+
+    #[test]
+    fn test_estimate_progress_no_completed_tests_yet() {
+        // With elapsed time but no tests completed, we can't project from
+        // observed pace. Return the total historical test-time as a rough
+        // upper-bound estimate.
+        let historical = historical_2s(4);
+        let run = TestRun::new(RunId::new("0"));
+
+        let (_, pct, eta) = estimate_progress(&historical, &run, Some(Duration::from_secs(3)));
+        assert_eq!(pct, Some(0.0));
+        assert!((eta.unwrap() - 8.0).abs() < 1e-6, "got {:?}", eta);
     }
 }
