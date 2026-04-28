@@ -213,13 +213,14 @@ impl<'a> TestExecutor<'a> {
         let mut child = spawn_in_process_group(
             &cmd_str,
             Path::new(self.config.base_path.as_deref().unwrap_or(".")),
+            true,
         )
         .map_err(|e| {
             crate::error::Error::CommandExecution(format!("Failed to execute test command: {}", e))
         })?;
 
         let mut stdout = child.stdout.take().expect("stdout was piped");
-        let stderr = child.stderr.take().expect("stderr was piped");
+        let stderr = child.take_stderr();
         let stderr_handle = crate::test_runner::spawn_stderr_forwarder(
             stderr,
             ProgressBar::hidden(),
@@ -392,6 +393,7 @@ impl<'a> TestExecutor<'a> {
             let mut child = spawn_in_process_group(
                 &cmd_str,
                 Path::new(self.config.base_path.as_deref().unwrap_or(".")),
+                true,
             )
             .map_err(|e| {
                 progress_bar.finish_and_clear();
@@ -402,7 +404,7 @@ impl<'a> TestExecutor<'a> {
             })?;
 
             let stdout = child.stdout.take().expect("stdout was piped");
-            let stderr = child.stderr.take().expect("stderr was piped");
+            let stderr = child.take_stderr();
 
             let (tx, rx) = std::sync::mpsc::sync_channel(STREAM_BUFFER_SIZE);
             let activity_tracker =
@@ -845,6 +847,7 @@ impl<'a> TestExecutor<'a> {
                 let mut child = spawn_in_process_group(
                     &cmd_str,
                     Path::new(self.config.base_path.as_deref().unwrap_or(".")),
+                    true,
                 )
                 .map_err(|e| {
                     crate::error::Error::CommandExecution(format!(
@@ -854,7 +857,7 @@ impl<'a> TestExecutor<'a> {
                 })?;
 
                 let stdout = child.stdout.take().expect("stdout was piped");
-                let stderr = child.stderr.take().expect("stderr was piped");
+                let stderr = child.take_stderr();
 
                 let worker_run_id = run_id.sub_run(worker_id);
                 let raw_writer: Box<dyn std::io::Write + Send> = if is_first_iteration {
@@ -1113,6 +1116,7 @@ impl<'a> TestExecutor<'a> {
             let mut child = spawn_in_process_group(
                 &cmd_str,
                 Path::new(self.config.base_path.as_deref().unwrap_or(".")),
+                false,
             )
             .map_err(|e| {
                 crate::error::Error::CommandExecution(format!(
@@ -1292,9 +1296,13 @@ struct IoThreads {
 
 impl IoThreads {
     /// Spawn tee (stdout capture) and stderr forwarding threads for a child process.
-    fn spawn(
+    ///
+    /// `stderr` is a generic `Read` so callers can pass either the child's
+    /// piped `ChildStderr` or a pty master `File` (the latter keeps the
+    /// child's libc in line-buffered mode for live progress).
+    fn spawn<E: std::io::Read + Send + 'static>(
         stdout: std::process::ChildStdout,
-        stderr: std::process::ChildStderr,
+        stderr: E,
         raw_writer: Box<dyn std::io::Write + Send>,
         tx: std::sync::mpsc::SyncSender<Vec<u8>>,
         activity_tracker: Option<&crate::test_runner::ActivityTracker>,
@@ -1347,24 +1355,83 @@ fn update_watchdog(
 }
 
 /// Spawn a shell command in its own process group so the entire tree can be killed on timeout.
+/// Spawn `sh -c "<cmd_str>"` in its own process group with stdout piped.
+///
+/// `with_pty_stderr=true` allocates a pty pair for the child's stderr so
+/// runners that detect tty (cargo, pytest, …) stay line-buffered and
+/// ANSI colours pass through to the user. The pty master is exposed via
+/// [`SpawnedChild::take_stderr`]. The caller **must** drain it on a
+/// background thread, otherwise the pty buffer will fill and the child
+/// will block. When false (or when openpty isn't available), stderr is a
+/// plain pipe via `Stdio::piped()`.
 fn spawn_in_process_group(
     cmd_str: &str,
     working_dir: &Path,
-) -> std::io::Result<std::process::Child> {
+    with_pty_stderr: bool,
+) -> std::io::Result<SpawnedChild> {
     use std::process::{Command, Stdio};
+
+    let (stderr_stdio, pty_master) = if with_pty_stderr {
+        match crate::pty::open_stderr_pty() {
+            #[cfg(unix)]
+            Some(crate::pty::PtyPair { master, slave }) => (Stdio::from(slave), Some(master)),
+            _ => (Stdio::piped(), None),
+        }
+    } else {
+        (Stdio::piped(), None)
+    };
+
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg(cmd_str)
         .current_dir(working_dir)
         .env(crate::config::NO_PROGRESS_ENV_VAR, "1")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(stderr_stdio);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    cmd.spawn()
+    let child = cmd.spawn()?;
+    Ok(SpawnedChild {
+        child,
+        stderr_pty: pty_master,
+    })
+}
+
+/// A spawned child plus the optional pty master for its stderr.
+struct SpawnedChild {
+    child: std::process::Child,
+    /// `Some` when `openpty` succeeded — the child's stderr writes to the
+    /// pty slave (consumed by the spawn) and parents read from this master.
+    /// `None` falls back to `child.stderr` (a regular pipe).
+    stderr_pty: Option<std::fs::File>,
+}
+
+impl SpawnedChild {
+    /// Take the stderr stream the parent should read from. Returns the pty
+    /// master when one was allocated, otherwise the piped `ChildStderr`.
+    fn take_stderr(&mut self) -> Box<dyn std::io::Read + Send> {
+        if let Some(master) = self.stderr_pty.take() {
+            Box::new(master)
+        } else {
+            Box::new(self.child.stderr.take().expect("stderr was piped"))
+        }
+    }
+}
+
+impl std::ops::Deref for SpawnedChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for SpawnedChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.child
+    }
 }
 
 /// Helper to truncate test name to fit in available space.

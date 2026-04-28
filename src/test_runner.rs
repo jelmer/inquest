@@ -158,6 +158,10 @@ pub fn spawn_stderr_forwarder<R: Read + Send + 'static>(
         loop {
             match stderr.read(&mut buffer) {
                 Ok(0) => break, // EOF
+                // A pty master returns EIO (instead of EOF) when the slave
+                // has been closed and there's no more data. Treat as EOF.
+                #[cfg(unix)]
+                Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
                 Ok(n) => {
                     // Write stderr output directly to stderr via progress bar suspension
                     progress_bar.suspend(|| {
