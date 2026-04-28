@@ -1130,6 +1130,13 @@ impl<'a> TestExecutor<'a> {
                 Ok(buf)
             });
 
+            let stderr = child.stderr.take().expect("stderr was piped");
+            let stderr_thread = crate::test_runner::spawn_stderr_forwarder(
+                stderr,
+                ProgressBar::hidden(),
+                self.config.stderr_capture.clone(),
+            );
+
             let cancel_check = self
                 .config
                 .cancellation_token
@@ -1158,6 +1165,15 @@ impl<'a> TestExecutor<'a> {
                 .map_err(|_| {
                     crate::error::Error::CommandExecution(
                         "stdout reader thread panicked".to_string(),
+                    )
+                })?
+                .map_err(crate::error::Error::Io)?;
+
+            stderr_thread
+                .join()
+                .map_err(|_| {
+                    crate::error::Error::CommandExecution(
+                        "stderr reader thread panicked".to_string(),
                     )
                 })?
                 .map_err(crate::error::Error::Io)?;
