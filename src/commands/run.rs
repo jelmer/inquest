@@ -100,6 +100,9 @@ pub struct RunCommand {
     /// the MCP server's `inq_cancel` tool stop a run that was handed off
     /// to the caller via `background_after`.
     pub cancellation_token: Option<crate::test_executor::CancellationToken>,
+    /// Active profile name from `--profile` / `INQ_PROFILE` (None = base
+    /// only or `default_profile` from the config file).
+    pub profile: Option<String>,
 }
 
 impl RunCommand {
@@ -169,6 +172,7 @@ impl RunCommand {
     /// If a `stderr_capture` buffer is supplied, its contents are persisted
     /// alongside the run and the buffer is drained so the next iteration
     /// starts clean.
+    #[allow(clippy::too_many_arguments)]
     fn persist(
         &self,
         ui: &mut dyn UI,
@@ -177,6 +181,7 @@ impl RunCommand {
         historical_times: &std::collections::HashMap<crate::repository::TestId, Duration>,
         filter_tags: &[String],
         stderr_capture: Option<&std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+        active_profile: Option<&str>,
     ) -> Result<CliRunOutput> {
         let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
             ui,
@@ -185,6 +190,7 @@ impl RunCommand {
             self.partial,
             historical_times,
             filter_tags,
+            active_profile.map(|s| s.to_string()),
         )?;
         if let Some(buf) = stderr_capture {
             let bytes = match buf.lock() {
@@ -203,7 +209,7 @@ impl RunCommand {
     pub fn execute_returning_run_id(&self, ui: &mut dyn UI) -> Result<CliRunOutput> {
         let base = Path::new(self.base_path.as_deref().unwrap_or("."));
 
-        if self.auto && crate::config::TestrConfig::find_in_directory(base).is_err() {
+        if self.auto && crate::config::ConfigFile::find_in_directory(base).is_err() {
             let auto_cmd = crate::commands::auto::AutoCommand::new(self.base_path.clone());
             let exit_code = auto_cmd.execute(ui)?;
             if exit_code != 0 {
@@ -214,7 +220,12 @@ impl RunCommand {
         let mut repo =
             open_or_init_repository(self.base_path.as_deref(), self.force_init || self.auto, ui)?;
 
-        let test_cmd = TestCommand::from_directory(base)?;
+        let (config_file, _config_path) = crate::config::ConfigFile::find_in_directory(base)?;
+        let (resolved, active_profile) = config_file.resolve(self.profile.as_deref())?;
+        let test_cmd = TestCommand::new(resolved, base.to_path_buf());
+        if let Some(ref name) = active_profile {
+            ui.output(&format!("Using profile: {}", name))?;
+        }
 
         // CLI overrides config; fall back to whatever `filter_tags` is set to
         // in the config file when no CLI flag was given.
@@ -398,6 +409,7 @@ impl RunCommand {
                 &historical_times,
                 &filter_tags,
                 Some(&stderr_capture),
+                active_profile.as_deref(),
             );
         }
 
@@ -474,6 +486,7 @@ impl RunCommand {
                         &historical_times,
                         &filter_tags,
                         Some(&stderr_capture),
+                        active_profile.as_deref(),
                     )?;
 
                     if result.exit_code != 0 {
@@ -499,6 +512,7 @@ impl RunCommand {
                     &historical_times,
                     &filter_tags,
                     Some(&stderr_capture),
+                    active_profile.as_deref(),
                 )
             }
         } else if self.until_failure {
@@ -553,6 +567,7 @@ impl RunCommand {
                     &historical_times,
                     &filter_tags,
                     Some(&stderr_capture),
+                    active_profile.as_deref(),
                 )?;
 
                 if result.exit_code != 0 {
@@ -584,6 +599,7 @@ impl RunCommand {
                 &historical_times,
                 &filter_tags,
                 Some(&stderr_capture),
+                active_profile.as_deref(),
             )
         } else {
             let (run_id, writer) = repo.begin_test_run_raw()?;
@@ -606,6 +622,7 @@ impl RunCommand {
                 &historical_times,
                 &filter_tags,
                 Some(&stderr_capture),
+                active_profile.as_deref(),
             )
         }
     }

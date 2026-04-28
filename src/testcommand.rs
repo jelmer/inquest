@@ -3,7 +3,7 @@
 //! This module provides the TestCommand struct which handles executing
 //! test commands based on configuration from inquest.toml or .testr.conf.
 
-use crate::config::TestrConfig;
+use crate::config::{ConfigFile, TestrConfig};
 use crate::error::{Error, Result};
 use crate::repository::TestId;
 use std::collections::HashMap;
@@ -31,6 +31,17 @@ impl TestCommand {
     pub fn from_directory(dir: &Path) -> Result<Self> {
         let (config, _path) = TestrConfig::find_in_directory(dir)?;
         Ok(TestCommand::new(config, dir.to_path_buf()))
+    }
+
+    /// Load TestCommand from a configuration file in the given directory,
+    /// applying the named profile (if any) on top of the base configuration.
+    ///
+    /// `profile` is the name to select; `None` means apply the file's
+    /// `default_profile` if present, else use the base layer alone.
+    pub fn from_directory_with_profile(dir: &Path, profile: Option<&str>) -> Result<Self> {
+        let (cfg, _path) = ConfigFile::find_in_directory(dir)?;
+        let (resolved, _active) = cfg.resolve(profile)?;
+        Ok(TestCommand::new(resolved, dir.to_path_buf()))
     }
 
     /// Execute the test_run_concurrency callout to determine concurrency

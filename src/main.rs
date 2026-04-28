@@ -21,6 +21,12 @@ struct Cli {
     #[arg(short = 'C', long, global = true, value_hint = ValueHint::DirPath)]
     directory: Option<String>,
 
+    /// Select a named profile from inquest.toml. Falls back to the
+    /// `INQ_PROFILE` environment variable, then `default_profile`
+    /// from the config file. Use "default" to force the base layer.
+    #[arg(long, global = true, value_name = "NAME")]
+    profile: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -89,6 +95,10 @@ enum Commands {
         /// Number of parallel test workers
         #[arg(long, short = 'j', value_name = "N", alias = "concurrency", num_args = 0..=1, default_missing_value = "0")]
         parallel: Option<usize>,
+
+        /// List defined profile names from the config file and exit
+        #[arg(long)]
+        list_profiles: bool,
     },
 
     /// Show quickstart documentation
@@ -411,6 +421,14 @@ fn main() {
 
     let mut ui = CliUI;
 
+    // CLI flag wins over the env var; the config file's `default_profile`
+    // is only consulted when neither is set, and that lookup happens
+    // inside `ConfigFile::resolve`.
+    let profile = cli
+        .profile
+        .clone()
+        .or_else(|| std::env::var(inquest::config::PROFILE_ENV_VAR).ok());
+
     let command = cli.command.unwrap_or(Commands::Run {
         failing: false,
         force_init: false,
@@ -475,6 +493,7 @@ fn main() {
             no_output_timeout,
             order,
             parallel,
+            list_profiles,
         } => {
             let cmd = ConfigCommand {
                 base_path: cli.directory,
@@ -483,6 +502,8 @@ fn main() {
                 no_output_timeout,
                 order,
                 concurrency: parallel,
+                profile: profile.clone(),
+                list_profiles,
             };
             cmd.execute(&mut ui)
         }
@@ -759,6 +780,7 @@ fn main() {
                 run_id_slot: None,
                 cancellation_token: None,
                 test_ids_override: None,
+                profile: profile.clone(),
             };
             cmd.execute(&mut ui)
         }

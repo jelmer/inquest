@@ -128,7 +128,8 @@ pub fn update_test_times_from_run(repo: &mut dyn Repository, test_run: &TestRun)
     Ok(())
 }
 
-/// Capture and store run metadata (git commit, command, concurrency, duration, exit code)
+/// Capture and store run metadata (git commit, command, concurrency, duration, exit code).
+#[allow(clippy::too_many_arguments)]
 pub fn store_run_metadata(
     repo: &mut dyn Repository,
     run_id: &RunId,
@@ -137,6 +138,7 @@ pub fn store_run_metadata(
     duration: Option<std::time::Duration>,
     exit_code: Option<i32>,
     test_args: Option<Vec<String>>,
+    profile: Option<String>,
 ) -> Result<()> {
     let git_commit = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -172,6 +174,7 @@ pub fn store_run_metadata(
         duration_secs: duration.map(|d| d.as_secs_f64()),
         exit_code,
         test_args,
+        profile,
     };
 
     repo.set_run_metadata(run_id, metadata)
@@ -293,6 +296,7 @@ pub fn warn_slow_tests(
 ///
 /// Returns `(exit_code, run_id)`. The `run_id` is returned because `output`
 /// is consumed, saving the caller from cloning it beforehand.
+#[allow(clippy::too_many_arguments)]
 pub fn persist_and_display_run(
     ui: &mut dyn UI,
     repo: &mut dyn Repository,
@@ -300,6 +304,7 @@ pub fn persist_and_display_run(
     partial: bool,
     historical_times: &std::collections::HashMap<crate::repository::TestId, std::time::Duration>,
     filter_tags: &[String],
+    profile: Option<String>,
 ) -> Result<(i32, RunId)> {
     let exit_code = output.exit_code();
     let crate::test_executor::RunOutput {
@@ -328,6 +333,7 @@ pub fn persist_and_display_run(
         Some(duration),
         Some(exit_code),
         test_args,
+        profile.clone(),
     )?;
 
     display_test_summary(ui, &run_id, &combined_run, filter_tags)?;
@@ -590,9 +596,16 @@ mod tests {
 
         let mut ui = crate::ui::test_ui::TestUI::new();
         let historical = std::collections::HashMap::new();
-        let (exit_code, run_id) =
-            persist_and_display_run(&mut ui, repo.as_mut(), output, false, &historical, &[])
-                .unwrap();
+        let (exit_code, run_id) = persist_and_display_run(
+            &mut ui,
+            repo.as_mut(),
+            output,
+            false,
+            &historical,
+            &[],
+            None,
+        )
+        .unwrap();
 
         assert_eq!(exit_code, 0);
         assert_eq!(run_id.as_str(), "1");
@@ -672,9 +685,16 @@ mod tests {
 
         let mut ui = crate::ui::test_ui::TestUI::new();
         let historical = std::collections::HashMap::new();
-        let (exit_code, run_id) =
-            persist_and_display_run(&mut ui, repo.as_mut(), output, false, &historical, &[])
-                .unwrap();
+        let (exit_code, run_id) = persist_and_display_run(
+            &mut ui,
+            repo.as_mut(),
+            output,
+            false,
+            &historical,
+            &[],
+            None,
+        )
+        .unwrap();
 
         assert_eq!(exit_code, 1);
         assert_eq!(run_id.as_str(), "0");

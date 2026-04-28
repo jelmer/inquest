@@ -46,6 +46,10 @@ impl Command for InfoCommand {
             ui.output(&format!("Command: {}", command))?;
         }
 
+        if let Some(ref profile) = metadata.profile {
+            ui.output(&format!("Profile: {}", profile))?;
+        }
+
         if let Some(concurrency) = metadata.concurrency {
             ui.output(&format!("Concurrency: {}", concurrency))?;
         }
@@ -116,6 +120,7 @@ mod tests {
                 duration_secs: Some(12.5),
                 exit_code: Some(1),
                 test_args: None,
+                profile: None,
             },
         )
         .unwrap();
@@ -159,6 +164,7 @@ mod tests {
                 duration_secs: None,
                 exit_code: Some(0),
                 test_args: None,
+                profile: None,
             },
         )
         .unwrap();
