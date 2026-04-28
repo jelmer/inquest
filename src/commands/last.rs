@@ -5,26 +5,13 @@ use crate::commands::Command;
 use crate::error::Result;
 use crate::ui::UI;
 
-/// Maximum number of stderr bytes to print inline. Beyond this, we show only
-/// the tail and tell the user how many bytes were elided.
-const STDERR_DISPLAY_LIMIT: usize = 16 * 1024;
-
 fn display_captured_stderr(ui: &mut dyn UI, stderr: &[u8]) -> Result<()> {
     if stderr.is_empty() {
         return Ok(());
     }
     ui.output("")?;
     ui.output("Captured stderr:")?;
-    if stderr.len() > STDERR_DISPLAY_LIMIT {
-        let elided = stderr.len() - STDERR_DISPLAY_LIMIT;
-        ui.output(&format!(
-            "  [{} bytes elided, showing last {}]",
-            elided, STDERR_DISPLAY_LIMIT
-        ))?;
-        ui.output_bytes(&stderr[stderr.len() - STDERR_DISPLAY_LIMIT..])?;
-    } else {
-        ui.output_bytes(stderr)?;
-    }
+    ui.output_bytes(stderr)?;
     if !stderr.ends_with(b"\n") {
         ui.output("")?;
     }
@@ -310,6 +297,42 @@ mod tests {
         );
         let combined: Vec<u8> = ui.bytes_output.iter().flatten().copied().collect();
         assert_eq!(combined, b"runner crashed: oops\n");
+    }
+
+    #[test]
+    fn test_last_command_shows_full_stderr_without_truncation() {
+        // Larger than the previous 16 KiB cutoff. The full payload should
+        // make it through unmodified and no "elided" notice should appear.
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut test_run = TestRun::new(RunId::new("0"));
+        test_run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        test_run.add_result(TestResult {
+            test_id: TestId::new("test1"),
+            status: TestStatus::Success,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec![],
+        });
+        let run_id = repo.insert_test_run(test_run).unwrap();
+
+        let payload: Vec<u8> = (0..50_000).map(|i| b"abcdef\n"[i % 7]).collect();
+        repo.set_run_stderr(&run_id, &payload).unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = LastCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        cmd.execute(&mut ui).unwrap();
+
+        assert!(
+            !ui.output.iter().any(|s| s.contains("elided")),
+            "expected no truncation notice in {:?}",
+            ui.output
+        );
+        let combined: Vec<u8> = ui.bytes_output.iter().flatten().copied().collect();
+        assert_eq!(combined, payload);
     }
 
     #[test]
