@@ -297,14 +297,24 @@ impl TestCommand {
 
         // Forward stderr chunks to the sink while polling the child for exit.
         // Chunks are also retained so we can include them in an error message
-        // if the listing command fails.
+        // if the listing command fails. We block in `recv_timeout` rather
+        // than polling so we wake the moment a chunk arrives — important for
+        // surfacing build progress with minimal latency.
         let mut captured_stderr: Vec<u8> = Vec::new();
         let deadline = std::time::Instant::now() + LIST_TIMEOUT;
         let exit_status = loop {
-            while let Ok(chunk) = stderr_rx.try_recv() {
-                let _ = stderr_sink.write_all(&chunk);
-                let _ = stderr_sink.flush();
-                captured_stderr.extend_from_slice(&chunk);
+            match stderr_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(chunk) => {
+                    let _ = stderr_sink.write_all(&chunk);
+                    let _ = stderr_sink.flush();
+                    captured_stderr.extend_from_slice(&chunk);
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // Reader thread dropped the sender — the pty/pipe hit
+                    // EOF. Fall through to wait for the child to exit.
+                }
             }
             match child.try_wait() {
                 Ok(Some(status)) => break status,
@@ -318,7 +328,6 @@ impl TestCommand {
                             cmd
                         )));
                     }
-                    std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(e) => {
                     return Err(Error::CommandExecution(format!(
