@@ -257,16 +257,25 @@ impl TestCommand {
 
         let (cmd, _temp_file) = self.build_command(None, true)?;
 
+        // Try to give the child a pty for stderr so it stays line-buffered
+        // (test runners that detect a non-tty switch to block-buffering, and
+        // the user sees no output until exit). Falls back to a regular pipe
+        // when openpty isn't available, e.g. on non-unix or in sandboxes.
+        let (stderr_stdio, pty_master) = match crate::pty::open_stderr_pty() {
+            #[cfg(unix)]
+            Some(crate::pty::PtyPair { master, slave }) => (Stdio::from(slave), Some(master)),
+            _ => (Stdio::piped(), None),
+        };
+
         let mut child = sh_command(&cmd, &self.base_dir)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(stderr_stdio)
             .spawn()
             .map_err(|e| {
                 Error::CommandExecution(format!("Failed to execute test command: {}", e))
             })?;
 
         let stdout = child.stdout.take().expect("stdout was piped");
-        let mut stderr_handle = child.stderr.take().expect("stderr was piped");
 
         // Read stdout in a background thread to avoid deadlock while the child
         // writes to both stdout and stderr.
@@ -280,11 +289,20 @@ impl TestCommand {
         // channel. The main thread forwards each chunk to `stderr_sink` as it
         // arrives, so build output surfaces live rather than only after exit.
         let (stderr_tx, stderr_rx) = mpsc::channel::<Vec<u8>>();
+        let mut stderr_handle: Box<dyn Read + Send> = match pty_master {
+            Some(master) => Box::new(master),
+            None => Box::new(child.stderr.take().expect("stderr was piped")),
+        };
         let stderr_reader = std::thread::spawn(move || -> std::io::Result<()> {
             let mut buf = [0u8; 8192];
             loop {
                 match stderr_handle.read(&mut buf) {
                     Ok(0) => return Ok(()),
+                    // A pty master returns EIO instead of EOF when the slave
+                    // has been closed and there's no more data. Treat that
+                    // as a normal end-of-stream.
+                    #[cfg(unix)]
+                    Err(e) if e.raw_os_error() == Some(libc::EIO) => return Ok(()),
                     Ok(n) => {
                         if stderr_tx.send(buf[..n].to_vec()).is_err() {
                             return Ok(());
