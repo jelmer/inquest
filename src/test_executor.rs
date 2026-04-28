@@ -1640,19 +1640,31 @@ fn compute_remaining_tests(
 /// first-completion) keeps the very first test's runtime in the denominator,
 /// so the rate signal is honest from the moment any ETA is displayed.
 ///
-/// In-flight tests get *partial credit* against `completed_duration` — at draw
-/// time, each currently-running test contributes `min(time-since-it-started,
-/// its-historical-duration)`. That removes the staircase pattern you'd
-/// otherwise see (flat ETA during a long test, then a sudden snap at
-/// completion) and produces a smoothly decaying display. We have this signal
-/// only because we already know each test's historical duration.
+/// Credit math is "wall-clock-equivalent" rather than "expected duration":
+///
+/// * In-flight tests contribute `min(time-since-start, expected)` — capped so
+///   an over-running test doesn't push fraction_done past 1.
+/// * On completion we credit the *actual* runtime (smoothly continuing where
+///   in-flight credit left off — no jump) and adjust `estimated_total` by the
+///   delta between actual and expected. A test that ran 2s faster than
+///   predicted shrinks the remaining target by 2s; one that ran 2s slower
+///   grows it by 2s.
+///
+/// The result: `completed_duration` and `estimated_total` are both denominated
+/// in wall-clock seconds, so the ratio is a stable progress signal that
+/// doesn't lurch at completion events. For parallel runs this is essential —
+/// with `c` workers, in-flight credit grows ~`c×` faster than elapsed, so
+/// projected_total ≈ sequential_total / c, matching real wall-clock.
 struct EtaState {
-    estimated_total: Duration,
     progress: Mutex<EtaProgress>,
 }
 
 struct EtaProgress {
-    /// Sum of historical durations for tests that have *finished*.
+    /// Live target. Starts at the sum of historical durations and gets
+    /// nudged by completions whose actual runtime differs from the
+    /// historical prediction.
+    estimated_total: Duration,
+    /// Sum of *actual* runtimes for tests that have finished.
     completed_duration: Duration,
     /// Tests currently running: started_at + their historical duration, used
     /// to credit partial progress between completion events.
@@ -1664,8 +1676,8 @@ struct EtaProgress {
 impl EtaState {
     fn new(estimated_total: Duration) -> Arc<Self> {
         Arc::new(EtaState {
-            estimated_total,
             progress: Mutex::new(EtaProgress {
+                estimated_total,
                 completed_duration: Duration::ZERO,
                 in_flight: HashMap::new(),
                 first_start_at: None,
@@ -1686,13 +1698,26 @@ impl EtaState {
             .insert(test_id.clone(), (Instant::now(), expected));
     }
 
-    /// Move a test from in-flight to completed. `dur` is its expected
-    /// duration (so the in-flight credit transitions cleanly into the
-    /// completed pool without a step at completion time).
-    fn add_completed(&self, test_id: &TestId, dur: Duration) {
+    /// Move a test from in-flight to completed. `expected` is its historical
+    /// duration (used to refine `estimated_total`); the actual runtime is
+    /// derived from the recorded start instant.
+    fn add_completed(&self, test_id: &TestId, expected: Duration) {
         let mut progress = self.progress.lock().unwrap();
-        progress.in_flight.remove(test_id);
-        progress.completed_duration += dur;
+        let actual = progress
+            .in_flight
+            .remove(test_id)
+            .map(|(started_at, _)| started_at.elapsed())
+            .unwrap_or(expected);
+        progress.completed_duration += actual;
+        // Refine the target: if the test ran faster than predicted, the
+        // remaining work shrinks; if slower, it grows. Without this the
+        // ratio would lurch at every completion whose actual differed from
+        // expected, which is the vast majority of completions.
+        if actual >= expected {
+            progress.estimated_total += actual - expected;
+        } else {
+            progress.estimated_total = progress.estimated_total.saturating_sub(expected - actual);
+        }
     }
 
     fn render(&self) -> String {
@@ -1710,7 +1735,7 @@ impl EtaState {
             })
             .sum();
         format_eta(
-            self.estimated_total,
+            progress.estimated_total,
             progress.completed_duration + in_flight_credit,
             first.elapsed(),
         )
@@ -2594,6 +2619,75 @@ mod helper_tests {
         // avoid is the empty-string return that you'd get if credit had
         // exceeded estimated_total).
         assert!(rendered.starts_with(" ETA: "), "got: {:?}", rendered);
+    }
+
+    #[test]
+    fn test_eta_state_completion_does_not_snap() {
+        // The classic staircase: test runs, in-flight credit ticks up, then
+        // completion snaps credit by `expected - actual_running_time`.
+        // With wall-clock-equivalent semantics that snap should be zero —
+        // completion just promotes the in-flight credit to completed without
+        // changing the (completed + in_flight_credit) sum.
+        let state = EtaState::new(Duration::from_secs(100));
+        state.mark_started(&TestId::new("a"), Duration::from_secs(60));
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Snapshot the credit just before completion.
+        let credit_before = {
+            let p = state.progress.lock().unwrap();
+            let now = Instant::now();
+            let in_flight: Duration = p
+                .in_flight
+                .values()
+                .map(|(s, e)| now.saturating_duration_since(*s).min(*e))
+                .sum();
+            p.completed_duration + in_flight
+        };
+
+        state.add_completed(&TestId::new("a"), Duration::from_secs(60));
+
+        // Snapshot just after.
+        let credit_after = {
+            let p = state.progress.lock().unwrap();
+            let now = Instant::now();
+            let in_flight: Duration = p
+                .in_flight
+                .values()
+                .map(|(s, e)| now.saturating_duration_since(*s).min(*e))
+                .sum();
+            p.completed_duration + in_flight
+        };
+
+        // Should be within ~1ms (just the time spent acquiring the lock and
+        // measuring `started_at.elapsed()`). The pre-fix code would have
+        // snapped by ~60s here (expected - actual ≈ 60s - 20ms).
+        let drift = credit_after.saturating_sub(credit_before);
+        assert!(
+            drift < Duration::from_millis(10),
+            "credit jumped by {:?} at completion (expected near zero)",
+            drift
+        );
+    }
+
+    #[test]
+    fn test_eta_state_estimated_total_shrinks_when_test_is_fast() {
+        let state = EtaState::new(Duration::from_secs(100));
+        state.mark_started(&TestId::new("a"), Duration::from_secs(60));
+        // No sleep: actual ≈ 0, expected = 60s. estimated_total should
+        // shrink by ~60s.
+        state.add_completed(&TestId::new("a"), Duration::from_secs(60));
+        let p = state.progress.lock().unwrap();
+        // Allow a small slack for the few microseconds of "actual" time.
+        assert!(
+            p.estimated_total < Duration::from_secs(41),
+            "estimated_total = {:?}, expected ≈40s",
+            p.estimated_total
+        );
+        assert!(
+            p.estimated_total > Duration::from_secs(39),
+            "estimated_total = {:?}, expected ≈40s",
+            p.estimated_total
+        );
     }
 
     #[test]
