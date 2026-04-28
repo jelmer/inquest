@@ -9,7 +9,7 @@ use inquest::error::Result;
 use inquest::ui::UI;
 
 // Explicit imports for commands not covered by wildcard
-use inquest::commands::AnalyzeIsolationCommand;
+use inquest::commands::{AnalyzeIsolationCommand, BisectCommand};
 
 #[derive(Parser)]
 #[command(name = "inq")]
@@ -216,6 +216,22 @@ enum Commands {
     AnalyzeIsolation {
         /// The test to analyze for isolation issues
         test: String,
+    },
+
+    /// Bisect git history to find the commit that broke a test
+    Bisect {
+        /// The test to bisect
+        test: String,
+
+        /// Known-good commit (defaults to the most recent recorded run where
+        /// the test passed)
+        #[arg(long, value_name = "COMMIT")]
+        good: Option<String>,
+
+        /// Known-bad commit (defaults to the most recent recorded run where
+        /// the test failed, or HEAD if none)
+        #[arg(long, value_name = "COMMIT")]
+        bad: Option<String>,
     },
 
     /// Generate shell completions
@@ -552,6 +568,12 @@ fn main() {
         }
         Commands::AnalyzeIsolation { test } => {
             let cmd = AnalyzeIsolationCommand::new(cli.directory, test);
+            cmd.execute(&mut ui)
+        }
+        Commands::Bisect { test, good, bad } => {
+            let cmd = BisectCommand::new(cli.directory, test)
+                .with_good_commit(good)
+                .with_bad_commit(bad);
             cmd.execute(&mut ui)
         }
         Commands::Completions { shell } => {

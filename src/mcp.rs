@@ -236,6 +236,19 @@ pub struct AnalyzeIsolationParam {
     pub test: String,
 }
 
+/// Parameters for the bisect tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BisectParam {
+    /// The test ID to bisect.
+    pub test: String,
+    /// Known-good commit. If omitted, the most recent recorded run where
+    /// the test passed is used. Required when no passing run is on record.
+    pub good: Option<String>,
+    /// Known-bad commit. If omitted, the most recent recorded run where
+    /// the test failed is used, falling back to HEAD.
+    pub bad: Option<String>,
+}
+
 /// Parameters for the run tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RunParam {
@@ -973,6 +986,13 @@ struct AutoResponse {
 
 #[derive(Serialize)]
 struct AnalyzeIsolationResponse {
+    exit_code: i32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    output: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct BisectResponse {
     exit_code: i32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     output: Vec<String>,
@@ -2421,6 +2441,54 @@ impl InquestMcpService {
         let mut all_output = ui.output;
         all_output.extend(ui.errors);
         ok_json(&AnalyzeIsolationResponse {
+            exit_code,
+            output: all_output,
+        })
+    }
+
+    #[tool(
+        description = "Bisect git history to find the commit that broke a test. Walks recorded run history to seed good/bad commits, then drives `git bisect run` with `inq run <test>` as the script. Pass `good` and/or `bad` to override the auto-detected endpoints.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn inq_bisect(
+        &self,
+        params: Parameters<BisectParam>,
+        peer: Peer<RoleServer>,
+        meta: Meta,
+    ) -> Result<CallToolResult, ErrorData> {
+        let reporter = ProgressReporter::from_meta(&peer, &meta);
+        self.inq_bisect_impl(params.0, reporter).await
+    }
+
+    async fn inq_bisect_impl(
+        &self,
+        params: BisectParam,
+        reporter: Option<ProgressReporter>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let dir = self.dir_str();
+        let BisectParam { test, good, bad } = params;
+        let (exit_code, ui) = run_blocking_with_progress(reporter, "bisecting", move || {
+            let mut ui = CollectUI::new();
+            let cmd = crate::commands::BisectCommand::new(Some(dir), test)
+                .with_good_commit(good)
+                .with_bad_commit(bad);
+            use crate::commands::Command;
+            let result = cmd.execute(&mut ui);
+            (result, ui)
+        })
+        .await
+        .map(|(result, ui)| result.map(|code| (code, ui)))
+        .map_err(|e| ErrorData::internal_error(format!("inq_bisect panicked: {}", e), None))?
+        .map_err(to_mcp_err)?;
+
+        let mut all_output = ui.output;
+        all_output.extend(ui.errors);
+        ok_json(&BisectResponse {
             exit_code,
             output: all_output,
         })
