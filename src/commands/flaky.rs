@@ -154,19 +154,39 @@ mod tests {
         );
 
         let stats = repo.get_flakiness(5).unwrap();
-        assert_eq!(stats.len(), 3);
+        // stable_test never failed, so it must not appear in the flakiness report.
+        assert_eq!(stats.len(), 2);
+        assert!(!stats.iter().any(|s| s.test_id.as_str() == "stable_test"));
         assert_eq!(stats[0].test_id.as_str(), "flapping_test");
         assert_eq!(stats[0].transitions, 5);
         assert_eq!(stats[0].runs, 6);
         assert_eq!(stats[0].failures, 3);
         // Broken test should rank below flapping (more failures, no transitions).
-        assert!(stats.iter().any(|s| s.test_id.as_str() == "broken_test"));
         let broken = stats
             .iter()
             .find(|s| s.test_id.as_str() == "broken_test")
             .unwrap();
         assert_eq!(broken.transitions, 0);
         assert_eq!(broken.failures, 6);
+    }
+
+    #[test]
+    fn never_failed_tests_are_excluded() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::Success;
+        build_history(
+            repo.as_mut(),
+            &[(
+                "always_passes",
+                &[Success, Success, Success, Success, Success],
+            )],
+        );
+
+        let stats = repo.get_flakiness(2).unwrap();
+        assert!(stats.is_empty());
     }
 
     #[test]

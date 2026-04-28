@@ -235,6 +235,11 @@ pub fn summarise_flakiness(
                 return None;
             }
             let failures = statuses.iter().filter(|&&f| f).count() as u32;
+            // Tests that have never failed aren't flaky by any definition —
+            // exclude them so the report focuses on tests that actually flap.
+            if failures == 0 {
+                return None;
+            }
             let transitions = statuses.windows(2).filter(|w| w[0] != w[1]).count() as u32;
             let denom = runs.saturating_sub(1).max(1) as f64;
             let flakiness_score = transitions as f64 / denom;
