@@ -21,6 +21,8 @@ struct TestUI {
 
 impl TestUI {
     fn new() -> Self {
+        // Keep progress bars out of `cargo test`'s captured stdout. Idempotent.
+        inquest::config::disable_progress_in_process();
         TestUI {
             output: Vec::new(),
             errors: Vec::new(),

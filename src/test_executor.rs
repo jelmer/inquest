@@ -14,7 +14,7 @@ use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 use crate::ui::UI;
 use crate::watchdog::{wait_with_timeout_and_cancel, TestWatchdog, TimeoutReason};
-use indicatif::{ProgressBar, ProgressState, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -751,7 +751,14 @@ impl<'a> TestExecutor<'a> {
             None
         };
 
-        let multi_progress = indicatif::MultiProgress::new();
+        // Force MultiProgress hidden when progress is disabled — adding a
+        // bar to MultiProgress overrides the bar's own draw target, so just
+        // hiding the bars isn't enough.
+        let multi_progress = if crate::config::progress_disabled() {
+            indicatif::MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+        } else {
+            indicatif::MultiProgress::new()
+        };
         let overall_bar = multi_progress.add(create_progress_bar(
             all_tests.len() as u64,
             overall_bar_width,
@@ -814,12 +821,17 @@ impl<'a> TestExecutor<'a> {
                     None
                 };
 
-                let worker_bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
-                worker_bar.set_style(make_worker_style(
-                    worker_id,
-                    worker_bar_width,
-                    worker_eta_state.clone(),
-                ));
+                let worker_bar = if crate::config::progress_disabled() {
+                    multi_progress.add(ProgressBar::hidden())
+                } else {
+                    let bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
+                    bar.set_style(make_worker_style(
+                        worker_id,
+                        worker_bar_width,
+                        worker_eta_state.clone(),
+                    ));
+                    bar
+                };
 
                 let instance_id = instance_ids.get(worker_id).map(|s| s.as_str());
                 let (cmd_str, temp_file) = test_cmd.build_command_full(
@@ -1344,6 +1356,7 @@ fn spawn_in_process_group(
     cmd.arg("-c")
         .arg(cmd_str)
         .current_dir(working_dir)
+        .env(crate::config::NO_PROGRESS_ENV_VAR, "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
@@ -1455,6 +1468,9 @@ fn create_progress_bar(
     bar_width: usize,
     eta_state: Option<Arc<EtaState>>,
 ) -> ProgressBar {
+    if crate::config::progress_disabled() {
+        return ProgressBar::hidden();
+    }
     let pb = ProgressBar::new(total);
     let template = format!(
         "[{{elapsed_precise}}{{eta_hist}}] {{bar:{}.cyan/blue}} {{pos}}/{{len}} {{msg}}",

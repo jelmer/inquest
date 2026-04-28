@@ -177,7 +177,7 @@ fn upgrade_config(base: &Path, testr_conf_path: &Path, ui: &mut dyn UI) -> Resul
 }
 
 fn make_progress_bar(total: u64) -> ProgressBar {
-    if total == 0 {
+    if total == 0 || crate::config::progress_disabled() {
         return ProgressBar::hidden();
     }
     let pb = ProgressBar::new(total);

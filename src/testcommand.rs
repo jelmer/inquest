@@ -3,7 +3,7 @@
 //! This module provides the TestCommand struct which handles executing
 //! test commands based on configuration from inquest.toml or .testr.conf.
 
-use crate::config::{ConfigFile, TestrConfig};
+use crate::config::{ConfigFile, TestrConfig, NO_PROGRESS_ENV_VAR};
 use crate::error::{Error, Result};
 use crate::repository::TestId;
 use std::collections::HashMap;
@@ -11,6 +11,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::NamedTempFile;
+
+/// Build a `sh -c <cmd_str>` command rooted at `working_dir` with
+/// `INQ_NO_PROGRESS=1` exported so any nested `inq` invocations stay quiet.
+fn sh_command(cmd_str: &str, working_dir: &Path) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(cmd_str)
+        .current_dir(working_dir)
+        .env(NO_PROGRESS_ENV_VAR, "1");
+    cmd
+}
 
 /// Test command executor
 #[derive(Debug)]
@@ -54,14 +65,9 @@ impl TestCommand {
         };
 
         // Execute the command
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(&self.base_dir)
-            .output()
-            .map_err(|e| {
-                Error::CommandExecution(format!("Failed to execute test_run_concurrency: {}", e))
-            })?;
+        let output = sh_command(cmd, &self.base_dir).output().map_err(|e| {
+            Error::CommandExecution(format!("Failed to execute test_run_concurrency: {}", e))
+        })?;
 
         if !output.status.success() {
             return Err(Error::CommandExecution(format!(
@@ -251,10 +257,7 @@ impl TestCommand {
 
         let (cmd, _temp_file) = self.build_command(None, true)?;
 
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .current_dir(&self.base_dir)
+        let mut child = sh_command(&cmd, &self.base_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -400,10 +403,7 @@ impl TestCommand {
         let (cmd, temp_file) = self.build_command(test_ids, false)?;
 
         // Spawn the test process
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .current_dir(&self.base_dir)
+        let child = sh_command(&cmd, &self.base_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -425,10 +425,7 @@ impl TestCommand {
         // Execute the provision command with the count
         let full_cmd = cmd.replace("$INSTANCE_COUNT", &count.to_string());
 
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(&full_cmd)
-            .current_dir(&self.base_dir)
+        let output = sh_command(&full_cmd, &self.base_dir)
             .output()
             .map_err(|e| {
                 Error::CommandExecution(format!("Failed to execute instance_provision: {}", e))
@@ -473,10 +470,7 @@ impl TestCommand {
         for instance_id in instance_ids {
             let full_cmd = cmd.replace("$INSTANCE_ID", instance_id);
 
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(&full_cmd)
-                .current_dir(&self.base_dir)
+            let output = sh_command(&full_cmd, &self.base_dir)
                 .output()
                 .map_err(|e| {
                     Error::CommandExecution(format!(
