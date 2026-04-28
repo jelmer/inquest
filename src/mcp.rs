@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::commands::utils::{open_or_init_repository, open_repository, resolve_run_id};
 use crate::repository::inquest::InquestRepositoryFactory;
-use crate::repository::{Repository, RepositoryFactory, TestResult, TestStatus};
+use crate::repository::{estimate_progress, Repository, RepositoryFactory, TestResult, TestStatus};
 use crate::subunit_stream;
 use crate::testcommand::TestCommand;
 
@@ -507,38 +507,6 @@ fn head_tail_truncate(s: &str, max_lines: usize) -> String {
         head.join("\n"),
         tail.join("\n")
     )
-}
-
-/// Derive progress estimates for an in-progress run from historical test times.
-///
-/// Returns `(total_expected, percent_complete, estimated_remaining_secs)`. Each
-/// element is `None` when it can't be estimated — specifically, all three are
-/// `None` when no historical data is available (first run in a new repo).
-///
-/// `percent_complete` is in `[0, 1]`. `estimated_remaining_secs` sums the
-/// historical durations of tests that haven't yet appeared in the run's
-/// observed results. It ignores tests currently executing — at worst the ETA
-/// is slightly pessimistic by one test's duration.
-fn estimate_progress(
-    historical: &std::collections::HashMap<crate::repository::TestId, Duration>,
-    test_run: &crate::repository::TestRun,
-) -> (Option<usize>, Option<f64>, Option<f64>) {
-    if historical.is_empty() {
-        return (None, None, None);
-    }
-    let total_expected = historical.len();
-    let observed = test_run.total_tests();
-    let percent = if total_expected > 0 {
-        Some((observed as f64 / total_expected as f64).min(1.0))
-    } else {
-        None
-    };
-    let remaining: Duration = historical
-        .iter()
-        .filter(|(id, _)| !test_run.results.contains_key(*id))
-        .map(|(_, d)| *d)
-        .sum();
-    (Some(total_expected), percent, Some(remaining.as_secs_f64()))
 }
 
 /// Extract the first non-empty line of a message, trimmed and capped at
@@ -2132,15 +2100,26 @@ impl InquestMcpService {
                 let test_run = repo.get_test_run(run_id).ok()?;
                 let observed = test_run.total_tests();
 
+                // `test_run.timestamp` is set to `Utc::now()` by parse_stream
+                // when reading back from disk and would always show as ~0s.
+                // Prefer the recorded start time from the backend.
+                let started_at = repo
+                    .get_run_started_at(run_id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(test_run.timestamp);
+                let elapsed_secs = (now - started_at).num_seconds().max(0);
+                let elapsed = std::time::Duration::from_secs(elapsed_secs as u64);
+
                 let (total_expected, percent_complete, estimated_remaining_secs) =
-                    estimate_progress(&historical, &test_run);
+                    estimate_progress(&historical, &test_run, Some(elapsed));
 
                 Some(RunningEntry {
                     id: run_id.as_str().to_string(),
                     total_tests: observed,
                     passed: test_run.count_successes(),
                     failed: test_run.count_failures(),
-                    elapsed_secs: (now - test_run.timestamp).num_seconds(),
+                    elapsed_secs,
                     total_expected,
                     percent_complete,
                     estimated_remaining_secs,

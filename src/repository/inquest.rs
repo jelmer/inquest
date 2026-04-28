@@ -700,6 +700,25 @@ impl Repository for InquestRepository {
         }
     }
 
+    fn get_run_started_at(&self, run_id: &RunId) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        let result = self.conn.query_row(
+            "SELECT timestamp FROM runs WHERE id = ?",
+            [run_id.as_str()],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(ts) => match chrono::DateTime::parse_from_rfc3339(&ts) {
+                Ok(dt) => Ok(Some(dt.with_timezone(&chrono::Utc))),
+                Err(e) => Err(Error::Other(format!(
+                    "Invalid timestamp for run {}: {}",
+                    run_id, e
+                ))),
+            },
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     fn is_run_in_progress(&self, run_id: &RunId) -> Result<bool> {
         let lock_path = self.run_lock_path(run_id);
         let contents = match fs::read_to_string(&lock_path) {

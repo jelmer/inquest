@@ -6,6 +6,7 @@ use crate::repository::inquest::InquestRepositoryFactory;
 use crate::repository::testr::FileRepositoryFactory;
 use crate::repository::{Repository, RepositoryFactory};
 use crate::ui::UI;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 
 /// Command to upgrade a legacy .testrepository/ repository to the new .inquest/ format.
@@ -63,10 +64,13 @@ impl Command for UpgradeCommand {
             new_path.display(),
         ))?;
 
+        let progress = make_progress_bar(total_runs as u64);
         for run_id in &run_ids {
             let test_run = old_repo.get_test_run(run_id)?;
             new_repo.insert_test_run(test_run)?;
+            progress.inc(1);
         }
+        progress.finish_and_clear();
 
         // Restore the correct failing tests state from the old repo.
         // During run migration, each insert_test_run called replace_failing_tests,
@@ -96,6 +100,20 @@ impl Command for UpgradeCommand {
     fn help(&self) -> &str {
         "Upgrade a .testrepository/ to .inquest/ format"
     }
+}
+
+fn make_progress_bar(total: u64) -> ProgressBar {
+    if total == 0 {
+        return ProgressBar::hidden();
+    }
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} runs ({eta} remaining)")
+            .unwrap()
+            .progress_chars("█▓▒░  "),
+    );
+    pb
 }
 
 /// Restore the old repo's failing tests state in the new repo
