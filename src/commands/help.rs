@@ -177,6 +177,29 @@ Example:
   inq list-tests
 "#
                 }
+                "prune" => {
+                    r#"inq prune - Drop older test runs from the repository
+
+Usage: inq prune <SELECTION> [--dry-run]
+
+Selection modes (exactly one required):
+  --keep N              Keep the N most recent runs and prune the rest
+  --older-than DURATION Prune runs older than DURATION (s/m/h/d/w suffix)
+  --run ID              Prune the run with the given ID (repeatable)
+  --all                 Prune every run in the repository
+
+Options:
+  --dry-run             Show what would be pruned without modifying anything
+
+In-progress runs are always skipped.
+
+Examples:
+  inq prune --keep 50
+  inq prune --older-than 30d
+  inq prune --run 3 --run 7
+  inq prune --all --dry-run
+"#
+                }
                 "quickstart" => {
                     r#"inq quickstart - Show quickstart documentation
 
@@ -224,6 +247,7 @@ Available commands:
   stats         Show repository statistics
   slowest       Show the slowest tests
   list-tests    List available tests
+  prune         Drop older test runs from the repository
   quickstart    Show quickstart documentation
   help          Show this help message
 

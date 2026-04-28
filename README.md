@@ -211,6 +211,20 @@ Example:
 inq log 'test.module.TestCase.*'
 ```
 
+### `inq prune`
+
+Drop older test runs from the repository. Exactly one selection mode must be
+given:
+
+- `--keep <N>`: Keep the N most recent runs and prune the rest
+- `--older-than <DURATION>`: Prune runs older than the given duration. Accepts
+  `s`, `m`, `h`, `d`, and `w` suffixes (e.g. `30d`, `2w`, `12h`)
+- `--run <ID>`: Prune the named run by ID. May be given multiple times
+- `--all`: Prune every run in the repository
+
+Pass `--dry-run` to see which runs would be pruned without modifying the
+repository. In-progress runs are always skipped.
+
 ### `inq list-tests`
 
 List all available tests by querying the test command with the list option from configuration.
