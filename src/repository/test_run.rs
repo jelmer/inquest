@@ -344,6 +344,10 @@ pub struct RunMetadata {
     /// Extra arguments passed to the test command after `--`. Captured so
     /// `inq rerun` can reproduce the original invocation.
     pub test_args: Option<Vec<String>>,
+    /// Active profile name from `--profile` / `INQ_PROFILE` /
+    /// `default_profile`, when one was applied. `None` for runs that used
+    /// the base layer alone, including all runs predating profile support.
+    pub profile: Option<String>,
 }
 
 /// A complete test run containing results for multiple tests.

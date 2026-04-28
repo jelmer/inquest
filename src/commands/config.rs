@@ -1,7 +1,7 @@
 //! Show the resolved effective configuration
 
 use crate::commands::Command;
-use crate::config::{TestrConfig, TimeoutSetting};
+use crate::config::{ConfigFile, TestrConfig, TimeoutSetting};
 use crate::error::Result;
 use crate::ordering::TestOrder;
 use crate::ui::UI;
@@ -9,19 +9,21 @@ use std::path::Path;
 use std::time::Duration;
 
 /// Origin of a resolved configuration value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Source {
     Cli,
+    Profile(String),
     Config,
     Default,
 }
 
 impl Source {
-    fn label(self) -> &'static str {
+    fn label(&self) -> String {
         match self {
-            Source::Cli => "cli",
-            Source::Config => "config",
-            Source::Default => "default",
+            Source::Cli => "cli".to_string(),
+            Source::Profile(name) => format!("profile:{}", name),
+            Source::Config => "config".to_string(),
+            Source::Default => "default".to_string(),
         }
     }
 }
@@ -41,6 +43,10 @@ pub struct ConfigCommand {
     pub order: Option<String>,
     /// Concurrency override from CLI.
     pub concurrency: Option<usize>,
+    /// Active profile name (from `--profile` / `INQ_PROFILE`).
+    pub profile: Option<String>,
+    /// When set, list available profiles and exit instead of resolving.
+    pub list_profiles: bool,
 }
 
 impl ConfigCommand {
@@ -53,6 +59,8 @@ impl ConfigCommand {
             no_output_timeout: None,
             order: None,
             concurrency: None,
+            profile: None,
+            list_profiles: false,
         }
     }
 }
@@ -83,7 +91,11 @@ impl Command for ConfigCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
         let base = Path::new(self.base_path.as_deref().unwrap_or("."));
 
-        let loaded = TestrConfig::find_in_directory(base).ok();
+        let loaded = ConfigFile::find_in_directory(base).ok();
+
+        if self.list_profiles {
+            return run_list_profiles(ui, &loaded);
+        }
 
         match &loaded {
             Some((_, path)) => {
@@ -94,41 +106,128 @@ impl Command for ConfigCommand {
             }
         }
         ui.output(&format!("Working directory: {}", base.display()))?;
+
+        // Determine the active profile and the resolved config. When no
+        // config file is present, fall back to defaults so callers can
+        // still see CLI overrides resolved.
+        let (resolved, active_profile, profile_fields) = match &loaded {
+            Some((cfg, _)) => {
+                let (resolved, active) = cfg.resolve(self.profile.as_deref())?;
+                let fields = cfg.fields_from_profile(active.as_deref());
+                (resolved, active, fields)
+            }
+            None => (
+                TestrConfig::default(),
+                None,
+                std::collections::HashSet::new(),
+            ),
+        };
+
+        if let Some(ref name) = active_profile {
+            ui.output(&format!("Active profile: {}", name))?;
+        }
         ui.output("")?;
 
-        let config = loaded.as_ref().map(|(c, _)| c.clone()).unwrap_or_default();
+        let config_or_profile = |key: &str| -> Source {
+            if profile_fields.contains(key) {
+                Source::Profile(active_profile.clone().unwrap_or_default())
+            } else {
+                Source::Config
+            }
+        };
 
-        if !config.test_command.is_empty() {
-            print_value(ui, "test_command", &config.test_command, Source::Config)?;
+        if !resolved.test_command.is_empty() {
+            print_value(
+                ui,
+                "test_command",
+                &resolved.test_command,
+                config_or_profile("test_command"),
+            )?;
         } else {
             print_unset(ui, "test_command", "(unset)")?;
         }
 
-        print_optional_string(ui, "test_id_option", &config.test_id_option)?;
-        print_optional_string(ui, "test_list_option", &config.test_list_option)?;
-        print_optional_string(ui, "test_id_list_default", &config.test_id_list_default)?;
-        print_optional_string(ui, "test_run_concurrency", &config.test_run_concurrency)?;
-        print_optional_string(ui, "filter_tags", &config.filter_tags)?;
-        print_optional_string(ui, "group_regex", &config.group_regex)?;
-        print_optional_string(ui, "instance_provision", &config.instance_provision)?;
-        print_optional_string(ui, "instance_execute", &config.instance_execute)?;
-        print_optional_string(ui, "instance_dispose", &config.instance_dispose)?;
+        print_optional_string(
+            ui,
+            "test_id_option",
+            &resolved.test_id_option,
+            config_or_profile("test_id_option"),
+        )?;
+        print_optional_string(
+            ui,
+            "test_list_option",
+            &resolved.test_list_option,
+            config_or_profile("test_list_option"),
+        )?;
+        print_optional_string(
+            ui,
+            "test_id_list_default",
+            &resolved.test_id_list_default,
+            config_or_profile("test_id_list_default"),
+        )?;
+        print_optional_string(
+            ui,
+            "test_run_concurrency",
+            &resolved.test_run_concurrency,
+            config_or_profile("test_run_concurrency"),
+        )?;
+        print_optional_string(
+            ui,
+            "filter_tags",
+            &resolved.filter_tags,
+            config_or_profile("filter_tags"),
+        )?;
+        print_optional_string(
+            ui,
+            "group_regex",
+            &resolved.group_regex,
+            config_or_profile("group_regex"),
+        )?;
+        print_optional_string(
+            ui,
+            "instance_provision",
+            &resolved.instance_provision,
+            config_or_profile("instance_provision"),
+        )?;
+        print_optional_string(
+            ui,
+            "instance_execute",
+            &resolved.instance_execute,
+            config_or_profile("instance_execute"),
+        )?;
+        print_optional_string(
+            ui,
+            "instance_dispose",
+            &resolved.instance_dispose,
+            config_or_profile("instance_dispose"),
+        )?;
 
-        let (test_timeout_str, src) =
-            resolve_timeout(self.test_timeout.as_deref(), &config.test_timeout)?;
+        let (test_timeout_str, src) = resolve_timeout(
+            self.test_timeout.as_deref(),
+            &resolved.test_timeout,
+            config_or_profile("test_timeout"),
+        )?;
         print_value(ui, "test_timeout", &test_timeout_str, src)?;
 
-        let (max_duration_str, src) =
-            resolve_timeout(self.max_duration.as_deref(), &config.max_duration)?;
+        let (max_duration_str, src) = resolve_timeout(
+            self.max_duration.as_deref(),
+            &resolved.max_duration,
+            config_or_profile("max_duration"),
+        )?;
         print_value(ui, "max_duration", &max_duration_str, src)?;
 
         let (no_output_str, src) = resolve_no_output_timeout(
             self.no_output_timeout.as_deref(),
-            &config.no_output_timeout,
+            &resolved.no_output_timeout,
+            config_or_profile("no_output_timeout"),
         )?;
         print_value(ui, "no_output_timeout", &no_output_str, src)?;
 
-        let (order_str, src) = resolve_order(self.order.as_deref(), &config.test_order)?;
+        let (order_str, src) = resolve_order(
+            self.order.as_deref(),
+            &resolved.test_order,
+            config_or_profile("test_order"),
+        )?;
         print_value(ui, "test_order", &order_str, src)?;
 
         let (concurrency_str, src) = resolve_concurrency(self.concurrency);
@@ -146,6 +245,30 @@ impl Command for ConfigCommand {
     }
 }
 
+fn run_list_profiles(
+    ui: &mut dyn UI,
+    loaded: &Option<(ConfigFile, std::path::PathBuf)>,
+) -> Result<i32> {
+    let Some((cfg, path)) = loaded else {
+        ui.output("Config file: (none found)")?;
+        return Ok(0);
+    };
+    ui.output(&format!("Config file: {}", path.display()))?;
+    let names = cfg.profile_names();
+    if names.is_empty() {
+        ui.output("No profiles defined")?;
+    } else {
+        ui.output("Profiles:")?;
+        for name in names {
+            ui.output(&format!("  {}", name))?;
+        }
+    }
+    if let Some(ref dp) = cfg.default_profile {
+        ui.output(&format!("default_profile: {}", dp))?;
+    }
+    Ok(0)
+}
+
 fn print_value(ui: &mut dyn UI, key: &str, value: &str, src: Source) -> Result<()> {
     ui.output(&format!("{}: {} [{}]", key, value, src.label()))
 }
@@ -154,14 +277,23 @@ fn print_unset(ui: &mut dyn UI, key: &str, placeholder: &str) -> Result<()> {
     ui.output(&format!("{}: {}", key, placeholder))
 }
 
-fn print_optional_string(ui: &mut dyn UI, key: &str, value: &Option<String>) -> Result<()> {
+fn print_optional_string(
+    ui: &mut dyn UI,
+    key: &str,
+    value: &Option<String>,
+    src: Source,
+) -> Result<()> {
     match value {
-        Some(v) => print_value(ui, key, v, Source::Config),
+        Some(v) => print_value(ui, key, v, src),
         None => print_unset(ui, key, "(unset)"),
     }
 }
 
-fn resolve_timeout(cli: Option<&str>, config_value: &Option<String>) -> Result<(String, Source)> {
+fn resolve_timeout(
+    cli: Option<&str>,
+    config_value: &Option<String>,
+    config_source: Source,
+) -> Result<(String, Source)> {
     if let Some(s) = cli {
         let parsed = TimeoutSetting::parse(s)?;
         return Ok((format_timeout(&parsed), Source::Cli));
@@ -169,7 +301,7 @@ fn resolve_timeout(cli: Option<&str>, config_value: &Option<String>) -> Result<(
     match config_value {
         Some(s) => {
             TimeoutSetting::parse(s)?;
-            Ok((s.trim().to_string(), Source::Config))
+            Ok((s.trim().to_string(), config_source))
         }
         None => Ok((format_timeout(&TimeoutSetting::Disabled), Source::Default)),
     }
@@ -178,6 +310,7 @@ fn resolve_timeout(cli: Option<&str>, config_value: &Option<String>) -> Result<(
 fn resolve_no_output_timeout(
     cli: Option<&str>,
     config_value: &Option<String>,
+    config_source: Source,
 ) -> Result<(String, Source)> {
     if let Some(s) = cli {
         let trimmed = s.trim();
@@ -191,17 +324,21 @@ fn resolve_no_output_timeout(
         Some(s) => {
             let trimmed = s.trim();
             if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("disabled") {
-                Ok(("disabled".to_string(), Source::Config))
+                Ok(("disabled".to_string(), config_source))
             } else {
                 crate::config::parse_duration_string(trimmed)?;
-                Ok((trimmed.to_string(), Source::Config))
+                Ok((trimmed.to_string(), config_source))
             }
         }
         None => Ok(("disabled".to_string(), Source::Default)),
     }
 }
 
-fn resolve_order(cli: Option<&str>, config_value: &Option<String>) -> Result<(String, Source)> {
+fn resolve_order(
+    cli: Option<&str>,
+    config_value: &Option<String>,
+    config_source: Source,
+) -> Result<(String, Source)> {
     if let Some(s) = cli {
         let parsed: TestOrder = s.parse()?;
         return Ok((parsed.as_str(), Source::Cli));
@@ -209,7 +346,7 @@ fn resolve_order(cli: Option<&str>, config_value: &Option<String>) -> Result<(St
     match config_value {
         Some(s) => {
             let parsed: TestOrder = s.parse()?;
-            Ok((parsed.as_str(), Source::Config))
+            Ok((parsed.as_str(), config_source))
         }
         None => Ok((TestOrder::Discovery.as_str(), Source::Default)),
     }
@@ -325,6 +462,8 @@ test_order = "alphabetical"
             no_output_timeout: Some("90s".to_string()),
             order: Some("failing-first".to_string()),
             concurrency: Some(4),
+            profile: None,
+            list_profiles: false,
         };
         cmd.execute(&mut ui).unwrap();
 
@@ -363,6 +502,8 @@ test_order = "alphabetical"
             no_output_timeout: None,
             order: None,
             concurrency: None,
+            profile: None,
+            list_profiles: false,
         };
         assert!(cmd.execute(&mut ui).is_err());
     }
@@ -388,5 +529,120 @@ test_order = "alphabetical"
             joined
         );
         assert!(joined.contains("group_regex: (unset)"), "got: {}", joined);
+    }
+
+    #[test]
+    fn profile_overlay_is_labelled() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("inquest.toml"),
+            r#"
+test_command = "echo"
+test_timeout = "1m"
+
+[profiles.ci]
+test_timeout = "5m"
+"#,
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = ConfigCommand {
+            base_path: Some(temp.path().to_string_lossy().to_string()),
+            profile: Some("ci".to_string()),
+            ..ConfigCommand::new(None)
+        };
+        cmd.execute(&mut ui).unwrap();
+
+        let joined = ui.output.join("\n");
+        assert!(joined.contains("Active profile: ci"), "got: {}", joined);
+        assert!(
+            joined.contains("test_timeout: 5m [profile:ci]"),
+            "got: {}",
+            joined
+        );
+        // Untouched base field shows [config], not [profile:ci].
+        assert!(
+            joined.contains("test_command: echo [config]"),
+            "got: {}",
+            joined
+        );
+    }
+
+    #[test]
+    fn list_profiles_lists_names() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("inquest.toml"),
+            r#"
+test_command = "echo"
+default_profile = "ci"
+
+[profiles.ci]
+test_timeout = "5m"
+
+[profiles.nightly]
+test_timeout = "30m"
+"#,
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = ConfigCommand {
+            base_path: Some(temp.path().to_string_lossy().to_string()),
+            list_profiles: true,
+            ..ConfigCommand::new(None)
+        };
+        cmd.execute(&mut ui).unwrap();
+
+        let joined = ui.output.join("\n");
+        assert!(joined.contains("Profiles:"), "got: {}", joined);
+        assert!(joined.contains("  ci"), "got: {}", joined);
+        assert!(joined.contains("  nightly"), "got: {}", joined);
+        assert!(joined.contains("default_profile: ci"), "got: {}", joined);
+    }
+
+    #[test]
+    fn list_profiles_when_none_defined() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("inquest.toml"), r#"test_command = "echo""#).unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = ConfigCommand {
+            base_path: Some(temp.path().to_string_lossy().to_string()),
+            list_profiles: true,
+            ..ConfigCommand::new(None)
+        };
+        cmd.execute(&mut ui).unwrap();
+
+        let joined = ui.output.join("\n");
+        assert!(joined.contains("No profiles defined"), "got: {}", joined);
+    }
+
+    #[test]
+    fn unknown_profile_errors() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("inquest.toml"),
+            r#"
+test_command = "echo"
+
+[profiles.ci]
+test_timeout = "5m"
+"#,
+        )
+        .unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = ConfigCommand {
+            base_path: Some(temp.path().to_string_lossy().to_string()),
+            profile: Some("nope".to_string()),
+            ..ConfigCommand::new(None)
+        };
+        let err = cmd.execute(&mut ui).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "Configuration error: profile 'nope' is not defined; available profiles: ci"
+        );
     }
 }
