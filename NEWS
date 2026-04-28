@@ -8,6 +8,9 @@ UNRELEASED
 CHANGES
 -------
 
+* ``inq upgrade`` now displays a progress bar while migrating test runs
+  from a legacy ``.testrepository/`` directory. (Jelmer Vernooĳ)
+
 * Add ``inq rerun <run_id>``, which re-runs exactly the tests of a
   previous run in the same order, forwarding the original ``--``-style
   test arguments captured from that run's metadata. Closes #69.
