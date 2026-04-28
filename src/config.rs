@@ -162,6 +162,46 @@ pub const DEFAULT_PROFILE_NAME: &str = "default";
 /// is given.
 pub const PROFILE_ENV_VAR: &str = "INQ_PROFILE";
 
+/// Environment variable that, when set to a non-empty value other than `0`,
+/// suppresses inq's own progress bars. Inq sets this on every test child
+/// process so nested `inq` invocations stay quiet too.
+pub const NO_PROGRESS_ENV_VAR: &str = "INQ_NO_PROGRESS";
+
+/// Returns true when progress bars should be suppressed.
+///
+/// Progress is disabled when either:
+///   * [`disable_progress_in_process`] has been called (used by the test
+///     suite to keep `cargo test` output clean), or
+///   * [`NO_PROGRESS_ENV_VAR`] is set to a non-empty value other than `0`.
+pub fn progress_disabled() -> bool {
+    if PROGRESS_DISABLED_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    progress_disabled_for(std::env::var(NO_PROGRESS_ENV_VAR).ok().as_deref())
+}
+
+/// Process-wide kill switch for progress bars. Once set, never cleared.
+/// Inquest's own integration tests flip this so progress output doesn't
+/// pollute `cargo test`'s captured stdout.
+static PROGRESS_DISABLED_FLAG: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Disable inquest progress bars for the rest of this process. Idempotent
+/// and thread-safe; intended for tests that run [`crate::commands::RunCommand`]
+/// or the executor in-process and don't want progress chrome in their
+/// captured stdout. Equivalent to setting `INQ_NO_PROGRESS=1`, except it
+/// can't be overridden by an explicit `INQ_NO_PROGRESS=0`.
+pub fn disable_progress_in_process() {
+    PROGRESS_DISABLED_FLAG.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Pure helper: decide whether the supplied env value disables progress.
+/// `None` (unset) leaves progress enabled; an empty string or `"0"` are
+/// treated as not-set so `INQ_NO_PROGRESS=0` is an opt-out.
+fn progress_disabled_for(value: Option<&str>) -> bool {
+    matches!(value, Some(v) if !v.is_empty() && v != "0")
+}
+
 /// A single layer of overlayable settings — every field is optional so it can
 /// be merged on top of another layer. Used for profile overlays and as the
 /// shape that `[profiles.<name>]` tables deserialize into.
@@ -743,6 +783,16 @@ impl TestrConfig {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_progress_disabled_for() {
+        assert!(!progress_disabled_for(None));
+        assert!(!progress_disabled_for(Some("")));
+        assert!(!progress_disabled_for(Some("0")));
+        assert!(progress_disabled_for(Some("1")));
+        assert!(progress_disabled_for(Some("true")));
+        assert!(progress_disabled_for(Some("yes")));
+    }
 
     #[test]
     fn test_parse_basic_config() {
