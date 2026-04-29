@@ -119,6 +119,7 @@ pub async fn serve(base: PathBuf, addr: String) -> Result<()> {
         .route("/api/test/:id/history", get(test_history::api_test_history))
         .route("/api/profiles", get(profiles::api_profiles))
         .route("/api/repo", get(repo::api_repo))
+        .route("/api/timeline", get(repo::api_timeline))
         .route("/api/run", post(run::api_start_run))
         .route("/api/active/:id/events", get(run::api_run_events))
         .with_state(state);

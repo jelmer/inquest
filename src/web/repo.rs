@@ -173,6 +173,160 @@ fn build_repo_overview(base: &std::path::Path) -> Result<RepoOverview> {
     })
 }
 
+/// Per-run summary used by the timeline view.
+#[derive(Serialize)]
+pub(super) struct TimelineRun {
+    id: String,
+    timestamp: String,
+    failures: usize,
+    total: usize,
+}
+
+/// One row in the timeline grid: a test plus its status across each run in
+/// the window. The `statuses` array is parallel to the response's `runs`
+/// array (same length, same order). `null` means the test wasn't observed
+/// in that run.
+#[derive(Serialize)]
+pub(super) struct TimelineRow {
+    test_id: String,
+    statuses: Vec<Option<String>>,
+}
+
+#[derive(Serialize)]
+pub(super) struct TimelineResponse {
+    runs: Vec<TimelineRun>,
+    rows: Vec<TimelineRow>,
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct TimelineQuery {
+    /// How many of the most recent runs to include. Defaults to 50; the
+    /// timeline gets unwieldy past that.
+    #[serde(default = "default_timeline_limit")]
+    limit: usize,
+}
+
+fn default_timeline_limit() -> usize {
+    50
+}
+
+pub(super) async fn api_timeline(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<TimelineQuery>,
+) -> Response {
+    match build_timeline(&state.base, q.limit) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+fn build_timeline(base: &std::path::Path, limit: usize) -> Result<TimelineResponse> {
+    let repo = crate::commands::utils::open_repository(Some(&base.to_string_lossy()))?;
+    let all_run_ids = repo.list_run_ids()?;
+
+    // Take the most-recent N runs, then reverse so the response array goes
+    // oldest → newest (left-to-right in the timeline view).
+    let window: Vec<_> = all_run_ids
+        .iter()
+        .rev()
+        .take(limit)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    // Walk the window once. For each run, record (test_id → status) and the
+    // run summary. Tests never failing in the window are filtered out at
+    // the end — they'd be a wall of green that adds no signal.
+    let mut runs_meta: Vec<TimelineRun> = Vec::with_capacity(window.len());
+    // Map test_id → vec of statuses indexed by position in the window.
+    let mut per_test: HashMap<TestId, Vec<Option<String>>> = HashMap::new();
+    let n = window.len();
+    for (idx, rid) in window.iter().enumerate() {
+        let run = match repo.get_test_run(rid) {
+            Ok(r) => r,
+            Err(_) => {
+                runs_meta.push(TimelineRun {
+                    id: rid.as_str().to_string(),
+                    timestamp: String::new(),
+                    failures: 0,
+                    total: 0,
+                });
+                continue;
+            }
+        };
+        runs_meta.push(TimelineRun {
+            id: rid.as_str().to_string(),
+            timestamp: run.timestamp.to_rfc3339(),
+            failures: run.count_failures(),
+            total: run.total_tests(),
+        });
+        for (tid, result) in &run.results {
+            let row = per_test.entry(tid.clone()).or_insert_with(|| vec![None; n]);
+            row[idx] = Some(result.status.to_string());
+        }
+    }
+
+    // Filter to tests that ever failed in the window. A pure-pass row tells
+    // the user nothing new and burns vertical space.
+    let mut rows: Vec<TimelineRow> = per_test
+        .into_iter()
+        .filter(|(_, statuses)| {
+            statuses.iter().any(|s| {
+                matches!(
+                    s.as_deref(),
+                    Some("failure") | Some("error") | Some("uxsuccess")
+                )
+            })
+        })
+        .map(|(test_id, statuses)| TimelineRow {
+            test_id: test_id.as_str().to_string(),
+            statuses,
+        })
+        .collect();
+    // Sort: tests that fail in the most recent run first, then by total
+    // failure count descending, then alphabetically. Puts active fires at
+    // the top.
+    rows.sort_by(|a, b| {
+        let last_a = a.statuses.last().and_then(|s| s.as_deref()).unwrap_or("");
+        let last_b = b.statuses.last().and_then(|s| s.as_deref()).unwrap_or("");
+        let active_a = matches!(last_a, "failure" | "error" | "uxsuccess");
+        let active_b = matches!(last_b, "failure" | "error" | "uxsuccess");
+        if active_a != active_b {
+            return active_b.cmp(&active_a);
+        }
+        let count_a = a
+            .statuses
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.as_deref(),
+                    Some("failure") | Some("error") | Some("uxsuccess")
+                )
+            })
+            .count();
+        let count_b = b
+            .statuses
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.as_deref(),
+                    Some("failure") | Some("error") | Some("uxsuccess")
+                )
+            })
+            .count();
+        count_b
+            .cmp(&count_a)
+            .then_with(|| a.test_id.cmp(&b.test_id))
+    });
+
+    Ok(TimelineResponse {
+        runs: runs_meta,
+        rows,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +373,35 @@ mod tests {
         assert_eq!(overview.slowest.first().unwrap().test_id, "a.b.slow");
         // a.b.slow flapped (success → failure) so it shows as flakiest.
         assert_eq!(overview.flakiest.first().unwrap().test_id, "a.b.slow");
+    }
+
+    #[test]
+    fn build_timeline_filters_to_ever_failing_tests() {
+        let temp = TempDir::new().unwrap();
+        let mut repo =
+            crate::commands::utils::init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+
+        // Run 0: both pass. Run 1: a.flaky fails, a.steady passes.
+        let mut run1 = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
+        run1.add_result(crate::repository::TestResult::success("a.flaky"));
+        run1.add_result(crate::repository::TestResult::success("a.steady"));
+        repo.insert_test_run(run1).unwrap();
+        let mut run2 = crate::repository::TestRun::new(crate::repository::RunId::new("1"));
+        run2.add_result(crate::repository::TestResult::failure("a.flaky", "boom"));
+        run2.add_result(crate::repository::TestResult::success("a.steady"));
+        repo.insert_test_run(run2).unwrap();
+        drop(repo);
+
+        let timeline = build_timeline(temp.path(), 50).unwrap();
+        // Two runs in the window, oldest-first.
+        assert_eq!(timeline.runs.len(), 2);
+        assert_eq!(timeline.runs[0].id, "0");
+        assert_eq!(timeline.runs[1].id, "1");
+        // Only a.flaky surfaces — a.steady never failed so it's filtered.
+        assert_eq!(timeline.rows.len(), 1);
+        assert_eq!(timeline.rows[0].test_id, "a.flaky");
+        // Statuses parallel runs[]: oldest = success, newest = failure.
+        assert_eq!(timeline.rows[0].statuses[0].as_deref(), Some("success"));
+        assert_eq!(timeline.rows[0].statuses[1].as_deref(), Some("failure"));
     }
 }
