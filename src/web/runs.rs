@@ -213,6 +213,158 @@ pub(super) async fn api_run_detail(
     .into_response()
 }
 
+#[derive(Serialize)]
+pub(super) struct RunDiff {
+    /// The run we're comparing against (the most recent run with an id
+    /// strictly older than the requested run, in `list_run_ids` order).
+    /// `None` when no such run exists — the requested run is the first.
+    baseline_run_id: Option<String>,
+    /// Tests that passed in the baseline but now fail.
+    new_failures: Vec<DiffEntry>,
+    /// Tests that failed in the baseline but now pass.
+    fixed: Vec<DiffEntry>,
+    /// Tests present in the requested run but not in the baseline.
+    added: Vec<DiffEntry>,
+    /// Tests present in the baseline but not in the requested run.
+    removed: Vec<DiffEntry>,
+    /// Other status flips (e.g. error → failure, skip → success).
+    status_changed: Vec<DiffStatusChange>,
+}
+
+#[derive(Serialize)]
+pub(super) struct DiffEntry {
+    test_id: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct DiffStatusChange {
+    test_id: String,
+    from: String,
+    to: String,
+}
+
+/// `GET /api/runs/:id/diff` — compare the given run to the immediately
+/// preceding run (next-lower id in the repository's run ordering).
+pub(super) async fn api_run_diff(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let repo = match crate::commands::utils::open_repository(Some(&state.base.to_string_lossy())) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let rid = crate::repository::RunId::new(id.clone());
+    let run = match repo.get_test_run(&rid) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::NOT_FOUND, &e.to_string()),
+    };
+
+    // Locate the baseline: the most recent run id with index strictly less
+    // than this run's index in `list_run_ids` ordering. `list_run_ids` is
+    // chronological, so the predecessor is whatever sits one position
+    // earlier in that vec.
+    let run_ids = match repo.list_run_ids() {
+        Ok(v) => v,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+    let pos = run_ids.iter().position(|r| r.as_str() == id);
+    let baseline_id = match pos {
+        Some(0) | None => None,
+        Some(i) => run_ids.get(i - 1).cloned(),
+    };
+
+    let diff = match baseline_id.as_ref() {
+        None => RunDiff {
+            baseline_run_id: None,
+            new_failures: Vec::new(),
+            fixed: Vec::new(),
+            added: Vec::new(),
+            removed: Vec::new(),
+            status_changed: Vec::new(),
+        },
+        Some(bid) => {
+            let baseline = match repo.get_test_run(bid) {
+                Ok(r) => r,
+                Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            };
+            compute_diff(&baseline, &run, bid.as_str())
+        }
+    };
+
+    Json(diff).into_response()
+}
+
+fn compute_diff(
+    baseline: &crate::repository::TestRun,
+    run: &crate::repository::TestRun,
+    baseline_id: &str,
+) -> RunDiff {
+    use std::collections::BTreeSet;
+
+    let baseline_ids: BTreeSet<&crate::repository::TestId> = baseline.results.keys().collect();
+    let run_ids: BTreeSet<&crate::repository::TestId> = run.results.keys().collect();
+
+    let mut new_failures: Vec<DiffEntry> = Vec::new();
+    let mut fixed: Vec<DiffEntry> = Vec::new();
+    let mut status_changed: Vec<DiffStatusChange> = Vec::new();
+
+    for tid in baseline_ids.intersection(&run_ids) {
+        let b = &baseline.results[*tid];
+        let r = &run.results[*tid];
+        if b.status == r.status {
+            continue;
+        }
+        if r.status.is_failure() && b.status.is_success() {
+            new_failures.push(DiffEntry {
+                test_id: tid.as_str().to_string(),
+                status: r.status.to_string(),
+            });
+        } else if r.status.is_success() && b.status.is_failure() {
+            fixed.push(DiffEntry {
+                test_id: tid.as_str().to_string(),
+                status: r.status.to_string(),
+            });
+        } else {
+            status_changed.push(DiffStatusChange {
+                test_id: tid.as_str().to_string(),
+                from: b.status.to_string(),
+                to: r.status.to_string(),
+            });
+        }
+    }
+
+    let mut added: Vec<DiffEntry> = run_ids
+        .difference(&baseline_ids)
+        .map(|tid| DiffEntry {
+            test_id: tid.as_str().to_string(),
+            status: run.results[*tid].status.to_string(),
+        })
+        .collect();
+    let mut removed: Vec<DiffEntry> = baseline_ids
+        .difference(&run_ids)
+        .map(|tid| DiffEntry {
+            test_id: tid.as_str().to_string(),
+            status: baseline.results[*tid].status.to_string(),
+        })
+        .collect();
+
+    new_failures.sort_by(|a, b| a.test_id.cmp(&b.test_id));
+    fixed.sort_by(|a, b| a.test_id.cmp(&b.test_id));
+    added.sort_by(|a, b| a.test_id.cmp(&b.test_id));
+    removed.sort_by(|a, b| a.test_id.cmp(&b.test_id));
+    status_changed.sort_by(|a, b| a.test_id.cmp(&b.test_id));
+
+    RunDiff {
+        baseline_run_id: Some(baseline_id.to_string()),
+        new_failures,
+        fixed,
+        added,
+        removed,
+        status_changed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +450,113 @@ mod tests {
         let pass = results.iter().find(|r| r["test_id"] == "a::pass").unwrap();
         assert_eq!(pass["status"], "success");
         assert!(pass["details"].is_null());
+    }
+
+    #[tokio::test]
+    async fn run_diff_classifies_changes_against_predecessor() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut repo =
+            crate::commands::utils::init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+
+        // Run 0 (baseline): a passes, b fails, c passes.
+        let mut run0 = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
+        run0.add_result(crate::repository::TestResult::success("a"));
+        run0.add_result(crate::repository::TestResult::failure("b", "old"));
+        run0.add_result(crate::repository::TestResult::success("c"));
+        repo.insert_test_run(run0).unwrap();
+
+        // Run 1: a now fails (new failure), b now passes (fixed), c is
+        // gone (removed), d is new (added).
+        let mut run1 = crate::repository::TestRun::new(crate::repository::RunId::new("1"));
+        run1.add_result(crate::repository::TestResult::failure("a", "regress"));
+        run1.add_result(crate::repository::TestResult::success("b"));
+        run1.add_result(crate::repository::TestResult::success("d"));
+        repo.insert_test_run(run1).unwrap();
+        drop(repo);
+
+        let state = AppState {
+            base: temp.path().to_path_buf(),
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            next_run: Arc::new(AtomicU64::new(1)),
+        };
+        let app = Router::new()
+            .route("/api/runs/:id/diff", get(api_run_diff))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/runs/1/diff")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(parsed["baseline_run_id"], "0");
+
+        let new_failures = parsed["new_failures"].as_array().unwrap();
+        assert_eq!(new_failures.len(), 1);
+        assert_eq!(new_failures[0]["test_id"], "a");
+
+        let fixed = parsed["fixed"].as_array().unwrap();
+        assert_eq!(fixed.len(), 1);
+        assert_eq!(fixed[0]["test_id"], "b");
+
+        let added = parsed["added"].as_array().unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0]["test_id"], "d");
+
+        let removed = parsed["removed"].as_array().unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0]["test_id"], "c");
+    }
+
+    #[tokio::test]
+    async fn run_diff_returns_no_baseline_for_first_run() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut repo =
+            crate::commands::utils::init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+        let mut run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
+        run.add_result(crate::repository::TestResult::success("a"));
+        repo.insert_test_run(run).unwrap();
+        drop(repo);
+
+        let state = AppState {
+            base: temp.path().to_path_buf(),
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            next_run: Arc::new(AtomicU64::new(1)),
+        };
+        let app = Router::new()
+            .route("/api/runs/:id/diff", get(api_run_diff))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/runs/0/diff")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(parsed["baseline_run_id"].is_null());
+        assert_eq!(parsed["new_failures"].as_array().unwrap().len(), 0);
     }
 }

@@ -1330,6 +1330,11 @@ async function toggleRunDetail(rowEl, id) {
   }
   td.append(meta);
 
+  // Diff against the previous run: render new-failures / fixed / added /
+  // removed / status-changed. We fetch lazily so the run-detail expand is
+  // still fast when the diff is large.
+  renderRunDiff(td, id);
+
   // Per-test results: failures first, then everything else, capped to a
   // scrollable list so a 5000-test run doesn't blow up the page. Click a
   // failed-test row to reveal its message/details/tags.
@@ -1381,6 +1386,81 @@ async function toggleRunDetail(rowEl, id) {
     }
     td.append(ul);
   }
+}
+
+async function renderRunDiff(parentEl, runId) {
+  const heading = document.createElement("h3");
+  heading.textContent = "Compared to previous run";
+  heading.style.cssText = "font-size:12px;margin:8px 0 4px 0;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;";
+  const placeholder = document.createElement("div");
+  placeholder.style.cssText = "color:var(--muted);font-size:12px;margin-bottom:10px;";
+  placeholder.textContent = "loading diff…";
+  parentEl.append(heading, placeholder);
+
+  let diff;
+  try {
+    diff = await fetch(`/api/runs/${encodeURIComponent(runId)}/diff`).then(r => r.json());
+  } catch (e) {
+    placeholder.textContent = "diff failed: " + e;
+    return;
+  }
+  placeholder.remove();
+
+  if (!diff.baseline_run_id) {
+    const note = document.createElement("div");
+    note.style.cssText = "color:var(--muted);font-size:12px;margin-bottom:10px;";
+    note.textContent = "(no preceding run to compare against)";
+    parentEl.append(note);
+    return;
+  }
+
+  const total = diff.new_failures.length + diff.fixed.length
+    + diff.added.length + diff.removed.length + diff.status_changed.length;
+  if (total === 0) {
+    const note = document.createElement("div");
+    note.style.cssText = "color:var(--muted);font-size:12px;margin-bottom:10px;";
+    note.innerHTML = `Identical results to run <code>${escapeHtml(diff.baseline_run_id)}</code>.`;
+    parentEl.append(note);
+    return;
+  }
+
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "background:#fff;border:1px solid var(--border);border-radius:4px;padding:8px 12px;margin-bottom:12px;font-size:12px;";
+  const baseline = document.createElement("div");
+  baseline.style.cssText = "color:var(--muted);font-size:11px;margin-bottom:6px;";
+  baseline.innerHTML = `vs run <code>${escapeHtml(diff.baseline_run_id)}</code>`;
+  wrap.append(baseline);
+
+  const sections = [
+    ["New failures", diff.new_failures, "var(--fail)"],
+    ["Fixed", diff.fixed, "var(--ok)"],
+    ["Added", diff.added, "var(--accent)"],
+    ["Removed", diff.removed, "var(--muted)"],
+    ["Status changed", diff.status_changed, "var(--xfail)"],
+  ];
+  for (const [label, items, color] of sections) {
+    if (items.length === 0) continue;
+    const sec = document.createElement("div");
+    sec.style.cssText = "margin-bottom:6px;";
+    const head = document.createElement("div");
+    head.style.cssText = `color:${color};font-weight:600;margin-bottom:2px;`;
+    head.textContent = `${label} (${items.length})`;
+    sec.append(head);
+    const ul = document.createElement("ul");
+    ul.style.cssText = "margin:0;padding-left:18px;list-style:disc;font-family:ui-monospace,Menlo,monospace;";
+    for (const item of items) {
+      const li = document.createElement("li");
+      if (item.from && item.to) {
+        li.innerHTML = `${escapeHtml(item.test_id)} <span style="color:var(--muted);">(${escapeHtml(item.from)} → ${escapeHtml(item.to)})</span>`;
+      } else {
+        li.textContent = item.test_id;
+      }
+      ul.append(li);
+    }
+    sec.append(ul);
+    wrap.append(sec);
+  }
+  parentEl.append(wrap);
 }
 
 function buildHistoryAttachmentsRow(e) {

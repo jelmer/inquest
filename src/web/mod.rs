@@ -120,6 +120,7 @@ pub async fn serve(base: PathBuf, addr: String) -> Result<()> {
         .route("/api/tree", get(test_list::api_tree))
         .route("/api/runs", get(runs::api_runs))
         .route("/api/runs/:id", get(runs::api_run_detail))
+        .route("/api/runs/:id/diff", get(runs::api_run_diff))
         .route("/api/test/:id/history", get(test_history::api_test_history))
         .route("/api/profiles", get(profiles::api_profiles))
         .route("/api/repo", get(repo::api_repo))
