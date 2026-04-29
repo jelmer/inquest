@@ -429,13 +429,16 @@ fn main() {
         .clone()
         .or_else(|| std::env::var(inquest::config::PROFILE_ENV_VAR).ok());
 
+    let implicit_run = cli.command.is_none();
     let command = cli.command.unwrap_or(Commands::Run {
         failing: false,
         force_init: false,
         auto: true,
         partial: false,
         load_list: None,
-        parallel: None,
+        // Bare `inq` defaults to parallel auto-detect; explicit `inq run`
+        // stays serial unless the user passes `-j`.
+        parallel: Some(0),
         until_failure: false,
         max_iterations: None,
         isolated: false,
@@ -781,6 +784,7 @@ fn main() {
                 cancellation_token: None,
                 test_ids_override: None,
                 profile: profile.clone(),
+                implicit_run,
             };
             cmd.execute(&mut ui)
         }
