@@ -1568,6 +1568,7 @@ impl InquestMcpService {
             })?;
 
             let historical_times = repo.get_test_times().map_err(to_mcp_err)?;
+            let calibration_samples = crate::eta::load_calibration_samples(repo.as_ref());
 
             // Resolve test IDs before spawning (needs repo)
             let mut test_ids = if failing_only {
@@ -1616,6 +1617,8 @@ impl InquestMcpService {
             }
 
             let concurrency = params.concurrency.unwrap_or(1);
+            let calibration_factor =
+                crate::eta::calibration_factor(&calibration_samples, concurrency as u32);
 
             // Pre-allocate the run — this creates the lock file so inq_running sees it
             let (run_id, writer) = repo.begin_test_run_raw().map_err(to_mcp_err)?;
@@ -1658,6 +1661,7 @@ impl InquestMcpService {
                         None,
                         run_id,
                         &historical_times,
+                        calibration_factor,
                         || {
                             let mut repo = crate::commands::utils::open_repository(Some(&dir))?;
                             repo.begin_test_run_raw().map(|(_, w)| w)
@@ -1674,6 +1678,7 @@ impl InquestMcpService {
                         run_id,
                         writer,
                         &historical_times,
+                        calibration_factor,
                     )
                 };
 
@@ -1689,6 +1694,7 @@ impl InquestMcpService {
                                     &historical_times,
                                     &[],
                                     None,
+                                    false,
                                 ) {
                                     tracing::error!(
                                         "Failed to persist background run results: {}",
@@ -2566,6 +2572,7 @@ mod tests {
                 exit_code: Some(1),
                 test_args: None,
                 profile: None,
+                predicted_duration_secs: None,
             },
         )
         .unwrap();

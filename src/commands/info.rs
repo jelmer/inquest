@@ -121,6 +121,7 @@ mod tests {
                 exit_code: Some(1),
                 test_args: None,
                 profile: None,
+                predicted_duration_secs: None,
             },
         )
         .unwrap();
@@ -165,6 +166,7 @@ mod tests {
                 exit_code: Some(0),
                 test_args: None,
                 profile: None,
+                predicted_duration_secs: None,
             },
         )
         .unwrap();

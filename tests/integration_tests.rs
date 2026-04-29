@@ -1316,6 +1316,7 @@ fn test_serial_run_with_cancellation() {
             run_id,
             writer,
             &historical_times,
+            1.0,
         )
         .unwrap();
     let elapsed = start.elapsed();

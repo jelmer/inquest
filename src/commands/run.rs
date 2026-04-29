@@ -107,6 +107,11 @@ pub struct RunCommand {
     /// concurrency-resolution messaging so the user is told how to opt out
     /// of the auto-parallel default. Has no effect on actual concurrency.
     pub implicit_run: bool,
+    /// When true, print details about the ETA prediction: the calibration
+    /// factor and the inputs that produced it (before the run), and the
+    /// predicted-vs-actual comparison (after the run). Wired from the
+    /// global `--eta-debug` CLI flag.
+    pub eta_debug: bool,
 }
 
 impl RunCommand {
@@ -195,6 +200,7 @@ impl RunCommand {
             historical_times,
             filter_tags,
             active_profile.map(|s| s.to_string()),
+            self.eta_debug,
         )?;
         if let Some(buf) = stderr_capture {
             let bytes = match buf.lock() {
@@ -341,6 +347,7 @@ impl RunCommand {
         }
 
         let historical_times = repo.get_test_times().unwrap_or_default();
+        let calibration_samples = crate::eta::load_calibration_samples(repo.as_ref());
         let max_duration_value =
             test_executor::compute_max_duration(&max_duration, &historical_times);
         let test_timeout_fn =
@@ -446,6 +453,28 @@ impl RunCommand {
             suggest_parallel_for_explicit_run(ui, &test_ids, &historical_times)?;
             1
         };
+
+        let calibration_debug =
+            crate::eta::calibration_debug(&calibration_samples, concurrency as u32);
+        let calibration_factor = calibration_debug.factor;
+        if self.eta_debug {
+            for line in crate::eta::format_calibration_debug(&calibration_debug) {
+                ui.output(&line)?;
+            }
+            // `test_ids` is `Some` whenever filtering, ordering, or
+            // `--load-list` resolved a concrete list. When `None`, the
+            // executor will discover; the per-test breakdown isn't worth
+            // the duplicate discovery cost.
+            let known_tests: &[crate::repository::TestId] = test_ids.as_deref().unwrap_or(&[]);
+            for line in crate::eta::format_prediction_debug(
+                known_tests,
+                &historical_times,
+                concurrency as u32,
+                calibration_factor,
+            ) {
+                ui.output(&line)?;
+            }
+        }
 
         if self.isolated {
             let all_tests = if let Some(ids) = test_ids {
@@ -555,6 +584,7 @@ impl RunCommand {
                         test_timeout_fn.as_ref(),
                         run_id,
                         &historical_times,
+                        calibration_factor,
                         || repo.begin_test_run_raw().map(|(_, w)| w),
                     )?
                 } else {
@@ -570,6 +600,7 @@ impl RunCommand {
                         run_id,
                         writer,
                         &historical_times,
+                        calibration_factor,
                     )?
                 };
 
@@ -603,6 +634,7 @@ impl RunCommand {
                 test_timeout_fn.as_ref(),
                 run_id,
                 &historical_times,
+                calibration_factor,
                 || repo.begin_test_run_raw().map(|(_, w)| w),
             )?;
             self.persist(
@@ -627,6 +659,7 @@ impl RunCommand {
                 run_id,
                 writer,
                 &historical_times,
+                calibration_factor,
             )?;
             self.persist(
                 ui,

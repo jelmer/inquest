@@ -348,6 +348,12 @@ pub struct RunMetadata {
     /// `default_profile`, when one was applied. `None` for runs that used
     /// the base layer alone, including all runs predating profile support.
     pub profile: Option<String>,
+    /// Wall-clock duration the run was *predicted* to take, in seconds,
+    /// based on historical per-test times alone (i.e. before any
+    /// calibration adjustment). Used to compute a per-bucket calibration
+    /// factor for future runs. `None` when no historical signal was
+    /// available, or for runs predating ETA-accuracy tracking.
+    pub predicted_duration_secs: Option<f64>,
 }
 
 /// A complete test run containing results for multiple tests.
