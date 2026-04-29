@@ -1,15 +1,38 @@
 //! ETA computation for the test-runner progress bar.
 //!
-//! The display has two halves: an [`EtaModel`] that resolves a per-test
+//! The display has three halves: an [`EtaModel`] that resolves a per-test
 //! historical duration (with a mean fallback for tests that have no recorded
-//! history), and an [`EtaState`] that aggregates progress across one or more
+//! history), an [`EtaState`] that aggregates progress across one or more
 //! workers and renders the formatted ETA string for indicatif's `{eta_hist}`
-//! template key.
+//! template key, and a calibration helper that learns a multiplicative
+//! correction from past `(predicted, actual)` pairs so the displayed ETA
+//! accounts for systematic biases (parallel overhead, discovery time, etc.).
 
-use crate::repository::TestId;
+use crate::repository::{Repository, RunId, TestId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// How many recent runs to inspect when computing the calibration factor.
+/// Older runs are ignored entirely; bounding the lookback keeps the factor
+/// responsive to environment changes (CI host swap, machine upgrade, …).
+const CALIBRATION_LOOKBACK: usize = 20;
+
+/// Minimum number of usable samples in the lookback window before we apply
+/// any correction. Below this threshold a single anomalous run would
+/// dominate, so we fall back to the raw historical-sum prediction.
+const CALIBRATION_MIN_SAMPLES: usize = 3;
+
+/// EWMA decay coefficient. `α = 0.3` weights the most recent sample at 30%
+/// and decays older samples geometrically — recent enough to react to a
+/// regression, smooth enough to ignore one-off noise.
+const CALIBRATION_ALPHA: f64 = 0.3;
+
+/// Clamp range for the resulting factor. A factor outside this range is
+/// almost always a bug or a degenerate prediction (e.g. predicted ≈ 0 due
+/// to missing history) rather than a real signal worth honouring.
+const CALIBRATION_MIN: f64 = 0.25;
+const CALIBRATION_MAX: f64 = 4.0;
 
 /// Resolves a per-test estimated duration, falling back to the mean of known
 /// durations for tests that have no recorded history. This keeps
@@ -246,6 +269,241 @@ impl EtaState {
     }
 }
 
+/// One observation of a past run's predicted-vs-actual duration, narrowed to
+/// the fields the calibration math actually uses.
+#[derive(Debug, Clone, Copy)]
+pub struct CalibrationSample {
+    /// Concurrency the run executed at. Used as the bucket key — a parallel
+    /// run's overhead profile differs sharply from a serial run's, so they
+    /// must not feed the same factor.
+    pub concurrency: u32,
+    /// Wall-clock prediction recorded at run start (before calibration).
+    pub predicted_secs: f64,
+    /// Wall-clock duration the run actually took.
+    pub actual_secs: f64,
+}
+
+/// Compute a multiplicative correction for the raw historical-sum prediction
+/// at the given concurrency, derived from the most recent
+/// [`CALIBRATION_LOOKBACK`] runs at that same concurrency.
+///
+/// Returns `1.0` (i.e. "no correction") when fewer than
+/// [`CALIBRATION_MIN_SAMPLES`] usable samples are available — one or two
+/// runs is too little signal to override a known prediction with.
+///
+/// `samples` is expected in chronological order (oldest first); the EWMA
+/// weights the most recent sample most heavily.
+pub fn calibration_factor(samples: &[CalibrationSample], concurrency: u32) -> f64 {
+    let bucket: Vec<f64> = samples
+        .iter()
+        .filter(|s| s.concurrency == concurrency)
+        .filter(|s| s.predicted_secs > 0.0 && s.actual_secs > 0.0)
+        .rev()
+        .take(CALIBRATION_LOOKBACK)
+        .map(|s| s.actual_secs / s.predicted_secs)
+        .collect();
+
+    if bucket.len() < CALIBRATION_MIN_SAMPLES {
+        return 1.0;
+    }
+
+    // `bucket` is newest-first; walk oldest-first to apply EWMA, so the
+    // newest sample lands with full α weight at the end.
+    let mut ewma: Option<f64> = None;
+    for ratio in bucket.iter().rev() {
+        ewma = Some(match ewma {
+            None => *ratio,
+            Some(prev) => CALIBRATION_ALPHA * ratio + (1.0 - CALIBRATION_ALPHA) * prev,
+        });
+    }
+    ewma.unwrap_or(1.0).clamp(CALIBRATION_MIN, CALIBRATION_MAX)
+}
+
+/// Why a calibration factor took the value it did. Built alongside the
+/// factor for `--debug` output so the user can see why the displayed ETA
+/// is (or isn't) being adjusted.
+#[derive(Debug, Clone)]
+pub struct CalibrationDebug {
+    /// Total samples loaded across all concurrencies.
+    pub total_samples: usize,
+    /// Samples that matched this run's concurrency and had usable values.
+    /// Only samples within the lookback window count.
+    pub bucket_samples: usize,
+    /// Concurrency used as the bucket key.
+    pub concurrency: u32,
+    /// Final calibration factor (clamped). `1.0` when the bucket was below
+    /// the minimum-samples threshold or the EWMA saturated against the
+    /// configured clamp.
+    pub factor: f64,
+    /// Most recent (oldest-first) `actual / predicted` ratios that fed the
+    /// EWMA. Capped at [`CALIBRATION_LOOKBACK`].
+    pub recent_ratios: Vec<f64>,
+    /// Minimum samples needed before any correction is applied.
+    pub min_samples: usize,
+}
+
+/// Compute the calibration factor *and* a structured trace of how it was
+/// derived. Equivalent to [`calibration_factor`] but with the inputs and
+/// intermediate values surfaced for debug output.
+pub fn calibration_debug(samples: &[CalibrationSample], concurrency: u32) -> CalibrationDebug {
+    let bucket: Vec<f64> = samples
+        .iter()
+        .filter(|s| s.concurrency == concurrency)
+        .filter(|s| s.predicted_secs > 0.0 && s.actual_secs > 0.0)
+        .rev()
+        .take(CALIBRATION_LOOKBACK)
+        .map(|s| s.actual_secs / s.predicted_secs)
+        .collect();
+
+    // Restore chronological (oldest-first) order for display and EWMA.
+    let mut recent_ratios = bucket;
+    recent_ratios.reverse();
+
+    let factor = calibration_factor(samples, concurrency);
+    CalibrationDebug {
+        total_samples: samples.len(),
+        bucket_samples: recent_ratios.len(),
+        concurrency,
+        factor,
+        recent_ratios,
+        min_samples: CALIBRATION_MIN_SAMPLES,
+    }
+}
+
+/// Render a one-block summary of how the displayed wall-clock ETA was
+/// derived: how many tests have history, the raw historical sum, the
+/// concurrency divisor (for parallel runs), and the final calibrated
+/// number the user will see decay on the progress bar.
+///
+/// `tests` is the resolved test list; pass an empty slice to skip the
+/// per-test counts (e.g. when discovery-driven, the executor will compute
+/// these itself and the caller can't pre-empt them cheaply).
+pub fn format_prediction_debug(
+    tests: &[TestId],
+    historical_times: &HashMap<TestId, Duration>,
+    concurrency: u32,
+    calibration_factor: f64,
+) -> Vec<String> {
+    if tests.is_empty() {
+        return vec![
+            "ETA debug: prediction breakdown unavailable (tests will be \
+                     discovered by the runner)."
+                .to_string(),
+        ];
+    }
+    let known: usize = tests
+        .iter()
+        .filter(|t| historical_times.contains_key(*t))
+        .count();
+    let unknown = tests.len().saturating_sub(known);
+    let restricted: HashMap<TestId, Duration> = historical_times
+        .iter()
+        .filter(|(id, _)| tests.iter().any(|t| t == *id))
+        .map(|(id, d)| (id.clone(), *d))
+        .collect();
+    let model = EtaModel::new(Arc::new(restricted));
+    let raw_total = model.estimated_total(tests.iter());
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "ETA debug: {} test(s) selected — {} with history, {} new (mean fallback {}).",
+        tests.len(),
+        known,
+        unknown,
+        format_duration_short(model.mean_known.unwrap_or(Duration::ZERO)),
+    ));
+    let serial_eq = format_duration_short(raw_total);
+    if concurrency > 1 {
+        let per_worker = raw_total / concurrency;
+        let calibrated = per_worker.mul_f64(calibration_factor);
+        lines.push(format!(
+            "  Raw sequential estimate: {} → {}-way parallel: {} → calibrated (×{:.2}): {}",
+            serial_eq,
+            concurrency,
+            format_duration_short(per_worker),
+            calibration_factor,
+            format_duration_short(calibrated),
+        ));
+    } else {
+        let calibrated = raw_total.mul_f64(calibration_factor);
+        lines.push(format!(
+            "  Raw estimate: {} → calibrated (×{:.2}): {}",
+            serial_eq,
+            calibration_factor,
+            format_duration_short(calibrated),
+        ));
+    }
+    lines
+}
+
+/// Render the calibration debug as the lines to print under `--debug`.
+/// Lines come without a leading newline so the caller can decide framing.
+pub fn format_calibration_debug(debug: &CalibrationDebug) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "ETA debug: {} sample(s) total, {} at concurrency={} (need ≥{}).",
+        debug.total_samples, debug.bucket_samples, debug.concurrency, debug.min_samples,
+    ));
+    if debug.bucket_samples < debug.min_samples {
+        lines.push(format!(
+            "  Calibration factor: {:.2} (too few samples — using raw historical sum).",
+            debug.factor,
+        ));
+    } else {
+        lines.push(format!(
+            "  Calibration factor: {:.2} (EWMA α={}, clamp [{:.2}, {:.2}]).",
+            debug.factor, CALIBRATION_ALPHA, CALIBRATION_MIN, CALIBRATION_MAX,
+        ));
+    }
+    if !debug.recent_ratios.is_empty() {
+        let formatted: Vec<String> = debug
+            .recent_ratios
+            .iter()
+            .map(|r| format!("{:.2}", r))
+            .collect();
+        lines.push(format!(
+            "  Recent actual/predicted ratios (oldest→newest): [{}]",
+            formatted.join(", "),
+        ));
+    }
+    lines
+}
+
+/// Load calibration samples from the repository's recent runs. Pulls only
+/// what `calibration_factor` will actually consume — the most recent
+/// `CALIBRATION_LOOKBACK × 4` runs across all concurrencies, so a busy
+/// repo with many small concurrencies still gets enough samples in any one
+/// bucket. Reads are best-effort: a missing or malformed run is silently
+/// skipped, since calibration is an optimisation rather than a correctness
+/// requirement.
+pub fn load_calibration_samples(repo: &dyn Repository) -> Vec<CalibrationSample> {
+    let Ok(ids) = repo.list_run_ids() else {
+        return Vec::new();
+    };
+    let scan_limit = CALIBRATION_LOOKBACK.saturating_mul(4);
+    let recent_ids: Vec<&RunId> = ids.iter().rev().take(scan_limit).collect();
+
+    let mut samples: Vec<CalibrationSample> = Vec::with_capacity(recent_ids.len());
+    // Walk oldest-first within the recent window so the EWMA sees newest last.
+    for id in recent_ids.iter().rev() {
+        let Ok(meta) = repo.get_run_metadata(id) else {
+            continue;
+        };
+        let (Some(predicted_secs), Some(actual_secs), Some(concurrency)) = (
+            meta.predicted_duration_secs,
+            meta.duration_secs,
+            meta.concurrency,
+        ) else {
+            continue;
+        };
+        samples.push(CalibrationSample {
+            concurrency,
+            predicted_secs,
+            actual_secs,
+        });
+    }
+    samples
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +715,267 @@ mod tests {
         // completed + in-flight credit.
         let rendered = state.render();
         assert!(rendered.starts_with(" ETA: "), "got: {:?}", rendered);
+    }
+
+    fn sample(concurrency: u32, predicted: f64, actual: f64) -> CalibrationSample {
+        CalibrationSample {
+            concurrency,
+            predicted_secs: predicted,
+            actual_secs: actual,
+        }
+    }
+
+    #[test]
+    fn calibration_returns_neutral_with_too_few_samples() {
+        let samples = vec![sample(4, 60.0, 90.0), sample(4, 60.0, 90.0)];
+        assert_eq!(calibration_factor(&samples, 4), 1.0);
+    }
+
+    #[test]
+    fn calibration_filters_to_matching_concurrency() {
+        let samples = vec![
+            sample(1, 60.0, 90.0),
+            sample(1, 60.0, 90.0),
+            sample(1, 60.0, 90.0),
+            sample(4, 60.0, 30.0),
+        ];
+        // Only one sample at concurrency=4 — too few, so factor is 1.0.
+        assert_eq!(calibration_factor(&samples, 4), 1.0);
+        // Three samples at concurrency=1 with ratio 1.5 — factor should
+        // converge there (EWMA on a constant series collapses to that value).
+        let f = calibration_factor(&samples, 1);
+        assert!((f - 1.5).abs() < 1e-9, "got {}", f);
+    }
+
+    #[test]
+    fn calibration_skips_zero_or_negative_predictions() {
+        let samples = vec![
+            sample(2, 0.0, 90.0),  // predicted=0: skipped
+            sample(2, 60.0, 0.0),  // actual=0: skipped
+            sample(2, -1.0, 50.0), // negative: skipped
+            sample(2, 60.0, 60.0),
+            sample(2, 60.0, 60.0),
+        ];
+        // Only two valid samples — below threshold, so 1.0.
+        assert_eq!(calibration_factor(&samples, 2), 1.0);
+    }
+
+    #[test]
+    fn calibration_weights_recent_samples_more() {
+        // Old runs were 2x slower than predicted, recent runs are accurate.
+        // EWMA should land closer to 1.0 than to 2.0.
+        let samples = vec![
+            sample(4, 60.0, 120.0), // ratio 2.0
+            sample(4, 60.0, 120.0), // 2.0
+            sample(4, 60.0, 120.0), // 2.0
+            sample(4, 60.0, 60.0),  // 1.0
+            sample(4, 60.0, 60.0),  // 1.0
+            sample(4, 60.0, 60.0),  // 1.0
+        ];
+        let f = calibration_factor(&samples, 4);
+        // Closer to recent (1.0) than to old (2.0).
+        assert!(f < 1.4, "expected EWMA < 1.4, got {}", f);
+        assert!(f > 1.0, "expected EWMA > 1.0, got {}", f);
+    }
+
+    #[test]
+    fn calibration_clamps_outliers() {
+        // A pathological 100x slowdown should still be bounded.
+        let samples = vec![
+            sample(2, 1.0, 100.0),
+            sample(2, 1.0, 100.0),
+            sample(2, 1.0, 100.0),
+        ];
+        let f = calibration_factor(&samples, 2);
+        assert_eq!(f, CALIBRATION_MAX);
+    }
+
+    #[test]
+    fn calibration_clamps_underestimate_outliers() {
+        let samples = vec![
+            sample(2, 100.0, 1.0),
+            sample(2, 100.0, 1.0),
+            sample(2, 100.0, 1.0),
+        ];
+        let f = calibration_factor(&samples, 2);
+        assert_eq!(f, CALIBRATION_MIN);
+    }
+
+    #[test]
+    fn load_calibration_samples_pulls_runs_with_full_metadata() {
+        use crate::repository::{
+            inquest::InquestRepositoryFactory, RepositoryFactory, RunMetadata, TestResult, TestRun,
+        };
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut repo = InquestRepositoryFactory.initialise(temp.path()).unwrap();
+
+        let mut run0 = TestRun::new(RunId::new("0"));
+        run0.timestamp = chrono::DateTime::from_timestamp(1_000_000_000, 0).unwrap();
+        run0.add_result(TestResult::success("a"));
+        let id0 = repo.insert_test_run(run0).unwrap();
+        repo.set_run_metadata(
+            &id0,
+            RunMetadata {
+                concurrency: Some(2),
+                duration_secs: Some(45.0),
+                predicted_duration_secs: Some(30.0),
+                ..RunMetadata::default()
+            },
+        )
+        .unwrap();
+
+        // A run missing predicted_duration — should be skipped silently.
+        let mut run1 = TestRun::new(RunId::new("1"));
+        run1.timestamp = chrono::DateTime::from_timestamp(1_000_000_001, 0).unwrap();
+        run1.add_result(TestResult::success("a"));
+        let id1 = repo.insert_test_run(run1).unwrap();
+        repo.set_run_metadata(
+            &id1,
+            RunMetadata {
+                concurrency: Some(2),
+                duration_secs: Some(20.0),
+                predicted_duration_secs: None,
+                ..RunMetadata::default()
+            },
+        )
+        .unwrap();
+
+        let samples = load_calibration_samples(repo.as_ref());
+        assert_eq!(samples.len(), 1, "got: {:?}", samples);
+        assert_eq!(samples[0].concurrency, 2);
+        assert!((samples[0].predicted_secs - 30.0).abs() < 1e-9);
+        assert!((samples[0].actual_secs - 45.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn calibration_lookback_caps_history_window() {
+        // Many old "1.0" runs followed by a few recent "2.0" runs. With
+        // CALIBRATION_LOOKBACK=20 the recent runs dominate completely once
+        // there are enough; if the cap weren't applied, the long tail of
+        // 1.0s would pull the EWMA down further than it should.
+        let mut samples = Vec::new();
+        for _ in 0..50 {
+            samples.push(sample(1, 10.0, 10.0)); // ratio 1.0
+        }
+        for _ in 0..10 {
+            samples.push(sample(1, 10.0, 20.0)); // ratio 2.0
+        }
+        let f = calibration_factor(&samples, 1);
+        // With the cap, only the last 20 samples count: 10 of ratio 1.0 then
+        // 10 of ratio 2.0. Without the cap, it'd be ~1.0. Verify we're at
+        // least clearly above 1.0.
+        assert!(
+            f > 1.5,
+            "expected factor > 1.5 with lookback cap, got {}",
+            f
+        );
+    }
+
+    #[test]
+    fn format_calibration_debug_too_few_samples() {
+        let samples = vec![sample(4, 60.0, 90.0), sample(4, 60.0, 90.0)];
+        let debug = calibration_debug(&samples, 4);
+        let lines = format_calibration_debug(&debug);
+        assert_eq!(
+            lines,
+            vec![
+                "ETA debug: 2 sample(s) total, 2 at concurrency=4 (need ≥3).".to_string(),
+                "  Calibration factor: 1.00 (too few samples — using raw historical sum)."
+                    .to_string(),
+                "  Recent actual/predicted ratios (oldest→newest): [1.50, 1.50]".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_calibration_debug_with_factor() {
+        let samples = vec![
+            sample(2, 60.0, 90.0),
+            sample(2, 60.0, 90.0),
+            sample(2, 60.0, 90.0),
+        ];
+        let debug = calibration_debug(&samples, 2);
+        let lines = format_calibration_debug(&debug);
+        assert_eq!(
+            lines,
+            vec![
+                "ETA debug: 3 sample(s) total, 3 at concurrency=2 (need ≥3).".to_string(),
+                "  Calibration factor: 1.50 (EWMA α=0.3, clamp [0.25, 4.00]).".to_string(),
+                "  Recent actual/predicted ratios (oldest→newest): [1.50, 1.50, 1.50]".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_calibration_debug_no_samples() {
+        let debug = calibration_debug(&[], 4);
+        let lines = format_calibration_debug(&debug);
+        assert_eq!(
+            lines,
+            vec![
+                "ETA debug: 0 sample(s) total, 0 at concurrency=4 (need ≥3).".to_string(),
+                "  Calibration factor: 1.00 (too few samples — using raw historical sum)."
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_prediction_debug_serial() {
+        let mut historical = HashMap::new();
+        historical.insert(TestId::new("a"), Duration::from_secs(10));
+        historical.insert(TestId::new("b"), Duration::from_secs(20));
+        let tests = vec![TestId::new("a"), TestId::new("b"), TestId::new("c")];
+        let lines = format_prediction_debug(&tests, &historical, 1, 1.0);
+        // Known: a, b. Unknown: c → mean fallback 15s. Total 10+20+15 = 45s.
+        assert_eq!(
+            lines,
+            vec![
+                "ETA debug: 3 test(s) selected — 2 with history, 1 new (mean fallback 15s)."
+                    .to_string(),
+                "  Raw estimate: 45s → calibrated (×1.00): 45s".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_prediction_debug_parallel_with_calibration() {
+        let mut historical = HashMap::new();
+        historical.insert(TestId::new("a"), Duration::from_secs(60));
+        historical.insert(TestId::new("b"), Duration::from_secs(60));
+        historical.insert(TestId::new("c"), Duration::from_secs(60));
+        historical.insert(TestId::new("d"), Duration::from_secs(60));
+        let tests = vec![
+            TestId::new("a"),
+            TestId::new("b"),
+            TestId::new("c"),
+            TestId::new("d"),
+        ];
+        let lines = format_prediction_debug(&tests, &historical, 4, 1.5);
+        // Raw 4×60 = 240s. /4 = 60s. ×1.5 = 90s.
+        assert_eq!(
+            lines,
+            vec![
+                "ETA debug: 4 test(s) selected — 4 with history, 0 new (mean fallback 1m 00s)."
+                    .to_string(),
+                "  Raw sequential estimate: 4m 00s → 4-way parallel: 1m 00s → calibrated \
+                 (×1.50): 1m 30s"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_prediction_debug_unknown_tests() {
+        let lines = format_prediction_debug(&[], &HashMap::new(), 2, 1.0);
+        assert_eq!(
+            lines,
+            vec![
+                "ETA debug: prediction breakdown unavailable (tests will be discovered \
+                 by the runner)."
+                    .to_string()
+            ]
+        );
     }
 }

@@ -53,6 +53,19 @@ pub struct RunOutput {
     /// Extra arguments forwarded to the test command after `--`. Captured so
     /// `inq rerun` can reproduce the original invocation.
     pub test_args: Option<Vec<String>>,
+    /// Wall-clock duration predicted from historical times before the run
+    /// started, if any history was available. This is the *raw* prediction
+    /// (sum of historical per-test times divided by concurrency); the
+    /// calibration factor is reported separately as
+    /// [`Self::calibration_factor`]. Persisted as-is so future runs
+    /// calibrate against an honest baseline.
+    /// `None` when there was no historical signal to base a prediction on.
+    pub predicted_duration: Option<Duration>,
+    /// Multiplicative correction applied on top of `predicted_duration`
+    /// when computing the *displayed* ETA. `1.0` when no calibration was
+    /// applied (insufficient history, or the run had no
+    /// `predicted_duration` to scale).
+    pub calibration_factor: f64,
 }
 
 impl RunOutput {
@@ -301,6 +314,8 @@ impl<'a> TestExecutor<'a> {
             test_command: test_cmd.config().test_command.clone(),
             concurrency: 1,
             test_args: self.config.test_args.clone(),
+            predicted_duration: None,
+            calibration_factor: 1.0,
         })
     }
 
@@ -308,6 +323,12 @@ impl<'a> TestExecutor<'a> {
     ///
     /// The caller must pre-allocate the run via `repo.begin_test_run_raw()` and
     /// pass the resulting `(run_id, writer)`.
+    ///
+    /// `calibration_factor` scales the displayed ETA by a learned correction
+    /// factor (typically derived from past predicted-vs-actual deltas). The
+    /// factor only changes what's *shown* — the raw historical-sum
+    /// prediction is still recorded into the returned [`RunOutput`] so
+    /// future calibration math sees an unbiased baseline.
     #[allow(clippy::too_many_arguments)]
     pub fn run_serial(
         &self,
@@ -320,6 +341,7 @@ impl<'a> TestExecutor<'a> {
         run_id: RunId,
         raw_writer: Box<dyn std::io::Write + Send>,
         historical_times: &HashMap<TestId, Duration>,
+        calibration_factor: f64,
     ) -> Result<RunOutput> {
         let mut remaining_tests: Option<Vec<TestId>> = test_ids.map(|ids| ids.to_vec());
         let mut all_results: HashMap<TestId, TestResult> = HashMap::new();
@@ -350,6 +372,7 @@ impl<'a> TestExecutor<'a> {
         );
         let eta_model = EtaModel::new(durations);
         let estimated_total: Duration = eta_model.estimated_total(known_tests);
+        let calibrated_total = estimated_total.mul_f64(calibration_factor);
 
         let start_time = std::time::Instant::now();
         let mut next_raw_writer: Option<Box<dyn std::io::Write + Send>> = Some(raw_writer);
@@ -360,7 +383,7 @@ impl<'a> TestExecutor<'a> {
         let max_msg_len = layout.max_msg_len;
 
         let eta_state = if eta_model.has_history() {
-            Some(EtaState::new(estimated_total))
+            Some(EtaState::new(calibrated_total))
         } else {
             None
         };
@@ -670,6 +693,8 @@ impl<'a> TestExecutor<'a> {
             test_command: test_cmd.config().test_command.clone(),
             concurrency: 1,
             test_args: self.config.test_args.clone(),
+            predicted_duration: eta_model.has_history().then_some(estimated_total),
+            calibration_factor,
         })
     }
 
@@ -678,6 +703,10 @@ impl<'a> TestExecutor<'a> {
     /// The caller must pre-allocate `run_id` (e.g. via `repo.get_next_run_id()`).
     /// The `writer_factory` closure is called to create a writer for each worker on the
     /// first iteration; on restart iterations, workers write to `io::sink()`.
+    ///
+    /// `calibration_factor` scales the *displayed* ETA only; the raw
+    /// historical-sum prediction is still recorded in the returned
+    /// [`RunOutput`] so future calibration math has an unbiased baseline.
     #[allow(clippy::too_many_arguments)]
     pub fn run_parallel<F>(
         &self,
@@ -690,6 +719,7 @@ impl<'a> TestExecutor<'a> {
         test_timeout_fn: Option<&TestTimeoutFn>,
         run_id: RunId,
         historical_times: &HashMap<TestId, Duration>,
+        calibration_factor: f64,
         mut writer_factory: F,
     ) -> Result<RunOutput>
     where
@@ -717,6 +747,8 @@ impl<'a> TestExecutor<'a> {
                 test_command: test_cmd.config().test_command.clone(),
                 concurrency: concurrency as u32,
                 test_args: self.config.test_args.clone(),
+                predicted_duration: None,
+                calibration_factor: 1.0,
             });
         }
 
@@ -730,6 +762,7 @@ impl<'a> TestExecutor<'a> {
         );
         let eta_model = EtaModel::new(Arc::clone(&durations));
         let overall_estimated_total: Duration = eta_model.estimated_total(all_tests.iter());
+        let calibrated_overall_total = overall_estimated_total.mul_f64(calibration_factor);
 
         let group_regex = test_cmd.config().group_regex.as_deref();
 
@@ -746,7 +779,7 @@ impl<'a> TestExecutor<'a> {
         let overall_bar_width = overall_layout.bar_width;
 
         let overall_eta_state = if eta_model.has_history() {
-            Some(EtaState::new(overall_estimated_total))
+            Some(EtaState::new(calibrated_overall_total))
         } else {
             None
         };
@@ -816,7 +849,9 @@ impl<'a> TestExecutor<'a> {
                 // total would over-estimate.
                 let worker_estimated_total = eta_model.estimated_total(partition.iter());
                 let worker_eta_state = if eta_model.has_history() {
-                    Some(EtaState::new(worker_estimated_total))
+                    Some(EtaState::new(
+                        worker_estimated_total.mul_f64(calibration_factor),
+                    ))
                 } else {
                     None
                 };
@@ -1053,6 +1088,10 @@ impl<'a> TestExecutor<'a> {
             test_command: test_cmd.config().test_command.clone(),
             concurrency: concurrency as u32,
             test_args: self.config.test_args.clone(),
+            predicted_duration: eta_model
+                .has_history()
+                .then(|| overall_estimated_total / concurrency as u32),
+            calibration_factor,
         })
     }
 
@@ -1226,6 +1265,8 @@ impl<'a> TestExecutor<'a> {
             test_command: test_cmd.config().test_command.clone(),
             concurrency: 1,
             test_args: self.config.test_args.clone(),
+            predicted_duration: None,
+            calibration_factor: 1.0,
         })
     }
 }
@@ -1896,6 +1937,8 @@ mod tests {
             test_command: "echo".to_string(),
             concurrency: 1,
             test_args: None,
+            predicted_duration: None,
+            calibration_factor: 1.0,
         };
         assert_eq!(output.exit_code(), 0);
     }
@@ -1916,6 +1959,8 @@ mod tests {
             test_command: "echo".to_string(),
             concurrency: 1,
             test_args: None,
+            predicted_duration: None,
+            calibration_factor: 1.0,
         };
         assert_eq!(output.exit_code(), 1);
     }
@@ -1930,6 +1975,8 @@ mod tests {
             test_command: "echo".to_string(),
             concurrency: 1,
             test_args: None,
+            predicted_duration: None,
+            calibration_factor: 1.0,
         };
         assert_eq!(output.exit_code(), 1);
     }
@@ -1949,6 +1996,8 @@ mod tests {
             test_command: "echo".to_string(),
             concurrency: 1,
             test_args: None,
+            predicted_duration: None,
+            calibration_factor: 1.0,
         };
         assert_eq!(output.exit_code(), 1);
     }
@@ -1966,6 +2015,8 @@ mod tests {
             test_command: "cargo test".to_string(),
             concurrency: 2,
             test_args: None,
+            predicted_duration: None,
+            calibration_factor: 1.0,
         };
         let test_run = output.into_test_run();
         assert_eq!(test_run.id.as_str(), "42");

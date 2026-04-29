@@ -139,6 +139,7 @@ pub fn store_run_metadata(
     exit_code: Option<i32>,
     test_args: Option<Vec<String>>,
     profile: Option<String>,
+    predicted_duration: Option<std::time::Duration>,
 ) -> Result<()> {
     let git_commit = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -175,6 +176,7 @@ pub fn store_run_metadata(
         exit_code,
         test_args,
         profile,
+        predicted_duration_secs: predicted_duration.map(|d| d.as_secs_f64()),
     };
 
     repo.set_run_metadata(run_id, metadata)
@@ -192,6 +194,78 @@ pub fn update_repository_failing_tests(
         repo.replace_failing_tests(test_run)?;
     }
     Ok(())
+}
+
+/// Print a one-line comparison of the run's ETA prediction against its
+/// actual wall-clock duration. The raw historical-sum prediction is
+/// reported alongside its calibrated form (when the calibration factor
+/// differs meaningfully from `1.0`), then the actual duration and the
+/// delta-vs-calibrated-prediction.
+///
+/// Skipped when the raw prediction was zero (no useful signal to
+/// compare against).
+pub fn report_eta_accuracy(
+    ui: &mut dyn UI,
+    predicted: std::time::Duration,
+    actual: std::time::Duration,
+    calibration_factor: f64,
+) -> Result<()> {
+    let predicted_secs = predicted.as_secs_f64();
+    if predicted_secs <= 0.0 {
+        return Ok(());
+    }
+    let calibrated = predicted.mul_f64(calibration_factor);
+    let calibrated_secs = calibrated.as_secs_f64();
+    let actual_secs = actual.as_secs_f64();
+    // Compare against the calibrated prediction — that's what the user
+    // actually saw on-screen during the run.
+    let delta_secs = actual_secs - calibrated_secs;
+    let pct = if calibrated_secs > 0.0 {
+        (delta_secs / calibrated_secs) * 100.0
+    } else {
+        0.0
+    };
+    let direction = if delta_secs >= 0.0 {
+        "slower"
+    } else {
+        "faster"
+    };
+    // Only mention calibration when it materially shifted the prediction;
+    // a no-op factor is just noise.
+    let calibration_note = if (calibration_factor - 1.0).abs() >= 0.05 {
+        format!(
+            ", calibrated {} (×{:.2})",
+            format_short_duration(calibrated),
+            calibration_factor
+        )
+    } else {
+        String::new()
+    };
+    ui.output(&format!(
+        "  ETA accuracy: predicted {}{}, actual {} ({:.0}% {})",
+        format_short_duration(predicted),
+        calibration_note,
+        format_short_duration(actual),
+        pct.abs(),
+        direction,
+    ))?;
+    Ok(())
+}
+
+/// Format a duration as a short human-readable string (e.g., "1m 23s").
+fn format_short_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        format!("{}h {:02}m", hours, mins)
+    } else if secs >= 60 {
+        let mins = secs / 60;
+        let remaining = secs % 60;
+        format!("{}m {:02}s", mins, remaining)
+    } else {
+        format!("{}s", secs)
+    }
 }
 
 /// Display a test run summary, optionally restricting the counts to a tag
@@ -305,6 +379,7 @@ pub fn persist_and_display_run(
     historical_times: &std::collections::HashMap<crate::repository::TestId, std::time::Duration>,
     filter_tags: &[String],
     profile: Option<String>,
+    eta_debug: bool,
 ) -> Result<(i32, RunId)> {
     let exit_code = output.exit_code();
     let crate::test_executor::RunOutput {
@@ -314,6 +389,8 @@ pub fn persist_and_display_run(
         test_command,
         concurrency,
         test_args,
+        predicted_duration,
+        calibration_factor,
         ..
     } = output;
 
@@ -334,9 +411,15 @@ pub fn persist_and_display_run(
         Some(exit_code),
         test_args,
         profile.clone(),
+        predicted_duration,
     )?;
 
     display_test_summary(ui, &run_id, &combined_run, filter_tags)?;
+    if eta_debug {
+        if let Some(predicted) = predicted_duration {
+            report_eta_accuracy(ui, predicted, duration, calibration_factor)?;
+        }
+    }
     warn_slow_tests(ui, &combined_run, historical_times)?;
 
     Ok((exit_code, run_id))
@@ -567,6 +650,183 @@ mod tests {
     }
 
     #[test]
+    fn test_report_eta_accuracy_slower() {
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        report_eta_accuracy(
+            &mut ui,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(75),
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(
+            ui.output,
+            vec!["  ETA accuracy: predicted 1m 00s, actual 1m 15s (25% slower)".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_report_eta_accuracy_faster() {
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        report_eta_accuracy(
+            &mut ui,
+            std::time::Duration::from_secs(100),
+            std::time::Duration::from_secs(80),
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(
+            ui.output,
+            vec!["  ETA accuracy: predicted 1m 40s, actual 1m 20s (20% faster)".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_report_eta_accuracy_skips_zero_prediction() {
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        report_eta_accuracy(
+            &mut ui,
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(5),
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(ui.output, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_report_eta_accuracy_with_calibration() {
+        // Predicted 60s raw, calibration ×1.5 → calibrated 90s. Actual 90s.
+        // Delta is computed against the calibrated prediction (what the
+        // user actually saw on-screen), so this lands at 0%.
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        report_eta_accuracy(
+            &mut ui,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(90),
+            1.5,
+        )
+        .unwrap();
+        assert_eq!(
+            ui.output,
+            vec![
+                "  ETA accuracy: predicted 1m 00s, calibrated 1m 30s (×1.50), \
+                 actual 1m 30s (0% slower)"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_report_eta_accuracy_calibration_near_one_omits_note() {
+        // A factor of 1.02 isn't worth surfacing — the user would just see
+        // noise. The line drops the calibration clause entirely. The
+        // delta is still measured against the (calibrated) prediction the
+        // user saw — 60s vs 61.2s rounds to 2% faster.
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        report_eta_accuracy(
+            &mut ui,
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+            1.02,
+        )
+        .unwrap();
+        assert_eq!(
+            ui.output,
+            vec!["  ETA accuracy: predicted 1m 00s, actual 1m 00s (2% faster)".to_string()]
+        );
+    }
+
+    fn build_run_output_with_prediction(
+        predicted: Option<std::time::Duration>,
+        actual: std::time::Duration,
+    ) -> crate::test_executor::RunOutput {
+        let mut results = std::collections::HashMap::new();
+        results.insert(
+            crate::repository::TestId::new("test1"),
+            crate::repository::TestResult::success("test1").with_duration(actual),
+        );
+        crate::test_executor::RunOutput {
+            run_id: crate::repository::RunId::new("1"),
+            results,
+            any_command_failed: false,
+            duration: actual,
+            test_command: "echo test".to_string(),
+            concurrency: 1,
+            test_args: None,
+            predicted_duration: predicted,
+            calibration_factor: 1.0,
+        }
+    }
+
+    #[test]
+    fn test_persist_omits_eta_accuracy_without_eta_debug() {
+        let temp = TempDir::new().unwrap();
+        let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+        let output = build_run_output_with_prediction(
+            Some(std::time::Duration::from_secs(60)),
+            std::time::Duration::from_secs(75),
+        );
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let historical = std::collections::HashMap::new();
+        persist_and_display_run(
+            &mut ui,
+            repo.as_mut(),
+            output,
+            false,
+            &historical,
+            &[],
+            None,
+            false,
+        )
+        .unwrap();
+        // Without --eta-debug the summary stops at the pass/fail counts;
+        // the ETA-accuracy line is suppressed.
+        assert_eq!(
+            ui.output,
+            vec![
+                "\nTest run 1:".to_string(),
+                "  Total:   1".to_string(),
+                "  Passed:  1".to_string(),
+                "  Failed:  0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_persist_includes_eta_accuracy_with_eta_debug() {
+        let temp = TempDir::new().unwrap();
+        let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
+        let output = build_run_output_with_prediction(
+            Some(std::time::Duration::from_secs(60)),
+            std::time::Duration::from_secs(75),
+        );
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let historical = std::collections::HashMap::new();
+        persist_and_display_run(
+            &mut ui,
+            repo.as_mut(),
+            output,
+            false,
+            &historical,
+            &[],
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            ui.output,
+            vec![
+                "\nTest run 1:".to_string(),
+                "  Total:   1".to_string(),
+                "  Passed:  1".to_string(),
+                "  Failed:  0".to_string(),
+                "  ETA accuracy: predicted 1m 00s, actual 1m 15s (25% slower)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn test_persist_and_display_run_success() {
         let temp = TempDir::new().unwrap();
         let mut repo = init_repository(Some(&temp.path().to_string_lossy())).unwrap();
@@ -592,6 +852,8 @@ mod tests {
             test_command: "echo test".to_string(),
             concurrency: 1,
             test_args: None,
+            predicted_duration: None,
+            calibration_factor: 1.0,
         };
 
         let mut ui = crate::ui::test_ui::TestUI::new();
@@ -604,6 +866,7 @@ mod tests {
             &historical,
             &[],
             None,
+            false,
         )
         .unwrap();
 
@@ -681,6 +944,8 @@ mod tests {
             test_command: "cargo test".to_string(),
             concurrency: 1,
             test_args: None,
+            predicted_duration: None,
+            calibration_factor: 1.0,
         };
 
         let mut ui = crate::ui::test_ui::TestUI::new();
@@ -693,6 +958,7 @@ mod tests {
             &historical,
             &[],
             None,
+            false,
         )
         .unwrap();
 

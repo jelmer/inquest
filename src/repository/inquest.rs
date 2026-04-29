@@ -166,7 +166,8 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<()> {
             errors INTEGER NOT NULL DEFAULT 0,
             skips INTEGER NOT NULL DEFAULT 0,
             test_args TEXT,
-            profile TEXT
+            profile TEXT,
+            predicted_duration_secs REAL
         );
 
         CREATE TABLE test_results (
@@ -231,6 +232,7 @@ fn migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
     add_column_if_missing(conn, "runs", "git_dirty", "INTEGER");
     add_column_if_missing(conn, "runs", "test_args", "TEXT");
     add_column_if_missing(conn, "runs", "profile", "TEXT");
+    add_column_if_missing(conn, "runs", "predicted_duration_secs", "REAL");
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS test_results_test_id_run_id \
          ON test_results (test_id, run_id);
@@ -680,7 +682,7 @@ impl Repository for InquestRepository {
 
     fn get_run_metadata(&self, run_id: &RunId) -> Result<RunMetadata> {
         let result = self.conn.query_row(
-            "SELECT git_commit, git_dirty, command, concurrency, duration_secs, exit_code, test_args, profile FROM runs WHERE id = ?",
+            "SELECT git_commit, git_dirty, command, concurrency, duration_secs, exit_code, test_args, profile, predicted_duration_secs FROM runs WHERE id = ?",
             [run_id.as_str()],
             |row| {
                 let test_args_json: Option<String> = row.get(6)?;
@@ -696,6 +698,7 @@ impl Repository for InquestRepository {
                     exit_code: row.get(5)?,
                     test_args,
                     profile: row.get(7)?,
+                    predicted_duration_secs: row.get(8)?,
                 })
             },
         );
@@ -826,7 +829,7 @@ impl Repository for InquestRepository {
             .transpose()
             .map_err(|e| Error::Other(format!("Failed to serialize test_args: {}", e)))?;
         self.conn.execute(
-            "UPDATE runs SET git_commit = ?, git_dirty = ?, command = ?, concurrency = ?, duration_secs = ?, exit_code = ?, test_args = ?, profile = ? WHERE id = ?",
+            "UPDATE runs SET git_commit = ?, git_dirty = ?, command = ?, concurrency = ?, duration_secs = ?, exit_code = ?, test_args = ?, profile = ?, predicted_duration_secs = ? WHERE id = ?",
             params![
                 metadata.git_commit,
                 metadata.git_dirty,
@@ -836,6 +839,7 @@ impl Repository for InquestRepository {
                 metadata.exit_code,
                 test_args_json,
                 metadata.profile,
+                metadata.predicted_duration_secs,
                 run_id.as_str(),
             ],
         )?;
@@ -1459,6 +1463,7 @@ mod tests {
                 exit_code: Some(1),
                 test_args: Some(vec!["-x".to_string(), "--maxfail=3".to_string()]),
                 profile: None,
+                predicted_duration_secs: None,
             },
         )
         .unwrap();
@@ -1720,6 +1725,7 @@ mod tests {
                 exit_code: Some(0),
                 test_args: None,
                 profile: None,
+                predicted_duration_secs: None,
             },
         )
         .unwrap();

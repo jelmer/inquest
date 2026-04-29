@@ -27,6 +27,11 @@ struct Cli {
     #[arg(long, global = true, value_name = "NAME")]
     profile: Option<String>,
 
+    /// Print details about the ETA prediction (calibration factor,
+    /// per-test breakdown, predicted-vs-actual accuracy after the run).
+    #[arg(long = "eta-debug", global = true)]
+    eta_debug: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -785,6 +790,7 @@ fn main() {
                 test_ids_override: None,
                 profile: profile.clone(),
                 implicit_run,
+                eta_debug: cli.eta_debug,
             };
             cmd.execute(&mut ui)
         }
