@@ -1,0 +1,12 @@
+{
+  "name": "inquest",
+  "description": "Inquest test repository MCP server for analyzing test runs, failing tests, and tracebacks",
+  "version": "0.1.4",
+  "author": {
+    "name": "Jelmer Vernooĳ",
+    "email": "jelmer@jelmer.uk"
+  },
+  "homepage": "https://github.com/jelmer/inquest",
+  "repository": "https://github.com/jelmer/inquest",
+  "license": "Apache-2.0"
+}

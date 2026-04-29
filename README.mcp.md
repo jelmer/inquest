@@ -34,6 +34,27 @@ To make it available across all your projects (user-scoped):
 claude mcp add --transport stdio --scope user inquest -- inq mcp
 ```
 
+### As a Claude Code plugin
+
+This repository is also a Claude Code plugin and marketplace. From inside
+Claude Code:
+
+```
+/plugin marketplace add jelmer/inquest
+/plugin install inquest@inquest
+```
+
+The plugin requires `inq` on your `PATH` (built with `--features mcp`). It
+bundles a `test-triage` skill that tells Claude when to prefer the `inq_*`
+MCP tools over shelling out to `inq`, `cargo test`, `pytest`, etc., and which
+tool to reach for at each step of the triage workflow. The skill auto-activates
+when you ask about failing tests in a project inquest can manage, or you can
+invoke it explicitly as `/inquest:test-triage`.
+
+To test plugin changes locally without going through the marketplace, run
+Claude Code with `claude --plugin-dir plugins/claude`, and use
+`/reload-plugins` to pick up edits.
+
 ### Manual configuration
 
 Alternatively, create or edit `.mcp.json` in your project root:

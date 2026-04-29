@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "inquest": {
+      "type": "stdio",
+      "command": "inq",
+      "args": ["mcp"]
+    }
+  }
+}
