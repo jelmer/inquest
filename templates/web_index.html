@@ -699,6 +699,7 @@
   <span id="status-msg">ready.</span>
   <div id="progress-wrap"><div id="progress-bar"></div></div>
   <span id="progress-counts"></span>
+  <button id="cancel-btn" style="display:none;padding:3px 10px;border:1px solid var(--fail);background:#fff;color:var(--fail);border-radius:3px;cursor:pointer;font:inherit;font-size:11px;">Stop</button>
 </div>
 <script>
 const statusMsgEl = document.getElementById("status-msg");
@@ -726,6 +727,35 @@ function clearProgress() {
   progressBar.style.width = "0%";
   progressCountsEl.textContent = "";
 }
+
+const cancelBtn = document.getElementById("cancel-btn");
+function showCancelBtn(visible) {
+  cancelBtn.style.display = visible ? "" : "none";
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = "Stop";
+}
+cancelBtn.addEventListener("click", async () => {
+  if (!activeRun) return;
+  cancelBtn.disabled = true;
+  cancelBtn.textContent = "Stopping…";
+  try {
+    const resp = await fetch(`/api/active/${activeRun}/cancel`, { method: "POST" });
+    const data = await resp.json();
+    if (data.status === "cancelled") {
+      setStatus("cancel signal sent — waiting for child to exit…");
+    } else if (data.status === "already_finished") {
+      setStatus("run already finished.");
+    } else if (data.error) {
+      setStatus("cancel failed: " + data.error);
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = "Stop";
+    }
+  } catch (e) {
+    setStatus("cancel request failed: " + e);
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = "Stop";
+  }
+});
 
 let activeRun = null;
 let testStats = new Map();
@@ -1712,6 +1742,7 @@ function attachSse(handle, initialTotal) {
   activeRun = handle;
   liveStatuses.clear();
   resetLog();
+  showCancelBtn(true);
   let runningCount = 0;
   let completedCount = 0;
   let failedCount = 0;
@@ -1766,6 +1797,7 @@ function attachSse(handle, initialTotal) {
     } else if (data.kind === "finished") {
       es.close();
       activeRun = null;
+      showCancelBtn(false);
       setStatus(`run finished (exit ${data.exit_code}). reloading…`);
       // Collapse (but don't hide) the log so the page returns to its
       // pre-run layout. Content remains accessible by clicking the
@@ -1781,6 +1813,7 @@ function attachSse(handle, initialTotal) {
     } else if (data.kind === "error") {
       es.close();
       activeRun = null;
+      showCancelBtn(false);
       setStatus("error: " + data.message);
       appendLog(`! ${data.message}`);
       clearProgress();
@@ -1791,6 +1824,7 @@ function attachSse(handle, initialTotal) {
     es.close();
     if (activeRun === handle) {
       activeRun = null;
+      showCancelBtn(false);
       setStatus("connection lost");
       clearProgress();
     }

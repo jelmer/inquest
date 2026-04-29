@@ -53,6 +53,10 @@ pub(crate) struct AppState {
 pub(crate) struct RunHandle {
     pub(crate) tx: broadcast::Sender<RunEvent>,
     pub(crate) history: Arc<Mutex<Vec<RunEvent>>>,
+    /// PID of the spawned child, set once the spawn succeeds and cleared
+    /// when the child is reaped. The cancel handler reads this to deliver
+    /// SIGTERM to the process group.
+    pub(crate) child_pid: Arc<Mutex<Option<u32>>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -122,6 +126,7 @@ pub async fn serve(base: PathBuf, addr: String) -> Result<()> {
         .route("/api/timeline", get(repo::api_timeline))
         .route("/api/run", post(run::api_start_run))
         .route("/api/active/:id/events", get(run::api_run_events))
+        .route("/api/active/:id/cancel", post(run::api_cancel_run))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr)

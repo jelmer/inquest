@@ -93,6 +93,7 @@ pub(super) async fn api_start_run(
     let handle_id = state.next_run.fetch_add(1, Ordering::SeqCst);
     let (tx, _) = broadcast::channel::<RunEvent>(SSE_CHANNEL_CAPACITY);
     let history: Arc<Mutex<Vec<RunEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let child_pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
     {
         let mut runs = state.runs.lock().expect("runs mutex poisoned");
         runs.insert(
@@ -100,6 +101,7 @@ pub(super) async fn api_start_run(
             RunHandle {
                 tx: tx.clone(),
                 history: history.clone(),
+                child_pid: child_pid.clone(),
             },
         );
     }
@@ -107,7 +109,7 @@ pub(super) async fn api_start_run(
     let base = state.base.clone();
     let runs_map = state.runs.clone();
     tokio::task::spawn_blocking(move || {
-        let result = drive_child_run(&base, &req, &history, &tx);
+        let result = drive_child_run(&base, &req, &history, &tx, &child_pid);
         let event = match result {
             Ok(code) => RunEvent::Finished { exit_code: code },
             Err(e) => RunEvent::Error {
@@ -162,6 +164,7 @@ fn drive_child_run(
     req: &StartRunRequest,
     history: &Arc<Mutex<Vec<RunEvent>>>,
     tx: &broadcast::Sender<RunEvent>,
+    child_pid: &Arc<Mutex<Option<u32>>>,
 ) -> Result<i32> {
     use std::io::Write;
     use std::process::{Command as Proc, Stdio};
@@ -262,6 +265,13 @@ fn drive_child_run(
         .spawn()
         .map_err(|e| Error::Other(format!("failed to spawn inq run: {}", e)))?;
 
+    // Record the PID so the cancel handler can deliver SIGTERM to the
+    // process group. We assign before emitting `Spawned` so a cancel that
+    // races the very first event still has a target.
+    if let Ok(mut slot) = child_pid.lock() {
+        *slot = Some(child.id());
+    }
+
     emit(history, tx, RunEvent::Spawned { command: cmd_repr });
 
     let stdout = child
@@ -318,6 +328,12 @@ fn drive_child_run(
         .wait()
         .map_err(|e| Error::Other(format!("waiting for child: {}", e)))?;
     drop(load_list_file);
+
+    // Clear the PID so a late cancel request returns "already finished"
+    // instead of trying to signal a reaped process.
+    if let Ok(mut slot) = child_pid.lock() {
+        *slot = None;
+    }
 
     if let Some(h) = stderr_handle {
         let _ = h.join();
@@ -390,6 +406,99 @@ pub(super) async fn api_run_events(
         .into_response()
 }
 
+#[derive(Serialize)]
+pub(super) struct CancelResponse {
+    /// Outcome: "cancelled" if we delivered a signal, "already_finished"
+    /// if the child had already exited, or an error message.
+    status: String,
+}
+
+/// `POST /api/active/:id/cancel` — terminate the spawned child of an
+/// in-progress run. We send SIGTERM to the child's process group on Unix
+/// so any test workers it forked die with it. On Windows we fall back to
+/// `TerminateProcess` for just the child.
+///
+/// The terminated child's wait() call inside `drive_child_run` returns
+/// with a non-zero exit, which the spawn_blocking task already converts
+/// into a `Finished` event — the SSE stream closes naturally, no extra
+/// machinery needed.
+pub(super) async fn api_cancel_run(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<u64>,
+) -> Response {
+    let pid_opt = {
+        let runs = state.runs.lock().expect("runs mutex poisoned");
+        match runs.get(&id) {
+            Some(handle) => handle.child_pid.lock().ok().and_then(|g| *g),
+            None => return json_error(StatusCode::NOT_FOUND, "unknown run handle"),
+        }
+    };
+    let pid = match pid_opt {
+        Some(p) => p,
+        None => {
+            return Json(CancelResponse {
+                status: "already_finished".to_string(),
+            })
+            .into_response();
+        }
+    };
+    match send_terminate(pid) {
+        Ok(()) => Json(CancelResponse {
+            status: "cancelled".to_string(),
+        })
+        .into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("could not signal pid {}: {}", pid, e),
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn send_terminate(pid: u32) -> std::io::Result<()> {
+    // Negate the pid to deliver to the child's process group, so any test
+    // workers it forked also receive the signal. The child was spawned via
+    // the standard library's `Command`, which doesn't always start its own
+    // group — but `kill(-pid, ...)` is harmless if the group doesn't
+    // exist; we fall through to `kill(pid, ...)` in that case.
+    // SAFETY: libc::kill is FFI, no shared-state hazards.
+    let group_result = unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+    if group_result == 0 {
+        return Ok(());
+    }
+    let direct = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    if direct == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn send_terminate(pid: u32) -> std::io::Result<()> {
+    use std::process::Command;
+    // No tightly-coupled crate dep; shell out to `taskkill`. /T kills the
+    // tree, /F is force.
+    let status = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "taskkill exited with {:?}",
+            status.code()
+        )))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn send_terminate(_pid: u32) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "cancel not supported on this platform",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +519,72 @@ mod tests {
         let resolved = resolve_inq_exe().unwrap();
         let expected = std::env::current_exe().unwrap();
         assert_eq!(resolved, expected);
+    }
+
+    #[tokio::test]
+    async fn cancel_endpoint_handles_unknown_and_finished_handles() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use axum::routing::post;
+        use axum::Router;
+        use http_body_util::BodyExt;
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicU64;
+        use tower::ServiceExt;
+
+        // Two scenarios in one test:
+        // 1. unknown handle id → 404
+        // 2. known handle but no live PID → 200 with status "already_finished"
+        let runs_map: Arc<Mutex<HashMap<u64, RunHandle>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        // Insert a handle that has no PID (i.e. the child already exited).
+        let (tx, _) = broadcast::channel::<RunEvent>(SSE_CHANNEL_CAPACITY);
+        runs_map.lock().unwrap().insert(
+            42,
+            RunHandle {
+                tx,
+                history: Arc::new(Mutex::new(Vec::new())),
+                child_pid: Arc::new(Mutex::new(None)),
+            },
+        );
+
+        let state = AppState {
+            base: std::path::PathBuf::from("."),
+            runs: runs_map,
+            next_run: Arc::new(AtomicU64::new(1)),
+        };
+        let app = Router::new()
+            .route("/api/active/:id/cancel", post(api_cancel_run))
+            .with_state(state);
+
+        // Unknown handle.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/active/9999/cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Known handle with no PID — the child has already exited.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/active/42/cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["status"], "already_finished");
     }
 }
