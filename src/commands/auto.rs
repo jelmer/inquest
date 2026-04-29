@@ -12,19 +12,23 @@ struct Detection {
     test_command: &'static str,
     test_id_option: Option<&'static str>,
     test_list_option: Option<&'static str>,
+    group_regex: Option<&'static str>,
 }
 
 /// Detect project type from files present in the directory.
 fn detect_project(base: &Path) -> Vec<Detection> {
     let mut detections = Vec::new();
 
-    // Rust/Cargo project
+    // Rust/Cargo project. Cargo test IDs use `::` as the path separator
+    // (e.g. `crate::module::sub::test_name`), so group on everything up to
+    // the final `::` to put a module's tests under one parent.
     if base.join("Cargo.toml").exists() {
         detections.push(Detection {
             name: "Cargo (Rust)",
             test_command: "cargo subunit $LISTOPT $IDOPTION",
             test_id_option: Some("--load-list $IDFILE"),
             test_list_option: Some("--list"),
+            group_regex: Some("^(.*)::[^:]+$"),
         });
     }
 
@@ -35,6 +39,7 @@ fn detect_project(base: &Path) -> Vec<Detection> {
             test_command: "pytest --subunit $IDOPTION",
             test_id_option: Some("--load-list $IDFILE"),
             test_list_option: None,
+            group_regex: Some("^(.*)::[^:]+$"),
         });
     }
 
@@ -45,6 +50,7 @@ fn detect_project(base: &Path) -> Vec<Detection> {
             test_command: "python3 -m subunit.run discover $IDOPTION $LISTOPT",
             test_id_option: Some("--load-list $IDFILE"),
             test_list_option: Some("--list"),
+            group_regex: Some("^(.*)\\.[^.]+$"),
         });
     }
 
@@ -61,6 +67,7 @@ fn detect_project(base: &Path) -> Vec<Detection> {
             test_command: "gotest-run $LISTOPT $IDOPTION",
             test_id_option: Some("--id-file $IDFILE"),
             test_list_option: Some("--list"),
+            group_regex: Some("^(.*)\\.[^.]+$"),
         });
     }
 
@@ -71,6 +78,7 @@ fn detect_project(base: &Path) -> Vec<Detection> {
             test_command: "prove-subunit",
             test_id_option: None,
             test_list_option: None,
+            group_regex: None,
         });
     }
 
@@ -83,6 +91,7 @@ fn detect_project(base: &Path) -> Vec<Detection> {
             test_command: "vitest run --reporter=tap | tap2subunit",
             test_id_option: None,
             test_list_option: None,
+            group_regex: None,
         });
     }
 
@@ -98,6 +107,7 @@ fn detect_project(base: &Path) -> Vec<Detection> {
             test_command: "jest --ci --reporters=jest-junit; junitxml2subunit junit.xml",
             test_id_option: None,
             test_list_option: None,
+            group_regex: None,
         });
     }
 
@@ -239,6 +249,9 @@ fn format_toml(detection: &Detection) -> String {
     if let Some(opt) = detection.test_list_option {
         lines.push(format!("test_list_option = {:?}", opt));
     }
+    if let Some(opt) = detection.group_regex {
+        lines.push(format!("group_regex = {:?}", opt));
+    }
     lines.join("\n") + "\n"
 }
 
@@ -374,7 +387,8 @@ mod tests {
             content,
             "test_command = \"cargo subunit $LISTOPT $IDOPTION\"\n\
              test_id_option = \"--load-list $IDFILE\"\n\
-             test_list_option = \"--list\"\n"
+             test_list_option = \"--list\"\n\
+             group_regex = \"^(.*)::[^:]+$\"\n"
         );
     }
 
@@ -400,7 +414,8 @@ mod tests {
         assert_eq!(
             content,
             "test_command = \"pytest --subunit $IDOPTION\"\n\
-             test_id_option = \"--load-list $IDFILE\"\n"
+             test_id_option = \"--load-list $IDFILE\"\n\
+             group_regex = \"^(.*)::[^:]+$\"\n"
         );
     }
 
@@ -450,7 +465,8 @@ mod tests {
             content,
             "test_command = \"python3 -m subunit.run discover $IDOPTION $LISTOPT\"\n\
              test_id_option = \"--load-list $IDFILE\"\n\
-             test_list_option = \"--list\"\n"
+             test_list_option = \"--list\"\n\
+             group_regex = \"^(.*)\\\\.[^.]+$\"\n"
         );
     }
 
@@ -499,7 +515,8 @@ mod tests {
             content,
             "test_command = \"gotest-run $LISTOPT $IDOPTION\"\n\
              test_id_option = \"--id-file $IDFILE\"\n\
-             test_list_option = \"--list\"\n"
+             test_list_option = \"--list\"\n\
+             group_regex = \"^(.*)\\\\.[^.]+$\"\n"
         );
     }
 
@@ -785,12 +802,14 @@ mod tests {
             test_command: "test-cmd $LISTOPT $IDOPTION",
             test_id_option: Some("--load-list $IDFILE"),
             test_list_option: Some("--list"),
+            group_regex: Some("^(.*)::[^:]+$"),
         };
         assert_eq!(
             format_toml(&detection),
             "test_command = \"test-cmd $LISTOPT $IDOPTION\"\n\
              test_id_option = \"--load-list $IDFILE\"\n\
-             test_list_option = \"--list\"\n"
+             test_list_option = \"--list\"\n\
+             group_regex = \"^(.*)::[^:]+$\"\n"
         );
     }
 
@@ -801,6 +820,7 @@ mod tests {
             test_command: "test-cmd",
             test_id_option: None,
             test_list_option: None,
+            group_regex: None,
         };
         assert_eq!(format_toml(&detection), "test_command = \"test-cmd\"\n");
     }
