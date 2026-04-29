@@ -286,6 +286,22 @@ enum Commands {
     #[cfg(feature = "mcp")]
     Mcp,
 
+    /// Start a local web UI for browsing tests and triggering runs
+    #[cfg(feature = "web")]
+    Web {
+        /// Address to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+
+        /// Port to listen on
+        #[arg(long, default_value_t = 8765)]
+        port: u16,
+
+        /// Open the URL in the default browser after starting
+        #[arg(long)]
+        open: bool,
+    },
+
     /// Run tests and load results
     Run {
         /// Run only the tests that failed in the last run
@@ -680,6 +696,11 @@ fn main() {
                     Ok(1)
                 }
             }
+        }
+        #[cfg(feature = "web")]
+        Commands::Web { bind, port, open } => {
+            let cmd = inquest::commands::WebCommand::new(cli.directory, bind, port, open);
+            cmd.execute(&mut ui)
         }
         Commands::Run {
             failing,
