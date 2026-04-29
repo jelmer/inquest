@@ -85,6 +85,7 @@ pub mod grouping;
 pub mod mcp;
 pub mod ordering;
 pub mod partition;
+pub mod pty;
 pub mod repository;
 pub mod subunit_stream;
 pub mod test_executor;
