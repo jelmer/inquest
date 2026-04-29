@@ -108,6 +108,14 @@
     font-size: 12px;
   }
   .group li:hover { background: #f4f7fb; }
+  .group li[data-kb-active="1"] {
+    background: #e6efff;
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  table.runs tbody tr[data-kb-active="1"] {
+    background: #e6efff !important;
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
   .group li .id { flex: 1; word-break: break-all; }
   .group li .stats {
     color: var(--muted);
@@ -456,6 +464,51 @@
   .test-detail .history td.dur { font-variant-numeric: tabular-nums; text-align: right; }
   .test-detail .history td.status .badge { vertical-align: middle; }
   .test-detail .empty { color: var(--muted); font-size: 12px; }
+
+  /* Keyboard help overlay */
+  #kb-help {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  #kb-help.visible { display: flex; }
+  #kb-help .panel {
+    background: #fff;
+    border-radius: 6px;
+    padding: 18px 22px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+    min-width: 360px;
+    max-width: 540px;
+  }
+  #kb-help h2 {
+    margin: 0 0 12px 0;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+  }
+  #kb-help dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 6px 16px;
+    margin: 0;
+    font-size: 13px;
+  }
+  #kb-help dt {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--accent);
+    text-align: right;
+  }
+  #kb-help dd { margin: 0; }
+  #kb-help .close {
+    margin-top: 14px;
+    font-size: 11px;
+    color: var(--muted);
+  }
 </style>
 </head>
 <body>
@@ -575,6 +628,24 @@
     </form>
   </section>
 </main>
+<div id="kb-help" role="dialog" aria-label="Keyboard shortcuts">
+  <div class="panel">
+    <h2>Keyboard shortcuts</h2>
+    <dl>
+      <dt>j / ↓</dt><dd>Move highlight down</dd>
+      <dt>k / ↑</dt><dd>Move highlight up</dd>
+      <dt>g</dt><dd>Jump to first row</dd>
+      <dt>G</dt><dd>Jump to last row</dd>
+      <dt>Enter</dt><dd>Expand / collapse the highlighted row</dd>
+      <dt>r</dt><dd>Run the highlighted test (Tests panel)</dd>
+      <dt>/</dt><dd>Focus the search box</dd>
+      <dt>1–4</dt><dd>Switch to Tests / Runs / Repository / Run tab</dd>
+      <dt>?</dt><dd>Show this help</dd>
+      <dt>Esc</dt><dd>Close help / blur search</dd>
+    </dl>
+    <div class="close">click anywhere to close</div>
+  </div>
+</div>
 <details id="log-wrap" style="display:none;position:sticky;bottom:34px;margin:0;border-top:1px solid var(--border);background:#fff;">
   <summary style="padding:6px 10px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none;">Live log <span id="log-count" style="margin-left:6px;"></span></summary>
   <pre id="log-pane" style="background:#1e1e1e;color:#ddd;padding:10px;max-height:240px;overflow:auto;font-size:11px;font-family:ui-monospace,Menlo,monospace;margin:0;white-space:pre-wrap;"></pre>
@@ -1534,6 +1605,140 @@ function escapeHtml(s) {
     "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
   })[c]);
 }
+
+// Keyboard navigation. The "highlighted row" is whichever element in the
+// active panel has data-kb-active="1". j/k moves it within the same panel,
+// enter expands, r re-runs, / focuses search.
+const kbHelp = document.getElementById("kb-help");
+kbHelp.addEventListener("click", () => kbHelp.classList.remove("visible"));
+
+function activePanelId() {
+  for (const k of Object.keys(panels)) {
+    if (panels[k].classList.contains("active")) return k;
+  }
+  return null;
+}
+
+function kbRows() {
+  // Return the list of rows the highlight can move between in the active
+  // panel. Each row should be visible (its <details> open if applicable)
+  // so j/k traversal doesn't jump into hidden content.
+  const id = activePanelId();
+  if (id === "tests") {
+    return Array.from(tree.querySelectorAll("details.group[open] > ul > li[data-test-id]"));
+  }
+  if (id === "runs") {
+    return Array.from(document.querySelectorAll("#runs-body > tr[data-run-id]"));
+  }
+  return [];
+}
+
+function kbActive() {
+  return document.querySelector('[data-kb-active="1"]');
+}
+
+function kbSetActive(el) {
+  const prev = kbActive();
+  if (prev) prev.removeAttribute("data-kb-active");
+  if (el) {
+    el.setAttribute("data-kb-active", "1");
+    el.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function kbMove(delta) {
+  const rows = kbRows();
+  if (rows.length === 0) return;
+  const cur = kbActive();
+  let idx = cur ? rows.indexOf(cur) : -1;
+  if (idx === -1) {
+    // Nothing highlighted yet — start at 0 for j, end for k.
+    idx = delta > 0 ? 0 : rows.length - 1;
+  } else {
+    idx = Math.max(0, Math.min(rows.length - 1, idx + delta));
+  }
+  kbSetActive(rows[idx]);
+}
+
+function kbJump(toEnd) {
+  const rows = kbRows();
+  if (rows.length === 0) return;
+  kbSetActive(toEnd ? rows[rows.length - 1] : rows[0]);
+}
+
+function kbActivate() {
+  // Enter: simulate a click on the highlighted row, which is what the
+  // existing handlers already key off of.
+  const el = kbActive();
+  if (el) el.click();
+}
+
+function kbRun() {
+  const el = kbActive();
+  if (!el) return;
+  if (el.dataset.testId) {
+    startRun({ test_ids: [el.dataset.testId] });
+  } else if (el.dataset.runId) {
+    // Re-run the same selection by running every test in that run. We don't
+    // have a "rerun N" endpoint here, so for now just open run #N's detail.
+    el.click();
+  }
+}
+
+document.addEventListener("keydown", (e) => {
+  // Ignore typing into form fields (search, run-form inputs, etc.).
+  const tag = (e.target.tagName || "").toLowerCase();
+  const inField = tag === "input" || tag === "textarea" || tag === "select"
+    || (e.target.isContentEditable);
+
+  if (e.key === "Escape") {
+    if (kbHelp.classList.contains("visible")) {
+      kbHelp.classList.remove("visible");
+      e.preventDefault();
+      return;
+    }
+    if (inField && tag === "input" && e.target.type === "search") {
+      e.target.blur();
+      e.preventDefault();
+      return;
+    }
+  }
+
+  if (inField) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+  switch (e.key) {
+    case "j":
+    case "ArrowDown":
+      kbMove(1); e.preventDefault(); break;
+    case "k":
+    case "ArrowUp":
+      kbMove(-1); e.preventDefault(); break;
+    case "g":
+      kbJump(false); e.preventDefault(); break;
+    case "G":
+      kbJump(true); e.preventDefault(); break;
+    case "Enter":
+      kbActivate(); e.preventDefault(); break;
+    case "r":
+      kbRun(); e.preventDefault(); break;
+    case "/":
+      search.focus();
+      search.select();
+      e.preventDefault();
+      break;
+    case "1":
+      switchTab("tests"); e.preventDefault(); break;
+    case "2":
+      switchTab("runs"); e.preventDefault(); break;
+    case "3":
+      switchTab("repo"); e.preventDefault(); break;
+    case "4":
+      switchTab("run"); e.preventDefault(); break;
+    case "?":
+      kbHelp.classList.add("visible"); e.preventDefault(); break;
+  }
+});
 
 loadTests().catch(e => setStatus("load failed: " + e));
 </script>

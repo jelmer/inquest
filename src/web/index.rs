@@ -60,5 +60,8 @@ mod tests {
         assert!(html.contains("discover-btn"));
         assert!(html.contains("/api/test/"));
         assert!(html.contains("progress-bar"));
+        // Keyboard navigation hooks must be present.
+        assert!(html.contains("data-kb-active"));
+        assert!(html.contains("kb-help"));
     }
 }
