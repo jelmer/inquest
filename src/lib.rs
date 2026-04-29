@@ -93,5 +93,7 @@ pub mod testcommand;
 pub mod testlist;
 pub mod ui;
 pub mod watchdog;
+#[cfg(feature = "web")]
+pub mod web;
 
 pub use error::{Error, Result};
