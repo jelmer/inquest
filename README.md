@@ -1,4 +1,4 @@
-# Inquest
+[#](#) Inquest
 
 ## Overview
 
@@ -402,7 +402,6 @@ Inquest started as a Rust port of the Python [testrepository](https://github.com
 - **`inq info`** command for detailed run metadata
 - **Test filtering** by regex patterns on the command line
 - **Pass-through arguments** to the underlying test command via `--`
-- **MCP server** for integration with AI assistants (optional feature)
 
 ## Links
 

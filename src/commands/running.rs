@@ -3,8 +3,10 @@
 use crate::commands::utils::open_repository;
 use crate::commands::Command;
 use crate::error::Result;
-use crate::repository::estimate_progress;
+use crate::repository::{estimate_progress, RunId, TestId, TestRun};
 use crate::ui::UI;
+use std::collections::HashMap;
+use std::time::Duration;
 
 fn format_duration_secs(secs: i64) -> String {
     if secs < 60 {
@@ -14,6 +16,46 @@ fn format_duration_secs(secs: i64) -> String {
     } else {
         format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
     }
+}
+
+/// Render the one-line progress summary for a single in-progress run.
+/// Pure: takes the run, historical timings, and elapsed wall-clock as inputs
+/// so the formatting can be tested deterministically.
+fn format_running_line(
+    run_id: &RunId,
+    test_run: &TestRun,
+    historical: &HashMap<TestId, Duration>,
+    elapsed: Duration,
+) -> String {
+    let observed = test_run.total_tests();
+    let failures = test_run.count_failures();
+    let passed = test_run.count_successes();
+    let elapsed_secs = elapsed.as_secs() as i64;
+
+    let (total_expected, percent, eta_secs) =
+        estimate_progress(historical, test_run, Some(elapsed));
+
+    let count_part = match total_expected {
+        Some(total) => format!("{}/{} tests", observed, total),
+        None => format!("{} tests", observed),
+    };
+
+    let mut line = format!(
+        "Run {}: {} ({} passed, {} failed)",
+        run_id, count_part, passed, failures,
+    );
+
+    if let Some(p) = percent {
+        line.push_str(&format!(", {:.0}% complete", p * 100.0));
+    }
+
+    line.push_str(&format!(", elapsed {}", format_duration_secs(elapsed_secs)));
+
+    if let Some(eta) = eta_secs {
+        line.push_str(&format!(", ETA {}", format_duration_secs(eta as i64)));
+    }
+
+    line
 }
 
 /// Command to list currently running test runs.
@@ -45,9 +87,6 @@ impl Command for RunningCommand {
         let now = chrono::Utc::now();
         for run_id in &run_ids {
             let test_run = repo.get_test_run(run_id)?;
-            let observed = test_run.total_tests();
-            let failures = test_run.count_failures();
-            let passed = test_run.count_successes();
 
             // Wall-clock elapsed comes from the actual run timestamp recorded
             // when the run was registered. `test_run.timestamp` is set to
@@ -57,31 +96,9 @@ impl Command for RunningCommand {
                 .get_run_started_at(run_id)?
                 .unwrap_or(test_run.timestamp);
             let elapsed_secs = (now - started_at).num_seconds().max(0);
-            let elapsed = std::time::Duration::from_secs(elapsed_secs as u64);
+            let elapsed = Duration::from_secs(elapsed_secs as u64);
 
-            let (total_expected, percent, eta_secs) =
-                estimate_progress(&historical, &test_run, Some(elapsed));
-
-            let count_part = match total_expected {
-                Some(total) => format!("{}/{} tests", observed, total),
-                None => format!("{} tests", observed),
-            };
-
-            let mut line = format!(
-                "Run {}: {} ({} passed, {} failed)",
-                run_id, count_part, passed, failures,
-            );
-
-            if let Some(p) = percent {
-                line.push_str(&format!(", {:.0}% complete", p * 100.0));
-            }
-
-            line.push_str(&format!(", elapsed {}", format_duration_secs(elapsed_secs)));
-
-            if let Some(eta) = eta_secs {
-                line.push_str(&format!(", ETA {}", format_duration_secs(eta as i64)));
-            }
-
+            let line = format_running_line(run_id, &test_run, &historical, elapsed);
             ui.output(&line)?;
         }
 
@@ -101,11 +118,8 @@ impl Command for RunningCommand {
 mod tests {
     use super::*;
     use crate::repository::inquest::InquestRepositoryFactory;
-    use crate::repository::{RepositoryFactory, RunId, TestId, TestResult, TestRun, TestStatus};
-    use crate::subunit_stream;
+    use crate::repository::{RepositoryFactory, TestResult, TestStatus};
     use crate::ui::test_ui::TestUI;
-    use std::io::Write;
-    use std::time::Duration;
     use tempfile::TempDir;
 
     #[test]
@@ -140,24 +154,16 @@ mod tests {
     }
 
     #[test]
-    fn test_running_command_shows_progress_with_history() {
-        let temp = TempDir::new().unwrap();
-        let factory = InquestRepositoryFactory;
-        let mut repo = factory.initialise(temp.path()).unwrap();
-
-        // Seed historical durations for 4 tests so we can compute a fraction
-        // and an ETA.
-        let mut times = std::collections::HashMap::new();
+    fn test_format_running_line_with_history_zero_elapsed() {
+        // 4 tests historically, each 2s. One completed in this run.
+        // With elapsed = 0, estimate_progress takes the no-elapsed
+        // fallback: ETA = sum of unobserved historical durations = 6s.
+        let mut historical = HashMap::new();
         for i in 0..4 {
-            times.insert(TestId::new(format!("test_{i}")), Duration::from_secs(2));
+            historical.insert(TestId::new(format!("test_{i}")), Duration::from_secs(2));
         }
-        repo.update_test_times(&times).unwrap();
-
-        // Begin an in-progress run with one test completed, leaving the lock
-        // file in place so `inq running` sees it.
-        let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
+        let run_id = RunId::new("7");
         let mut run = TestRun::new(run_id.clone());
-        run.timestamp = chrono::DateTime::from_timestamp(1_000_000_000, 0).unwrap();
         run.add_result(TestResult {
             test_id: TestId::new("test_0"),
             status: TestStatus::Success,
@@ -166,56 +172,48 @@ mod tests {
             details: None,
             tags: vec![],
         });
-        subunit_stream::write_stream(&run, &mut writer).unwrap();
-        writer.flush().unwrap();
-        drop(repo);
 
-        let mut ui = TestUI::new();
-        let cmd = RunningCommand::new(Some(temp.path().to_string_lossy().to_string()));
-        let result = cmd.execute(&mut ui).unwrap();
-
-        assert_eq!(result, 0);
-        assert_eq!(ui.output.len(), 1);
-        let line = &ui.output[0];
-        assert!(line.contains(&format!("Run {}", run_id)), "line: {}", line);
-        assert!(line.contains("1/4 tests"), "line: {}", line);
-        assert!(line.contains("1 passed"), "line: {}", line);
-        assert!(line.contains("0 failed"), "line: {}", line);
-        assert!(line.contains("25% complete"), "line: {}", line);
-        // The run was just begun, so elapsed wall-clock is essentially 0
-        // and `estimate_progress` takes the no-elapsed fallback: sum of
-        // unobserved historical durations = 3 × 2s = 6s. The wall-clock
-        // projection branch is exercised in test_run.rs unit tests.
-        assert!(line.contains("ETA 6s"), "line: {}", line);
-        assert!(line.contains("elapsed"), "line: {}", line);
-
-        drop(writer);
+        let line = format_running_line(&run_id, &run, &historical, Duration::from_secs(0));
+        assert_eq!(
+            line,
+            "Run 7: 1/4 tests (1 passed, 0 failed), 25% complete, elapsed 0s, ETA 6s",
+        );
     }
 
     #[test]
-    fn test_running_command_no_history_omits_eta() {
-        let temp = TempDir::new().unwrap();
-        let factory = InquestRepositoryFactory;
-        let mut repo = factory.initialise(temp.path()).unwrap();
+    fn test_format_running_line_with_history_nonzero_elapsed() {
+        // Same setup, but with 4s elapsed: estimate_progress takes the
+        // wall-clock projection branch. fraction_done = 0.25, projected
+        // total = 4 / 0.25 = 16s, ETA = 12s.
+        let mut historical = HashMap::new();
+        for i in 0..4 {
+            historical.insert(TestId::new(format!("test_{i}")), Duration::from_secs(2));
+        }
+        let run_id = RunId::new("7");
+        let mut run = TestRun::new(run_id.clone());
+        run.add_result(TestResult {
+            test_id: TestId::new("test_0"),
+            status: TestStatus::Success,
+            duration: Some(Duration::from_secs(2)),
+            message: None,
+            details: None,
+            tags: vec![],
+        });
 
-        let (run_id, mut writer) = repo.begin_test_run_raw().unwrap();
+        let line = format_running_line(&run_id, &run, &historical, Duration::from_secs(4));
+        assert_eq!(
+            line,
+            "Run 7: 1/4 tests (1 passed, 0 failed), 25% complete, elapsed 4s, ETA 12s",
+        );
+    }
+
+    #[test]
+    fn test_format_running_line_no_history_omits_eta_and_percent() {
+        let historical = HashMap::new();
+        let run_id = RunId::new("3");
         let run = TestRun::new(run_id.clone());
-        subunit_stream::write_stream(&run, &mut writer).unwrap();
-        writer.flush().unwrap();
-        drop(repo);
 
-        let mut ui = TestUI::new();
-        let cmd = RunningCommand::new(Some(temp.path().to_string_lossy().to_string()));
-        let result = cmd.execute(&mut ui).unwrap();
-
-        assert_eq!(result, 0);
-        let line = &ui.output[0];
-        assert!(line.contains(&format!("Run {}", run_id)), "line: {}", line);
-        assert!(!line.contains("ETA"), "line: {}", line);
-        assert!(!line.contains("% complete"), "line: {}", line);
-        assert!(line.contains("0 tests"), "line: {}", line);
-        assert!(line.contains("elapsed"), "line: {}", line);
-
-        drop(writer);
+        let line = format_running_line(&run_id, &run, &historical, Duration::from_secs(2));
+        assert_eq!(line, "Run 3: 0 tests (0 passed, 0 failed), elapsed 2s");
     }
 }
