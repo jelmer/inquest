@@ -761,9 +761,7 @@ mod tests {
 
         // Initialize using factory and then create a direct FileRepository instance for testing
         factory.initialise(temp.path()).unwrap();
-        let mut file_repo = FileRepository {
-            path: repo_path.clone(),
-        };
+        let mut file_repo = FileRepository { path: repo_path };
 
         // First run with initial times
         let mut run1 = TestRun::new(RunId::new("0"));

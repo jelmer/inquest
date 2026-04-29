@@ -259,8 +259,7 @@ impl Command for AutoCommand {
         let base = self
             .base_path
             .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new("."));
+            .map_or_else(|| Path::new("."), Path::new);
 
         // Check if a config file already exists
         for name in CONFIG_FILE_NAMES {

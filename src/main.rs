@@ -510,7 +510,7 @@ fn main() {
                 no_output_timeout,
                 order,
                 concurrency: parallel,
-                profile: profile.clone(),
+                profile,
                 list_profiles,
             };
             cmd.execute(&mut ui)
@@ -788,7 +788,7 @@ fn main() {
                 run_id_slot: None,
                 cancellation_token: None,
                 test_ids_override: None,
-                profile: profile.clone(),
+                profile,
                 implicit_run,
                 eta_debug: cli.eta_debug,
             };

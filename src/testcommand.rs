@@ -162,7 +162,7 @@ impl TestCommand {
                     .map(|id| id.as_str())
                     .collect::<Vec<_>>()
                     .join(" ");
-                vars.insert("IDLIST".to_string(), id_list.clone());
+                vars.insert("IDLIST".to_string(), id_list);
 
                 // Create IDFILE (newline-separated in temp file)
                 let mut temp = NamedTempFile::new().map_err(|e| {

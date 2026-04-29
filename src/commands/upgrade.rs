@@ -36,8 +36,7 @@ impl Command for UpgradeCommand {
         let base = self
             .base_path
             .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new("."));
+            .map_or_else(|| Path::new("."), Path::new);
 
         let old_path = base.join(".testrepository");
         let new_path = base.join(".inquest");

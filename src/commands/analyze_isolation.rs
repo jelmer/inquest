@@ -79,7 +79,7 @@ impl AnalyzeIsolationCommand {
         ui: &mut dyn UI,
         test_cmd: &TestCommand,
         base: &Path,
-        candidates: Vec<TestId>,
+        candidates: &[TestId],
     ) -> Result<Vec<TestId>> {
         if candidates.is_empty() {
             return Ok(vec![]);
@@ -93,7 +93,7 @@ impl AnalyzeIsolationCommand {
         // Binary search to find minimal reproducer
         let mut left = 0;
         let mut right = candidates.len();
-        let mut minimal_set = candidates.clone();
+        let mut minimal_set = candidates.to_vec();
 
         while left < right {
             let mid = (left + right) / 2;
@@ -193,7 +193,7 @@ impl Command for AnalyzeIsolationCommand {
             .filter(|t| t.as_str() != self.target_test)
             .collect();
 
-        let culprits = self.bisect(ui, &test_cmd, base, candidates)?;
+        let culprits = self.bisect(ui, &test_cmd, base, &candidates)?;
 
         // Step 5: Report results
         ui.output("\n=== Analysis Complete ===")?;

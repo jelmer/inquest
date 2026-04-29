@@ -85,13 +85,11 @@ impl TimeoutSetting {
             TimeoutSetting::Disabled => None,
             TimeoutSetting::Fixed(d) => Some(*d),
             TimeoutSetting::Auto => {
-                let base = historical
-                    .map(|h| {
-                        let computed =
-                            Duration::from_secs_f64(h.as_secs_f64() * AUTO_TIMEOUT_MULTIPLIER);
-                        computed.max(AUTO_TIMEOUT_MINIMUM)
-                    })
-                    .unwrap_or(AUTO_TIMEOUT_MINIMUM);
+                let base = historical.map_or(AUTO_TIMEOUT_MINIMUM, |h| {
+                    let computed =
+                        Duration::from_secs_f64(h.as_secs_f64() * AUTO_TIMEOUT_MULTIPLIER);
+                    computed.max(AUTO_TIMEOUT_MINIMUM)
+                });
                 Some(base)
             }
         }
