@@ -1982,6 +1982,7 @@ mod tests {
 #[cfg(test)]
 mod helper_tests {
     use super::*;
+    #[cfg(unix)]
     use crate::repository::TestStatus;
 
     #[test]
