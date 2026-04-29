@@ -553,6 +553,7 @@
 </header>
 <nav>
   <button data-tab="tests" class="active">Tests</button>
+  <button data-tab="failures">Failures <span id="failures-badge" style="display:none;background:var(--fail);color:#fff;border-radius:8px;padding:0 6px;font-size:11px;margin-left:4px;"></span></button>
   <button data-tab="runs">Runs</button>
   <button data-tab="repo">Repository</button>
   <button data-tab="run">Run…</button>
@@ -564,6 +565,13 @@
       <button id="discover-btn" class="action" style="margin-left:8px;font-size:11px;padding:2px 8px;border:1px solid var(--border);background:#fff;border-radius:3px;cursor:pointer;">Discover tests</button>
     </div>
     <div id="tree"></div>
+  </section>
+  <section class="panel" id="panel-failures">
+    <div class="summary" id="failures-summary">loading…</div>
+    <div style="margin-bottom:12px;">
+      <button id="failures-rerun-all" class="action primary" disabled>Re-run all failures</button>
+    </div>
+    <ul class="run-results-list" id="failures-list" style="max-height:none;border:1px solid var(--border);border-radius:4px;padding:0 12px;background:#fff;"></ul>
   </section>
   <section class="panel" id="panel-runs">
     <div class="summary" id="runs-summary">loading…</div>
@@ -676,7 +684,7 @@
       <dt>Enter</dt><dd>Expand / collapse the highlighted row</dd>
       <dt>r</dt><dd>Run the highlighted test (Tests panel)</dd>
       <dt>/</dt><dd>Focus the search box</dd>
-      <dt>1–4</dt><dd>Switch to Tests / Runs / Repository / Run tab</dd>
+      <dt>1–5</dt><dd>Switch to Tests / Failures / Runs / Repository / Run tab</dd>
       <dt>?</dt><dd>Show this help</dd>
       <dt>Esc</dt><dd>Close help / blur search</dd>
     </dl>
@@ -746,6 +754,7 @@ function badge(cls) {
 // Tab switching
 const panels = {
   tests: document.getElementById("panel-tests"),
+  failures: document.getElementById("panel-failures"),
   runs:  document.getElementById("panel-runs"),
   repo:  document.getElementById("panel-repo"),
   run:   document.getElementById("panel-run"),
@@ -754,6 +763,7 @@ const tabLoaders = {
   // While a run is in progress we never reload the tests panel from the
   // server — that would clobber live colours. Just re-render from memory.
   tests: () => activeRun ? renderTree() : loadTests(),
+  failures: () => loadFailures(),
   runs:  () => loadRuns(),
   repo:  () => loadRepo(),
   run:   () => loadRunForm(),
@@ -1075,6 +1085,99 @@ async function toggleTestDetail(rowEl, tid) {
 }
 
 search.addEventListener("input", renderTree);
+
+// Failures panel: latest run's failing tests with attachments inline.
+//
+// We don't add a dedicated server endpoint; the latest-run detail already
+// carries the per-test results we need. The failure badge in the nav bar
+// is also updated as a side effect of loading the runs list.
+async function loadFailures() {
+  const summaryEl = document.getElementById("failures-summary");
+  const list = document.getElementById("failures-list");
+  const rerunBtn = document.getElementById("failures-rerun-all");
+  list.innerHTML = "";
+  summaryEl.textContent = "loading…";
+  rerunBtn.disabled = true;
+  let runs;
+  try {
+    runs = await fetch("/api/runs").then(r => r.json());
+  } catch (e) {
+    summaryEl.textContent = "failed to load: " + e;
+    return;
+  }
+  if (!runs || runs.length === 0) {
+    summaryEl.textContent = "no runs in this repository yet.";
+    return;
+  }
+  const latest = runs[0];
+  if (latest.failures === 0) {
+    summaryEl.innerHTML = `Latest run <code>${escapeHtml(latest.id)}</code> is all green. No failures to triage.`;
+    return;
+  }
+  let detail;
+  try {
+    detail = await fetch(`/api/runs/${encodeURIComponent(latest.id)}`).then(r => r.json());
+  } catch (e) {
+    summaryEl.textContent = "failed to load run detail: " + e;
+    return;
+  }
+  const failures = detail.results.filter(r => r.status === "failure" || r.status === "error");
+  summaryEl.innerHTML =
+    `${failures.length} failure${failures.length === 1 ? "" : "s"} in run ` +
+    `<code>${escapeHtml(latest.id)}</code> (${escapeHtml(fmtTimestamp(latest.timestamp))})`;
+  rerunBtn.disabled = false;
+  rerunBtn.onclick = () => startRun({ test_ids: failures.map(r => r.test_id) });
+
+  for (const r of failures) {
+    const li = document.createElement("li");
+    li.append(badge(r.status));
+    const id = document.createElement("span");
+    id.className = "id";
+    id.textContent = r.test_id;
+    li.append(id);
+    const dur = document.createElement("span");
+    dur.className = "dur";
+    dur.textContent = r.duration_secs != null ? fmtDuration(r.duration_secs) : "";
+    li.append(dur);
+    const btn = document.createElement("button");
+    btn.textContent = "Re-run";
+    btn.style.cssText = "padding:1px 6px;border:1px solid var(--border);background:#fff;border-radius:3px;cursor:pointer;font:inherit;font-size:11px;";
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      startRun({ test_ids: [r.test_id] });
+    };
+    li.append(btn);
+    list.append(li);
+    // Auto-expand attachments inline — the whole point of this panel is
+    // that the user doesn't have to click around to see what broke.
+    if (r.message || r.details || (r.tags && r.tags.length > 0)) {
+      list.append(buildAttachmentsRow(r));
+    }
+  }
+
+  updateFailuresBadge(failures.length);
+}
+
+function updateFailuresBadge(n) {
+  const badge = document.getElementById("failures-badge");
+  if (n > 0) {
+    badge.textContent = String(n);
+    badge.style.display = "";
+  } else {
+    badge.style.display = "none";
+  }
+}
+
+// Update the nav badge whenever we have a fresh count from the latest
+// run. Called from loadRuns and after every finished run.
+async function refreshFailuresBadge() {
+  try {
+    const runs = await fetch("/api/runs").then(r => r.json());
+    if (runs && runs.length > 0) updateFailuresBadge(runs[0].failures);
+  } catch (e) {
+    // Stay quiet on errors; the badge is just a hint.
+  }
+}
 
 // Runs panel
 async function loadRuns() {
@@ -1673,6 +1776,7 @@ function attachSse(handle, initialTotal) {
         clearProgress();
         liveStatuses.clear();
         loadTests({ discover: lastDiscoveryRun });
+        refreshFailuresBadge();
       }, 1500);
     } else if (data.kind === "error") {
       es.close();
@@ -1823,10 +1927,12 @@ document.addEventListener("keydown", (e) => {
     case "1":
       switchTab("tests"); e.preventDefault(); break;
     case "2":
-      switchTab("runs"); e.preventDefault(); break;
+      switchTab("failures"); e.preventDefault(); break;
     case "3":
-      switchTab("repo"); e.preventDefault(); break;
+      switchTab("runs"); e.preventDefault(); break;
     case "4":
+      switchTab("repo"); e.preventDefault(); break;
+    case "5":
       switchTab("run"); e.preventDefault(); break;
     case "?":
       kbHelp.classList.add("visible"); e.preventDefault(); break;
@@ -1834,6 +1940,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 loadTests().catch(e => setStatus("load failed: " + e));
+refreshFailuresBadge();
 </script>
 </body>
 </html>
