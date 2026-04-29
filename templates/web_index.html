@@ -1,0 +1,2115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>inquest</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --fg: #222;
+    --muted: #777;
+    --border: #ddd;
+    --accent: #2b7cd6;
+    --ok: #2a8a3f;
+    --fail: #c0392b;
+    --skip: #888;
+    --xfail: #b58900;
+    --running: #2b7cd6;
+  }
+  body {
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0;
+    color: var(--fg);
+    background: var(--bg);
+  }
+  header {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: #fff;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  header h1 {
+    font-size: 16px;
+    margin: 0;
+    font-weight: 600;
+  }
+  nav {
+    display: flex;
+    gap: 4px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--border);
+    background: #fff;
+  }
+  nav button {
+    padding: 8px 14px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    color: var(--muted);
+    border-bottom: 2px solid transparent;
+  }
+  nav button:hover { color: var(--fg); }
+  nav button.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  header input[type=search] {
+    flex: 1;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font: inherit;
+  }
+  header button.action {
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    background: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+    font: inherit;
+  }
+  header button.action:hover { background: #f0f0f0; }
+  header button.primary {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  header button.primary:hover { background: #2569b8; }
+  main { padding: 12px 16px; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .summary { color: var(--muted); margin-bottom: 8px; font-size: 12px; }
+  .group {
+    margin-bottom: 6px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #fff;
+  }
+  .group > summary {
+    padding: 6px 10px;
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .group > summary .name { font-weight: 600; }
+  .group > summary .count { color: var(--muted); font-size: 12px; }
+  .group ul { list-style: none; margin: 0; padding: 0 0 4px 0; }
+  .group li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 10px 3px 28px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  .group li:hover { background: #f4f7fb; }
+  .group li[data-kb-active="1"] {
+    background: #e6efff;
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  table.runs tbody tr[data-kb-active="1"] {
+    background: #e6efff !important;
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .group li .id { flex: 1; word-break: break-all; }
+  .group li .stats {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .group li .stats .fails { color: var(--fail); }
+  .group li .stats .flake { color: var(--xfail); }
+  .group li .duration {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    min-width: 48px;
+    text-align: right;
+  }
+  .group li.stale-row {
+    opacity: 0.5;
+  }
+  .group li.stale-row:hover { opacity: 0.85; }
+  .tag {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: #eee;
+    color: var(--muted);
+  }
+  .tag.new { background: #e6f4ea; color: var(--ok); }
+  .tag.stale { background: #fdecea; color: var(--fail); }
+  .badge {
+    display: inline-block;
+    min-width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ccc;
+  }
+  .badge.success { background: var(--ok); }
+  .badge.failure, .badge.error { background: var(--fail); }
+  .badge.skip { background: var(--skip); }
+  .badge.xfail, .badge.uxsuccess { background: var(--xfail); }
+  .badge.running {
+    background: var(--running);
+    animation: pulse 1s infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.4; } }
+  .group li button {
+    visibility: hidden;
+    padding: 1px 6px;
+    border: 1px solid var(--border);
+    background: #fff;
+    border-radius: 3px;
+    cursor: pointer;
+    font: inherit;
+  }
+  .group li:hover button { visibility: visible; }
+
+  /* Runs panel */
+  table.runs {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  table.runs th, table.runs td {
+    padding: 6px 10px;
+    text-align: left;
+    font-size: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.runs th { color: var(--muted); font-weight: 600; background: #fafafa; }
+  table.runs tbody tr:hover { background: #f4f7fb; cursor: pointer; }
+  table.runs td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.runs td.fail { color: var(--fail); }
+  table.runs td.ok { color: var(--ok); }
+  table.runs tr.expanded { background: #f4f7fb; }
+  table.runs tr.detail-row { background: #fafafa; }
+  table.runs tr.detail-row td { padding: 12px 16px; }
+  .run-meta {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 12px;
+    font-size: 12px;
+    margin-bottom: 10px;
+    max-width: 720px;
+  }
+  .run-meta dt { color: var(--muted); }
+  .run-meta dd {
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    word-break: break-all;
+  }
+  .run-meta dd code {
+    background: #fff;
+    border: 1px solid var(--border);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+  }
+  .run-results-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border-top: 1px solid var(--border);
+    max-height: 360px;
+    overflow-y: auto;
+  }
+  .run-results-list li {
+    display: flex;
+    gap: 8px;
+    padding: 3px 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  .run-results-list li .id { flex: 1; word-break: break-all; }
+  .run-results-list li .dur { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .run-results-list li.expandable { cursor: pointer; }
+  .run-results-list li.expandable:hover { background: #f0f4f9; }
+  .run-results-list li.attachments-row {
+    display: block;
+    padding: 6px 12px;
+    background: #fff;
+    border-top: 1px dashed var(--border);
+    cursor: default;
+  }
+  .run-results-list li.attachments-row:hover { background: #fff; }
+  .attachments-row .msg {
+    color: var(--fail);
+    font-weight: 600;
+    margin-bottom: 4px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .attachments-row pre.details {
+    background: #1e1e1e;
+    color: #ddd;
+    padding: 8px 10px;
+    border-radius: 3px;
+    margin: 0;
+    max-height: 280px;
+    overflow: auto;
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .attachments-row .tag-list {
+    margin-top: 4px;
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .interrupted-banner {
+    background: #fdecea;
+    color: var(--fail);
+    border: 1px solid var(--fail);
+    border-radius: 3px;
+    padding: 6px 10px;
+    margin-bottom: 8px;
+    font-size: 12px;
+  }
+  .breakdown {
+    display: inline-flex;
+    gap: 10px;
+    font-size: 12px;
+    margin-bottom: 10px;
+  }
+  .breakdown span { display: inline-flex; align-items: center; gap: 4px; }
+  .breakdown .pass { color: var(--ok); }
+  .breakdown .fail { color: var(--fail); }
+  .breakdown .skip { color: var(--skip); }
+
+  /* Repo panel */
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .stat-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 12px;
+  }
+  .stat-card .label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .stat-card .value {
+    font-size: 22px;
+    font-weight: 600;
+    margin-top: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-card .value.fail { color: var(--fail); }
+  .toplist {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin-bottom: 12px;
+  }
+  .toplist h2 {
+    margin: 0;
+    padding: 8px 12px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+  }
+  .toplist ul { list-style: none; margin: 0; padding: 0; }
+  .toplist li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    border-bottom: 1px solid #f0f0f0;
+  }
+  .toplist li:last-child { border-bottom: none; }
+  .toplist li .id { flex: 1; word-break: break-all; }
+  .toplist li .num { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* Status timeline heatmap */
+  .timeline-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+  }
+  .timeline-row .cells {
+    display: flex;
+    gap: 1px;
+    flex: 0 0 auto;
+  }
+  .timeline-row .test-id {
+    flex: 1 1 auto;
+    word-break: break-all;
+  }
+  .timeline-cell {
+    width: 8px;
+    height: 16px;
+    background: #ddd;
+    border-radius: 1px;
+    cursor: pointer;
+  }
+  .timeline-cell.success { background: var(--ok); }
+  .timeline-cell.failure, .timeline-cell.error { background: var(--fail); }
+  .timeline-cell.uxsuccess { background: var(--fail); }
+  .timeline-cell.skip { background: var(--skip); }
+  .timeline-cell.xfail { background: var(--xfail); }
+  .timeline-cell.absent { background: #f0f0f0; }
+  .timeline-empty { color: var(--muted); font-size: 12px; padding: 8px 0; }
+
+  /* Run-form panel */
+  .run-form {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 14px 16px;
+    max-width: 640px;
+  }
+  .run-form .row { margin-bottom: 12px; }
+  .run-form label {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .run-form input[type=text],
+  .run-form select,
+  .run-form input[type=number] {
+    width: 100%;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font: inherit;
+  }
+  .run-form .checks { display: flex; gap: 16px; }
+  .run-form .checks label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    text-transform: none;
+    letter-spacing: normal;
+    color: var(--fg);
+    margin: 0;
+  }
+  .run-form .help {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  .run-form .submit {
+    padding: 8px 16px;
+    background: var(--accent);
+    color: #fff;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    cursor: pointer;
+    font: inherit;
+  }
+  .run-form .submit:disabled { opacity: 0.5; cursor: not-allowed; }
+  .run-form details.advanced {
+    margin: 4px 0 14px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+  }
+  .run-form details.advanced > summary {
+    cursor: pointer;
+    user-select: none;
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 4px 0;
+  }
+  .run-form details.advanced[open] > summary { color: var(--fg); }
+  .run-form details.advanced > .body { margin-top: 10px; }
+
+  #status {
+    padding: 6px 10px;
+    border-top: 1px solid var(--border);
+    background: #fff;
+    font-size: 12px;
+    color: var(--muted);
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  #status-msg { flex-shrink: 0; }
+  #progress-wrap {
+    flex: 1;
+    height: 8px;
+    background: #eee;
+    border-radius: 4px;
+    overflow: hidden;
+    display: none;
+  }
+  #progress-wrap.visible { display: block; }
+  #progress-bar {
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 120ms linear;
+  }
+  #progress-bar.has-failure { background: var(--fail); }
+  #progress-counts {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+
+  /* Test detail expansion */
+  .group li.expanded { background: #f4f7fb; }
+  .test-detail {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    background: #fff;
+    border-top: 1px dashed var(--border);
+  }
+  .test-detail .detail-inner {
+    padding: 10px 28px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+  .test-detail .detail-inner h3 {
+    margin: 0 0 6px 0;
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .test-detail svg { display: block; margin-bottom: 8px; }
+  .test-detail .history {
+    border-collapse: collapse;
+    font-size: 12px;
+    width: 100%;
+    max-width: 540px;
+  }
+  .test-detail .history th, .test-detail .history td {
+    padding: 3px 8px;
+    text-align: left;
+    border-bottom: 1px solid #f0f0f0;
+  }
+  .test-detail .history th { color: var(--muted); font-weight: 600; }
+  .test-detail .history td.dur { font-variant-numeric: tabular-nums; text-align: right; }
+  .test-detail .history td.status .badge { vertical-align: middle; }
+  .test-detail .empty { color: var(--muted); font-size: 12px; }
+
+  /* Keyboard help overlay */
+  #kb-help {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  #kb-help.visible { display: flex; }
+  #kb-help .panel {
+    background: #fff;
+    border-radius: 6px;
+    padding: 18px 22px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+    min-width: 360px;
+    max-width: 540px;
+  }
+  #kb-help h2 {
+    margin: 0 0 12px 0;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+  }
+  #kb-help dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 6px 16px;
+    margin: 0;
+    font-size: 13px;
+  }
+  #kb-help dt {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--accent);
+    text-align: right;
+  }
+  #kb-help dd { margin: 0; }
+  #kb-help .close {
+    margin-top: 14px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>inquest</h1>
+  <input id="search" type="search" placeholder="filter tests…" autocomplete="off">
+  <button id="run-failing" class="action">Run failing</button>
+  <button id="run-all" class="action primary">Run all</button>
+</header>
+<nav>
+  <button data-tab="tests" class="active">Tests</button>
+  <button data-tab="failures">Failures <span id="failures-badge" style="display:none;background:var(--fail);color:#fff;border-radius:8px;padding:0 6px;font-size:11px;margin-left:4px;"></span></button>
+  <button data-tab="runs">Runs</button>
+  <button data-tab="repo">Repository</button>
+  <button data-tab="run">Run…</button>
+</nav>
+<main>
+  <section class="panel active" id="panel-tests">
+    <div class="summary" id="summary">
+      <span id="summary-text">loading…</span>
+      <button id="discover-btn" class="action" style="margin-left:8px;font-size:11px;padding:2px 8px;border:1px solid var(--border);background:#fff;border-radius:3px;cursor:pointer;">Discover tests</button>
+    </div>
+    <div id="tree"></div>
+  </section>
+  <section class="panel" id="panel-failures">
+    <div class="summary" id="failures-summary">loading…</div>
+    <div style="margin-bottom:12px;">
+      <button id="failures-rerun-all" class="action primary" disabled>Re-run all failures</button>
+    </div>
+    <ul class="run-results-list" id="failures-list" style="max-height:none;border:1px solid var(--border);border-radius:4px;padding:0 12px;background:#fff;"></ul>
+  </section>
+  <section class="panel" id="panel-runs">
+    <div class="summary" id="runs-summary">loading…</div>
+    <table class="runs">
+      <thead><tr>
+        <th>ID</th><th>When</th><th>Profile</th><th>Commit</th><th>Tags</th>
+        <th class="num">Tests</th><th class="num">Failures</th>
+        <th class="num">Duration</th><th class="num">Exit</th>
+      </tr></thead>
+      <tbody id="runs-body"></tbody>
+    </table>
+  </section>
+  <section class="panel" id="panel-repo">
+    <div class="stat-grid" id="repo-stats"></div>
+    <div class="toplist" id="repo-timeline">
+      <h2>Status timeline <span id="repo-timeline-meta" style="font-weight:normal;color:var(--muted);font-size:11px;margin-left:6px;"></span></h2>
+      <div id="repo-timeline-body" style="padding: 8px 12px;"></div>
+    </div>
+    <div class="toplist" id="repo-slowest">
+      <h2>Slowest tests</h2><ul></ul>
+    </div>
+    <div class="toplist" id="repo-flakiest">
+      <h2>Flakiest tests</h2><ul></ul>
+    </div>
+  </section>
+  <section class="panel" id="panel-run">
+    <form class="run-form" id="run-form">
+      <div class="row">
+        <label for="run-profile">Profile</label>
+        <select id="run-profile"></select>
+        <div class="help">Picks a <code>[profiles.&lt;name&gt;]</code> overlay from inquest.toml.</div>
+      </div>
+      <div class="row">
+        <label for="run-filters">Test name patterns</label>
+        <input type="text" id="run-filters" placeholder="e.g. parser.* serial_only — space-separated regexes">
+        <div class="help">Positional args to <code>inq run</code>. Leave empty to run everything.</div>
+      </div>
+      <div class="row">
+        <label for="run-parallel">Parallel workers</label>
+        <input type="number" id="run-parallel" min="1" placeholder="serial">
+        <div class="help">Empty = serial. Equivalent to <code>-j N</code>.</div>
+      </div>
+      <div class="row checks">
+        <label><input type="checkbox" id="run-failing-only"> Only previously-failing tests</label>
+      </div>
+
+      <details class="advanced" id="run-advanced">
+        <summary>Advanced options <span id="run-advanced-summary" style="text-transform:none;letter-spacing:normal;color:var(--muted);font-weight:normal;margin-left:6px;"></span></summary>
+        <div class="body">
+          <div class="row">
+            <label for="run-starting-with">Starting-with prefixes</label>
+            <input type="text" id="run-starting-with" placeholder="e.g. crate::commands my::other::mod">
+            <div class="help">Space-separated. Each becomes <code>-s &lt;prefix&gt;</code>. Dotted/colon-separated abbreviations supported.</div>
+          </div>
+          <div class="row">
+            <label for="run-tags">Tag filters</label>
+            <input type="text" id="run-tags" placeholder="e.g. worker-0 !slow">
+            <div class="help">Space-separated. Prefix with <code>!</code> to exclude. Forwarded as <code>--tag</code>.</div>
+          </div>
+          <div class="row">
+            <label for="run-order">Test order</label>
+            <select id="run-order">
+              <option value="">(default)</option>
+              <option value="auto">auto</option>
+              <option value="discovery">discovery</option>
+              <option value="alphabetical">alphabetical</option>
+              <option value="failing-first">failing-first</option>
+              <option value="frequent-failing-first">frequent-failing-first</option>
+              <option value="slowest-first">slowest-first</option>
+              <option value="fastest-first">fastest-first</option>
+              <option value="spread">spread</option>
+              <option value="shuffle">shuffle</option>
+            </select>
+          </div>
+          <div class="row" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+            <div>
+              <label for="run-test-timeout">Per-test timeout</label>
+              <input type="text" id="run-test-timeout" placeholder='"5m" / "auto" / "disabled"'>
+            </div>
+            <div>
+              <label for="run-max-duration">Run timeout</label>
+              <input type="text" id="run-max-duration" placeholder='"30m" / "auto" / "disabled"'>
+            </div>
+            <div>
+              <label for="run-no-output-timeout">No-output timeout</label>
+              <input type="text" id="run-no-output-timeout" placeholder="e.g. 60s">
+            </div>
+          </div>
+          <div class="row">
+            <label for="run-test-args">Extra test args (after <code>--</code>)</label>
+            <input type="text" id="run-test-args" placeholder="passed verbatim to the underlying test command">
+            <div class="help">Space-separated tokens. Forwarded after <code>--</code>.</div>
+          </div>
+          <div class="row checks" style="flex-wrap:wrap;row-gap:6px;">
+            <label><input type="checkbox" id="run-isolated"> Isolated (one process per test)</label>
+            <label><input type="checkbox" id="run-partial"> Partial (merge into failing set)</label>
+            <label><input type="checkbox" id="run-until-failure"> Until-failure loop</label>
+          </div>
+          <div class="row" id="run-max-iter-row" style="display:none;">
+            <label for="run-max-iterations">Max iterations</label>
+            <input type="number" id="run-max-iterations" min="1" placeholder="unbounded">
+          </div>
+        </div>
+      </details>
+
+      <button type="submit" class="submit">Start run</button>
+    </form>
+  </section>
+</main>
+<div id="kb-help" role="dialog" aria-label="Keyboard shortcuts">
+  <div class="panel">
+    <h2>Keyboard shortcuts</h2>
+    <dl>
+      <dt>j / ↓</dt><dd>Move highlight down</dd>
+      <dt>k / ↑</dt><dd>Move highlight up</dd>
+      <dt>g</dt><dd>Jump to first row</dd>
+      <dt>G</dt><dd>Jump to last row</dd>
+      <dt>Enter</dt><dd>Expand / collapse the highlighted row</dd>
+      <dt>r</dt><dd>Run the highlighted test (Tests panel)</dd>
+      <dt>/</dt><dd>Focus the search box</dd>
+      <dt>1–5</dt><dd>Switch to Tests / Failures / Runs / Repository / Run tab</dd>
+      <dt>?</dt><dd>Show this help</dd>
+      <dt>Esc</dt><dd>Close help / blur search</dd>
+    </dl>
+    <div class="close">click anywhere to close</div>
+  </div>
+</div>
+<details id="log-wrap" style="display:none;position:sticky;bottom:34px;margin:0;border-top:1px solid var(--border);background:#fff;">
+  <summary style="padding:6px 10px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none;">Live log <span id="log-count" style="margin-left:6px;"></span></summary>
+  <pre id="log-pane" style="background:#1e1e1e;color:#ddd;padding:10px;max-height:240px;overflow:auto;font-size:11px;font-family:ui-monospace,Menlo,monospace;margin:0;white-space:pre-wrap;"></pre>
+</details>
+<div id="status">
+  <span id="status-msg">ready.</span>
+  <div id="progress-wrap"><div id="progress-bar"></div></div>
+  <span id="progress-counts"></span>
+  <button id="cancel-btn" style="display:none;padding:3px 10px;border:1px solid var(--fail);background:#fff;color:var(--fail);border-radius:3px;cursor:pointer;font:inherit;font-size:11px;">Stop</button>
+</div>
+<script>
+const statusMsgEl = document.getElementById("status-msg");
+const progressWrap = document.getElementById("progress-wrap");
+const progressBar = document.getElementById("progress-bar");
+const progressCountsEl = document.getElementById("progress-counts");
+function setStatus(msg) { statusMsgEl.textContent = msg; }
+function setProgress({ done, active, failed, total }) {
+  if (total == null) {
+    progressWrap.classList.remove("visible");
+    progressCountsEl.textContent = "";
+    return;
+  }
+  progressWrap.classList.add("visible");
+  const pct = total > 0 ? Math.min(100, ((done + active) * 100) / total) : 0;
+  progressBar.style.width = pct.toFixed(1) + "%";
+  progressBar.classList.toggle("has-failure", failed > 0);
+  progressCountsEl.textContent =
+    `${done}/${total}` + (failed > 0 ? ` · ${failed} failed` : "") +
+    (active > 0 ? ` · ${active} running` : "");
+}
+function clearProgress() {
+  progressWrap.classList.remove("visible");
+  progressBar.classList.remove("has-failure");
+  progressBar.style.width = "0%";
+  progressCountsEl.textContent = "";
+}
+
+const cancelBtn = document.getElementById("cancel-btn");
+function showCancelBtn(visible) {
+  cancelBtn.style.display = visible ? "" : "none";
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = "Stop";
+}
+cancelBtn.addEventListener("click", async () => {
+  if (!activeRun) return;
+  cancelBtn.disabled = true;
+  cancelBtn.textContent = "Stopping…";
+  try {
+    const resp = await fetch(`/api/active/${activeRun}/cancel`, { method: "POST" });
+    const data = await resp.json();
+    if (data.status === "cancelled") {
+      setStatus("cancel signal sent — waiting for child to exit…");
+    } else if (data.status === "already_finished") {
+      setStatus("run already finished.");
+    } else if (data.error) {
+      setStatus("cancel failed: " + data.error);
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = "Stop";
+    }
+  } catch (e) {
+    setStatus("cancel request failed: " + e);
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = "Stop";
+  }
+});
+
+let activeRun = null;
+let testStats = new Map();
+let testGroups = [];
+// Test IDs the active run is currently observing. Used to recolour rows
+// that get rendered after the SSE event fired (e.g. user switched filter).
+const liveStatuses = new Map(); // test_id -> "running" | "success" | ...
+
+function fmtDuration(s) {
+  if (s == null) return "";
+  if (s < 1) return (s * 1000).toFixed(0) + "ms";
+  if (s < 60) return s.toFixed(2) + "s";
+  return (s / 60).toFixed(1) + "m";
+}
+
+function fmtTimestamp(iso) {
+  try { return new Date(iso).toLocaleString(); } catch { return iso; }
+}
+
+function badge(cls) {
+  const b = document.createElement("span");
+  b.className = "badge " + (cls || "");
+  return b;
+}
+
+// Tab switching
+const panels = {
+  tests: document.getElementById("panel-tests"),
+  failures: document.getElementById("panel-failures"),
+  runs:  document.getElementById("panel-runs"),
+  repo:  document.getElementById("panel-repo"),
+  run:   document.getElementById("panel-run"),
+};
+const tabLoaders = {
+  // While a run is in progress we never reload the tests panel from the
+  // server — that would clobber live colours. Just re-render from memory.
+  tests: () => activeRun ? renderTree() : loadTests(),
+  failures: () => loadFailures(),
+  runs:  () => loadRuns(),
+  repo:  () => loadRepo(),
+  run:   () => loadRunForm(),
+};
+document.querySelectorAll("nav button[data-tab]").forEach(btn => {
+  btn.onclick = () => switchTab(btn.dataset.tab);
+});
+function switchTab(name) {
+  for (const [k, panel] of Object.entries(panels)) {
+    panel.classList.toggle("active", k === name);
+  }
+  document.querySelectorAll("nav button[data-tab]").forEach(b => {
+    b.classList.toggle("active", b.dataset.tab === name);
+  });
+  if (tabLoaders[name]) tabLoaders[name]();
+}
+
+
+// Tests panel
+const tree = document.getElementById("tree");
+const search = document.getElementById("search");
+const summaryText = document.getElementById("summary-text");
+let lastDiscoveryRun = false;
+
+async function loadTests({ discover = false } = {}) {
+  // While a run is in progress we leave the in-memory state alone so we
+  // don't clobber live colours with a stale repository snapshot.
+  if (activeRun) return;
+  const qs = discover ? "?include_discovered=1" : "";
+  const [testsResp, treeResp] = await Promise.all([
+    fetch("/api/tests" + qs).then(r => r.json()),
+    fetch("/api/tree" + qs).then(r => r.json()),
+  ]);
+  testStats = new Map(testsResp.tests.map(t => [t.test_id, t]));
+  testGroups = treeResp.groups;
+  lastDiscoveryRun = !!testsResp.discovery_run;
+  const note = lastDiscoveryRun ? "" : " — repository only, click 'Discover' to enumerate";
+  summaryText.textContent = `${testsResp.tests.length} tests · ${testsResp.total_runs_in_repo} runs in repo${note}`;
+  renderTree();
+}
+
+document.getElementById("discover-btn").addEventListener("click", async () => {
+  setStatus("discovering tests…");
+  try {
+    await loadTests({ discover: true });
+    setStatus("ready.");
+  } catch (e) {
+    setStatus("discovery failed: " + e);
+  }
+});
+
+// Aggregate the worst status across a group's tests, looking at live
+// statuses first (during a run) and then last_status from repo state.
+// Priority order: running (in-flight beats anything) > failure/error >
+// xfail/uxsuccess > skip > success > unknown. Returns the worst-tier CSS
+// class name suitable for a `.badge`, or "" when nothing's known.
+function groupRollupStatus(testIds) {
+  const RANK = { running: 6, failure: 5, error: 5, uxsuccess: 4, xfail: 3, skip: 2, success: 1 };
+  let bestRank = 0;
+  let bestCls = "";
+  let failed = 0, passed = 0, skipped = 0, running = 0, unknown = 0;
+  for (const tid of testIds) {
+    const cls = liveStatuses.get(tid) || (testStats.get(tid) || {}).last_status || "";
+    if (cls === "running") running++;
+    else if (cls === "failure" || cls === "error") failed++;
+    else if (cls === "skip") skipped++;
+    else if (cls === "success" || cls === "xfail") passed++;
+    else unknown++;
+    const rank = RANK[cls] || 0;
+    if (rank > bestRank) { bestRank = rank; bestCls = cls; }
+  }
+  return { cls: bestCls, failed, passed, skipped, running, unknown };
+}
+
+function renderTree() {
+  const filter = search.value.trim().toLowerCase();
+  tree.innerHTML = "";
+  for (const g of testGroups) {
+    const matched = filter
+      ? g.tests.filter(t => t.toLowerCase().includes(filter))
+      : g.tests;
+    if (matched.length === 0) continue;
+    const det = document.createElement("details");
+    det.className = "group";
+    det.open = !!filter || testGroups.length === 1;
+    const sum = document.createElement("summary");
+
+    // Aggregate status badge for the group.
+    const rollup = groupRollupStatus(matched);
+    sum.append(badge(rollup.cls));
+
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = g.name || "(all)";
+    const cnt = document.createElement("span");
+    cnt.className = "count";
+    // Build a compact breakdown: "12 tests · 2 failed · 1 skipped".
+    const parts = [`${matched.length} test${matched.length === 1 ? "" : "s"}`];
+    if (rollup.failed > 0) parts.push(`<span style="color:var(--fail);">${rollup.failed} failed</span>`);
+    if (rollup.running > 0) parts.push(`<span style="color:var(--running);">${rollup.running} running</span>`);
+    if (rollup.skipped > 0) parts.push(`${rollup.skipped} skipped`);
+    cnt.innerHTML = parts.join(" · ");
+
+    const runBtn = document.createElement("button");
+    runBtn.textContent = "Run group";
+    runBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startRun({ test_ids: matched });
+    };
+    sum.append(name, cnt, runBtn);
+    det.append(sum);
+    const ul = document.createElement("ul");
+    for (const tid of matched) ul.append(renderTest(tid));
+    det.append(ul);
+    tree.append(det);
+  }
+}
+
+function renderTest(tid) {
+  const li = document.createElement("li");
+  li.dataset.testId = tid;
+  const s = testStats.get(tid);
+  // Live status takes precedence over stored last_status so a row painted
+  // after an SSE event arrives is still coloured correctly.
+  const liveCls = liveStatuses.get(tid);
+  const initialBadge = liveCls || (s && s.last_status) || "";
+  li.append(badge(initialBadge));
+
+  const id = document.createElement("span");
+  id.className = "id";
+  id.textContent = tid;
+  li.append(id);
+
+  if (s) {
+    // Only meaningful when we actually ran discovery; otherwise every test
+    // would be labelled "stale" because we never asked the test runner.
+    if (lastDiscoveryRun) {
+      if (s.discovered && s.runs === 0) {
+        const tag = document.createElement("span");
+        tag.className = "tag new";
+        tag.textContent = "new";
+        tag.title = "discovered but never run";
+        li.append(tag);
+      } else if (!s.discovered && s.runs > 0) {
+        const tag = document.createElement("span");
+        tag.className = "tag stale";
+        tag.textContent = "stale";
+        tag.title = `not seen in last ${s.runs_since_seen} run${s.runs_since_seen === 1 ? "" : "s"}`;
+        li.append(tag);
+        // Grey-out the whole row so stale tests visually recede. The dim
+        // class also softens the status badge so a stale "success" stops
+        // pulling attention.
+        li.classList.add("stale-row");
+      }
+    }
+
+    const statsEl = document.createElement("span");
+    statsEl.className = "stats";
+    const parts = [];
+    if (s.runs > 0) parts.push(`${s.runs} run${s.runs === 1 ? "" : "s"}`);
+    if (s.failures > 0) {
+      const flakePct = Math.round((s.failures / s.runs) * 100);
+      parts.push(`<span class="fails">${s.failures} fail${s.failures === 1 ? "" : "s"}</span>`);
+      if (s.failures < s.runs) {
+        parts.push(`<span class="flake">${flakePct}% flaky</span>`);
+      }
+    }
+    statsEl.innerHTML = parts.join(" · ");
+    statsEl.title = [
+      `runs: ${s.runs}`,
+      `failures: ${s.failures}`,
+      s.last_status ? `last: ${s.last_status}` : null,
+      s.last_run_id ? `last run: ${s.last_run_id}` : null,
+      s.avg_duration_secs != null ? `avg: ${fmtDuration(s.avg_duration_secs)}` : null,
+      s.runs_since_seen > 0 ? `runs since seen: ${s.runs_since_seen}` : null,
+    ].filter(Boolean).join("\n");
+    li.append(statsEl);
+  }
+
+  const dur = document.createElement("span");
+  dur.className = "duration";
+  if (s && s.avg_duration_secs != null) dur.textContent = fmtDuration(s.avg_duration_secs);
+  li.append(dur);
+
+  const btn = document.createElement("button");
+  btn.textContent = "Run";
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    startRun({ test_ids: [tid] });
+  };
+  li.append(btn);
+
+  // Click anywhere on the row (except the Run button or interactive bits) to
+  // toggle a per-test detail panel.
+  li.addEventListener("click", (e) => {
+    if (e.target.closest("button")) return;
+    toggleTestDetail(li, tid);
+  });
+  return li;
+}
+
+async function toggleTestDetail(rowEl, tid) {
+  const next = rowEl.nextElementSibling;
+  if (next && next.classList.contains("test-detail")) {
+    next.remove();
+    rowEl.classList.remove("expanded");
+    return;
+  }
+  rowEl.classList.add("expanded");
+  const detail = document.createElement("li");
+  detail.className = "test-detail";
+  const inner = document.createElement("div");
+  inner.className = "detail-inner";
+  inner.innerHTML = "<div class='empty'>loading…</div>";
+  detail.append(inner);
+  rowEl.after(detail);
+
+  let history;
+  try {
+    const r = await fetch(`/api/test/${encodeURIComponent(tid)}/history`);
+    history = await r.json();
+  } catch (e) {
+    inner.innerHTML = `<div class='empty'>failed to load: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  inner.innerHTML = "";
+  if (!history.entries || history.entries.length === 0) {
+    inner.innerHTML = "<div class='empty'>no recorded runs.</div>";
+    return;
+  }
+  // Duration distribution: a small inline SVG bar chart, one bar per
+  // historical run, oldest on the left.
+  const oldestFirst = history.entries.slice().reverse();
+  const durations = oldestFirst.map(e => e.duration_secs).filter(d => d != null);
+  if (durations.length > 1) {
+    const max = Math.max(...durations);
+    const w = 360, h = 60, n = oldestFirst.length;
+    const bw = Math.max(2, Math.floor(w / n) - 1);
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("width", w);
+    svg.setAttribute("height", h);
+    svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    oldestFirst.forEach((e, i) => {
+      const d = e.duration_secs;
+      const bh = d != null && max > 0 ? (d / max) * (h - 4) : 0;
+      const rect = document.createElementNS(svgNS, "rect");
+      rect.setAttribute("x", i * (bw + 1));
+      rect.setAttribute("y", h - bh);
+      rect.setAttribute("width", bw);
+      rect.setAttribute("height", bh);
+      const failure = e.status === "failure" || e.status === "error";
+      rect.setAttribute("fill", failure ? "var(--fail)" : "var(--ok)");
+      const title = document.createElementNS(svgNS, "title");
+      title.textContent = `${e.run_id}: ${e.status || "?"}` +
+        (d != null ? ` · ${fmtDuration(d)}` : "");
+      rect.append(title);
+      svg.append(rect);
+    });
+    const heading = document.createElement("h3");
+    heading.textContent = `Duration over ${oldestFirst.length} runs (max ${fmtDuration(max)})`;
+    inner.append(heading, svg);
+  }
+
+  const heading2 = document.createElement("h3");
+  heading2.textContent = "Run history";
+  inner.append(heading2);
+
+  const tbl = document.createElement("table");
+  tbl.className = "history";
+  tbl.innerHTML = "<thead><tr><th>Run</th><th>When</th><th>Status</th><th class='dur'>Duration</th></tr></thead>";
+  const tbody = document.createElement("tbody");
+  for (const e of history.entries) {
+    const tr = document.createElement("tr");
+    const statusCell = document.createElement("td");
+    statusCell.className = "status";
+    if (e.status) {
+      statusCell.append(badge(e.status));
+      statusCell.appendChild(document.createTextNode(" " + e.status));
+    }
+    tr.innerHTML =
+      `<td>${escapeHtml(e.run_id)}</td>` +
+      `<td>${escapeHtml(fmtTimestamp(e.timestamp))}</td>`;
+    tr.append(statusCell);
+    const dur = document.createElement("td");
+    dur.className = "dur";
+    dur.textContent = e.duration_secs != null ? fmtDuration(e.duration_secs) : "—";
+    tr.append(dur);
+    const hasAttachments = !!(e.message || e.details || (e.tags && e.tags.length > 0));
+    const isFailure = e.status === "failure" || e.status === "error";
+    if (hasAttachments) {
+      // Visual cue: append a tiny "▸ output" marker into the status cell so
+      // the user can see the row is clickable. (Without this, attachments
+      // are reachable only by guessing.)
+      const hint = document.createElement("span");
+      hint.textContent = " ▸";
+      hint.style.cssText = "color:var(--accent);margin-left:4px;font-size:10px;";
+      statusCell.append(hint);
+      tr.style.cursor = "pointer";
+      tr.title = "click to show attachments";
+      tr.addEventListener("click", () => {
+        const next = tr.nextElementSibling;
+        if (next && next.classList.contains("history-attachments")) {
+          next.remove();
+          return;
+        }
+        tr.after(buildHistoryAttachmentsRow(e));
+      });
+    }
+    tbody.append(tr);
+    // Failure rows auto-expand so users see the traceback immediately.
+    if (hasAttachments && isFailure) {
+      tbody.append(buildHistoryAttachmentsRow(e));
+    }
+  }
+  tbl.append(tbody);
+  inner.append(tbl);
+}
+
+search.addEventListener("input", renderTree);
+
+// Failures panel: latest run's failing tests with attachments inline.
+//
+// We don't add a dedicated server endpoint; the latest-run detail already
+// carries the per-test results we need. The failure badge in the nav bar
+// is also updated as a side effect of loading the runs list.
+async function loadFailures() {
+  const summaryEl = document.getElementById("failures-summary");
+  const list = document.getElementById("failures-list");
+  const rerunBtn = document.getElementById("failures-rerun-all");
+  list.innerHTML = "";
+  summaryEl.textContent = "loading…";
+  rerunBtn.disabled = true;
+  let runs;
+  try {
+    runs = await fetch("/api/runs").then(r => r.json());
+  } catch (e) {
+    summaryEl.textContent = "failed to load: " + e;
+    return;
+  }
+  if (!runs || runs.length === 0) {
+    summaryEl.textContent = "no runs in this repository yet.";
+    return;
+  }
+  const latest = runs[0];
+  if (latest.failures === 0) {
+    summaryEl.innerHTML = `Latest run <code>${escapeHtml(latest.id)}</code> is all green. No failures to triage.`;
+    return;
+  }
+  let detail;
+  try {
+    detail = await fetch(`/api/runs/${encodeURIComponent(latest.id)}`).then(r => r.json());
+  } catch (e) {
+    summaryEl.textContent = "failed to load run detail: " + e;
+    return;
+  }
+  const failures = detail.results.filter(r => r.status === "failure" || r.status === "error");
+  summaryEl.innerHTML =
+    `${failures.length} failure${failures.length === 1 ? "" : "s"} in run ` +
+    `<code>${escapeHtml(latest.id)}</code> (${escapeHtml(fmtTimestamp(latest.timestamp))})`;
+  rerunBtn.disabled = false;
+  rerunBtn.onclick = () => startRun({ test_ids: failures.map(r => r.test_id) });
+
+  for (const r of failures) {
+    const li = document.createElement("li");
+    li.append(badge(r.status));
+    const id = document.createElement("span");
+    id.className = "id";
+    id.textContent = r.test_id;
+    li.append(id);
+    const dur = document.createElement("span");
+    dur.className = "dur";
+    dur.textContent = r.duration_secs != null ? fmtDuration(r.duration_secs) : "";
+    li.append(dur);
+    const btn = document.createElement("button");
+    btn.textContent = "Re-run";
+    btn.style.cssText = "padding:1px 6px;border:1px solid var(--border);background:#fff;border-radius:3px;cursor:pointer;font:inherit;font-size:11px;";
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      startRun({ test_ids: [r.test_id] });
+    };
+    li.append(btn);
+    list.append(li);
+    // Auto-expand attachments inline — the whole point of this panel is
+    // that the user doesn't have to click around to see what broke.
+    if (r.message || r.details || (r.tags && r.tags.length > 0)) {
+      list.append(buildAttachmentsRow(r));
+    }
+  }
+
+  updateFailuresBadge(failures.length);
+}
+
+function updateFailuresBadge(n) {
+  const badge = document.getElementById("failures-badge");
+  if (n > 0) {
+    badge.textContent = String(n);
+    badge.style.display = "";
+  } else {
+    badge.style.display = "none";
+  }
+}
+
+// Update the nav badge whenever we have a fresh count from the latest
+// run. Called from loadRuns and after every finished run.
+async function refreshFailuresBadge() {
+  try {
+    const runs = await fetch("/api/runs").then(r => r.json());
+    if (runs && runs.length > 0) updateFailuresBadge(runs[0].failures);
+  } catch (e) {
+    // Stay quiet on errors; the badge is just a hint.
+  }
+}
+
+// Runs panel
+async function loadRuns() {
+  const runs = await fetch("/api/runs").then(r => r.json());
+  const body = document.getElementById("runs-body");
+  body.innerHTML = "";
+  document.getElementById("runs-summary").textContent = `${runs.length} run${runs.length === 1 ? "" : "s"}`;
+  for (const r of runs) {
+    const tr = document.createElement("tr");
+    tr.dataset.runId = r.id;
+    const commitDisplay = r.git_commit
+      ? escapeHtml(r.git_commit.slice(0, 8)) + (r.git_dirty ? "<span style='color:var(--fail);'>*</span>" : "")
+      : "—";
+    const profileDisplay = r.profile ? escapeHtml(r.profile) : "—";
+    const tagsDisplay = r.tags && r.tags.length > 0
+      ? r.tags.map(t => `<span class="tag" style="margin-right:2px;">${escapeHtml(t)}</span>`).join("")
+      : "—";
+    tr.innerHTML =
+      `<td>${escapeHtml(r.id)}</td>` +
+      `<td>${escapeHtml(fmtTimestamp(r.timestamp))}</td>` +
+      `<td>${profileDisplay}</td>` +
+      `<td title="${r.git_commit ? escapeHtml(r.git_commit) : ""}" style="font-family:ui-monospace,Menlo,monospace;font-size:11px;">${commitDisplay}</td>` +
+      `<td>${tagsDisplay}</td>` +
+      `<td class="num">${r.total}</td>` +
+      `<td class="num ${r.failures > 0 ? "fail" : "ok"}">${r.failures}</td>` +
+      `<td class="num">${r.duration_secs != null ? fmtDuration(r.duration_secs) : "—"}</td>` +
+      `<td class="num ${r.exit_code === 0 ? "ok" : (r.exit_code != null ? "fail" : "")}">${r.exit_code != null ? r.exit_code : "—"}</td>`;
+    tr.onclick = () => toggleRunDetail(tr, r.id);
+    body.append(tr);
+  }
+}
+
+async function toggleRunDetail(rowEl, id) {
+  const next = rowEl.nextElementSibling;
+  if (next && next.classList.contains("detail-row")) {
+    next.remove();
+    rowEl.classList.remove("expanded");
+    return;
+  }
+  rowEl.classList.add("expanded");
+  const tr = document.createElement("tr");
+  tr.className = "detail-row";
+  const td = document.createElement("td");
+  td.colSpan = 9;
+  td.innerHTML = "<div class='empty' style='color:var(--muted);font-size:12px;'>loading…</div>";
+  tr.append(td);
+  rowEl.after(tr);
+
+  let detail;
+  try {
+    detail = await fetch(`/api/runs/${encodeURIComponent(id)}`).then(r => r.json());
+  } catch (e) {
+    td.innerHTML = `<div class='empty'>failed to load: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  td.innerHTML = "";
+
+  // Banner first, before the metadata table, so an interrupted run is
+  // unmissable.
+  if (detail.interruption) {
+    const banner = document.createElement("div");
+    banner.className = "interrupted-banner";
+    banner.textContent = "Run interrupted: " + detail.interruption;
+    td.append(banner);
+  }
+
+  // Status breakdown — pass/fail/skip/error counts at a glance.
+  const breakdown = document.createElement("div");
+  breakdown.className = "breakdown";
+  breakdown.innerHTML =
+    `<span class="pass">${detail.successes} passed</span>` +
+    `<span class="fail">${detail.failures} failed</span>` +
+    (detail.errors > 0 ? `<span class="fail">(${detail.errors} errored)</span>` : "") +
+    (detail.skipped > 0 ? `<span class="skip">${detail.skipped} skipped</span>` : "");
+  td.append(breakdown);
+
+  // Compute the run's end time for display from start + wall-clock
+  // duration so the user can see when it finished. (The repository
+  // doesn't store end-time directly.)
+  let endTime = null;
+  if (detail.duration_secs != null) {
+    try {
+      endTime = new Date(new Date(detail.timestamp).getTime() + detail.duration_secs * 1000);
+    } catch (e) { /* ignore */ }
+  }
+
+  const meta = document.createElement("dl");
+  meta.className = "run-meta";
+  const rows = [
+    ["Run", detail.id, false],
+    ["Started", `${fmtTimestamp(detail.timestamp)} (${relativeTime(detail.timestamp)})`, false],
+    ["Finished", endTime ? `${endTime.toLocaleString()} (${relativeTime(endTime.toISOString())})` : null, false],
+    ["Wall-clock duration", detail.duration_secs != null ? fmtDuration(detail.duration_secs) : null, false],
+    ["Predicted duration", detail.predicted_duration_secs != null ? fmtDuration(detail.predicted_duration_secs) : null, false],
+    ["Total test time", detail.total_test_duration_secs != null ? fmtDuration(detail.total_test_duration_secs) : null, false],
+    ["Slowest test", detail.slowest_test_secs != null ? fmtDuration(detail.slowest_test_secs) : null, false],
+    ["Mean test time", detail.mean_test_secs != null ? fmtDuration(detail.mean_test_secs) : null, false],
+    ["Exit code", detail.exit_code != null ? String(detail.exit_code) : null, false],
+    ["Profile", detail.profile, false],
+    ["Concurrency", detail.concurrency != null ? `${detail.concurrency} worker${detail.concurrency === 1 ? "" : "s"}` : null, false],
+    ["Tags", detail.tags && detail.tags.length > 0 ? detail.tags.join(", ") : null, false],
+    ["Command", detail.command, true],
+    ["Test args", detail.test_args && detail.test_args.length > 0 ? detail.test_args.join(" ") : null, true],
+    ["Git commit", detail.git_commit ? detail.git_commit + (detail.git_dirty ? " (dirty)" : "") : null, true],
+    ["Tests", `${detail.total} total`, false],
+  ];
+  for (const [label, value, code] of rows) {
+    if (value == null) continue;
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    if (code) {
+      const codeEl = document.createElement("code");
+      codeEl.textContent = value;
+      dd.append(codeEl);
+    } else {
+      dd.textContent = value;
+    }
+    meta.append(dt, dd);
+  }
+  td.append(meta);
+
+  // Diff against the previous run: render new-failures / fixed / added /
+  // removed / status-changed. We fetch lazily so the run-detail expand is
+  // still fast when the diff is large.
+  renderRunDiff(td, id);
+
+  // Per-test results: failures first, then everything else, capped to a
+  // scrollable list so a 5000-test run doesn't blow up the page. Click a
+  // failed-test row to reveal its message/details/tags.
+  if (detail.results.length > 0) {
+    const heading = document.createElement("h3");
+    heading.textContent = "Per-test results";
+    heading.style.cssText = "font-size:12px;margin:0 0 4px 0;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;";
+    td.append(heading);
+    const ul = document.createElement("ul");
+    ul.className = "run-results-list";
+    const sorted = detail.results.slice().sort((a, b) => {
+      const af = (a.status === "failure" || a.status === "error") ? 0 : 1;
+      const bf = (b.status === "failure" || b.status === "error") ? 0 : 1;
+      if (af !== bf) return af - bf;
+      return a.test_id.localeCompare(b.test_id);
+    });
+    for (const r of sorted) {
+      const isFailure = r.status === "failure" || r.status === "error";
+      const hasAttachments = !!(r.message || r.details || (r.tags && r.tags.length > 0));
+      const li = document.createElement("li");
+      li.append(badge(r.status));
+      const id = document.createElement("span");
+      id.className = "id";
+      id.textContent = r.test_id;
+      li.append(id);
+      if (hasAttachments) {
+        const hint = document.createElement("span");
+        hint.textContent = "▸ output";
+        hint.style.cssText = "color:var(--accent);font-size:10px;text-transform:uppercase;letter-spacing:0.5px;";
+        li.append(hint);
+      }
+      const dur = document.createElement("span");
+      dur.className = "dur";
+      dur.textContent = r.duration_secs != null ? fmtDuration(r.duration_secs) : "";
+      li.append(dur);
+      if (hasAttachments) {
+        li.classList.add("expandable");
+        li.addEventListener("click", () => toggleResultAttachments(li, r));
+      }
+      ul.append(li);
+
+      // For failures, drop the attachments inline immediately rather than
+      // gating them behind a click. Saves the user a scan-and-click step
+      // when triaging.
+      if (isFailure && hasAttachments) {
+        const arow = buildAttachmentsRow(r);
+        ul.append(arow);
+      }
+    }
+    td.append(ul);
+  }
+}
+
+async function renderRunDiff(parentEl, runId) {
+  const heading = document.createElement("h3");
+  heading.textContent = "Compared to previous run";
+  heading.style.cssText = "font-size:12px;margin:8px 0 4px 0;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;";
+  const placeholder = document.createElement("div");
+  placeholder.style.cssText = "color:var(--muted);font-size:12px;margin-bottom:10px;";
+  placeholder.textContent = "loading diff…";
+  parentEl.append(heading, placeholder);
+
+  let diff;
+  try {
+    diff = await fetch(`/api/runs/${encodeURIComponent(runId)}/diff`).then(r => r.json());
+  } catch (e) {
+    placeholder.textContent = "diff failed: " + e;
+    return;
+  }
+  placeholder.remove();
+
+  if (!diff.baseline_run_id) {
+    const note = document.createElement("div");
+    note.style.cssText = "color:var(--muted);font-size:12px;margin-bottom:10px;";
+    note.textContent = "(no preceding run to compare against)";
+    parentEl.append(note);
+    return;
+  }
+
+  const total = diff.new_failures.length + diff.fixed.length
+    + diff.added.length + diff.removed.length + diff.status_changed.length;
+  if (total === 0) {
+    const note = document.createElement("div");
+    note.style.cssText = "color:var(--muted);font-size:12px;margin-bottom:10px;";
+    note.innerHTML = `Identical results to run <code>${escapeHtml(diff.baseline_run_id)}</code>.`;
+    parentEl.append(note);
+    return;
+  }
+
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "background:#fff;border:1px solid var(--border);border-radius:4px;padding:8px 12px;margin-bottom:12px;font-size:12px;";
+  const baseline = document.createElement("div");
+  baseline.style.cssText = "color:var(--muted);font-size:11px;margin-bottom:6px;";
+  baseline.innerHTML = `vs run <code>${escapeHtml(diff.baseline_run_id)}</code>`;
+  wrap.append(baseline);
+
+  const sections = [
+    ["New failures", diff.new_failures, "var(--fail)"],
+    ["Fixed", diff.fixed, "var(--ok)"],
+    ["Added", diff.added, "var(--accent)"],
+    ["Removed", diff.removed, "var(--muted)"],
+    ["Status changed", diff.status_changed, "var(--xfail)"],
+  ];
+  for (const [label, items, color] of sections) {
+    if (items.length === 0) continue;
+    const sec = document.createElement("div");
+    sec.style.cssText = "margin-bottom:6px;";
+    const head = document.createElement("div");
+    head.style.cssText = `color:${color};font-weight:600;margin-bottom:2px;`;
+    head.textContent = `${label} (${items.length})`;
+    sec.append(head);
+    const ul = document.createElement("ul");
+    ul.style.cssText = "margin:0;padding-left:18px;list-style:disc;font-family:ui-monospace,Menlo,monospace;";
+    for (const item of items) {
+      const li = document.createElement("li");
+      if (item.from && item.to) {
+        li.innerHTML = `${escapeHtml(item.test_id)} <span style="color:var(--muted);">(${escapeHtml(item.from)} → ${escapeHtml(item.to)})</span>`;
+      } else {
+        li.textContent = item.test_id;
+      }
+      ul.append(li);
+    }
+    sec.append(ul);
+    wrap.append(sec);
+  }
+  parentEl.append(wrap);
+}
+
+function buildHistoryAttachmentsRow(e) {
+  const arow = document.createElement("tr");
+  arow.className = "history-attachments";
+  const acell = document.createElement("td");
+  acell.colSpan = 4;
+  acell.style.cssText = "padding:6px 12px;background:#fafafa;";
+  if (e.message) {
+    const m = document.createElement("div");
+    m.className = "msg";
+    m.style.cssText = "color:var(--fail);font-weight:600;margin-bottom:4px;white-space:pre-wrap;word-break:break-word;";
+    m.textContent = e.message;
+    acell.append(m);
+  }
+  if (e.details) {
+    const pre = document.createElement("pre");
+    pre.style.cssText = "background:#1e1e1e;color:#ddd;padding:8px;border-radius:3px;margin:0;max-height:240px;overflow:auto;font-size:11px;white-space:pre-wrap;word-break:break-word;";
+    pre.textContent = e.details;
+    acell.append(pre);
+  }
+  if (e.tags && e.tags.length > 0) {
+    const tagList = document.createElement("div");
+    tagList.style.cssText = "margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;";
+    for (const t of e.tags) {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = t;
+      tagList.append(tag);
+    }
+    acell.append(tagList);
+  }
+  arow.append(acell);
+  return arow;
+}
+
+function buildAttachmentsRow(r) {
+  const li = document.createElement("li");
+  li.className = "attachments-row";
+  if (r.message) {
+    const m = document.createElement("div");
+    m.className = "msg";
+    m.textContent = r.message;
+    li.append(m);
+  }
+  if (r.details) {
+    const pre = document.createElement("pre");
+    pre.className = "details";
+    pre.textContent = r.details;
+    li.append(pre);
+  }
+  if (r.tags && r.tags.length > 0) {
+    const tagList = document.createElement("div");
+    tagList.className = "tag-list";
+    for (const t of r.tags) {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = t;
+      tagList.append(tag);
+    }
+    li.append(tagList);
+  }
+  return li;
+}
+
+function toggleResultAttachments(rowEl, r) {
+  const next = rowEl.nextElementSibling;
+  if (next && next.classList.contains("attachments-row")) {
+    next.remove();
+    return;
+  }
+  rowEl.after(buildAttachmentsRow(r));
+}
+
+// Format an ISO-8601 timestamp as a human-friendly relative time
+// ("3m ago", "yesterday", etc.).
+function relativeTime(iso) {
+  let then;
+  try { then = new Date(iso); } catch (e) { return ""; }
+  const ms = Date.now() - then.getTime();
+  if (Number.isNaN(ms)) return "";
+  const sec = Math.round(ms / 1000);
+  if (sec < 0) return "in the future";
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  return `${day}d ago`;
+}
+
+// Repository panel
+async function loadRepo() {
+  const [repo, timeline] = await Promise.all([
+    fetch("/api/repo").then(r => r.json()),
+    fetch("/api/timeline").then(r => r.json()),
+  ]);
+  const grid = document.getElementById("repo-stats");
+  const cards = [
+    ["Total runs", String(repo.total_runs)],
+    ["Tests known", String(repo.total_tests_known)],
+    ["Last run", repo.last_run_id != null
+      ? `${repo.last_run_failures}/${repo.last_run_total} failed`
+      : "—",
+      (repo.last_run_failures || 0) > 0],
+    ["Avg run duration", repo.avg_run_duration_secs != null
+      ? fmtDuration(repo.avg_run_duration_secs)
+      : "—"],
+    ["Recent failure rate", repo.recent_failure_rate != null
+      ? (repo.recent_failure_rate * 100).toFixed(1) + "%"
+      : "—",
+      (repo.recent_failure_rate || 0) > 0.05],
+  ];
+  grid.innerHTML = "";
+  for (const [label, value, fail] of cards) {
+    const div = document.createElement("div");
+    div.className = "stat-card";
+    div.innerHTML =
+      `<div class="label">${escapeHtml(label)}</div>` +
+      `<div class="value${fail ? " fail" : ""}">${escapeHtml(value)}</div>`;
+    grid.append(div);
+  }
+  renderTimeline(timeline);
+  renderToplist("repo-slowest", repo.slowest, t => fmtDuration(t.avg_duration_secs));
+  renderToplist("repo-flakiest", repo.flakiest, t =>
+    `${(t.flakiness_score * 100).toFixed(0)}% · ${t.failures}/${t.runs} failed`);
+}
+
+function renderTimeline(timeline) {
+  const meta = document.getElementById("repo-timeline-meta");
+  const body = document.getElementById("repo-timeline-body");
+  body.innerHTML = "";
+  meta.textContent = `last ${timeline.runs.length} run${timeline.runs.length === 1 ? "" : "s"}`;
+  if (timeline.rows.length === 0) {
+    body.innerHTML = '<div class="timeline-empty">no failures in this window — every test has been green.</div>';
+    return;
+  }
+  // For each row we render one `.timeline-cell` per run, oldest on the
+  // left. Click a cell to jump into that run's detail in the Runs panel.
+  for (const row of timeline.rows) {
+    const div = document.createElement("div");
+    div.className = "timeline-row";
+    const cells = document.createElement("div");
+    cells.className = "cells";
+    for (let i = 0; i < timeline.runs.length; i++) {
+      const status = row.statuses[i];
+      const run = timeline.runs[i];
+      const cell = document.createElement("span");
+      cell.className = "timeline-cell " + (status || "absent");
+      cell.title = `run ${run.id} · ${fmtTimestamp(run.timestamp)} · ${status || "not observed"}`;
+      cell.addEventListener("click", () => jumpToRun(run.id));
+      cells.append(cell);
+    }
+    div.append(cells);
+    const id = document.createElement("span");
+    id.className = "test-id";
+    id.textContent = row.test_id;
+    div.append(id);
+    body.append(div);
+  }
+}
+
+// Switch to the Runs panel and expand the row for the given run id.
+async function jumpToRun(runId) {
+  switchTab("runs");
+  // loadRuns has already run via tabLoaders.runs; wait for the row to land
+  // in the DOM, then click it.
+  const start = Date.now();
+  const tick = () => {
+    const tr = document.querySelector(`#runs-body > tr[data-run-id="${CSS.escape(runId)}"]`);
+    if (tr) {
+      if (!tr.classList.contains("expanded")) tr.click();
+      tr.scrollIntoView({ block: "center" });
+      return;
+    }
+    if (Date.now() - start < 2000) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function renderToplist(elId, items, fmtRight) {
+  const ul = document.querySelector(`#${elId} ul`);
+  ul.innerHTML = "";
+  if (!items || items.length === 0) {
+    const li = document.createElement("li");
+    li.style.color = "var(--muted)";
+    li.textContent = "(none)";
+    ul.append(li);
+    return;
+  }
+  for (const t of items) {
+    const li = document.createElement("li");
+    const id = document.createElement("span");
+    id.className = "id";
+    id.textContent = t.test_id;
+    const num = document.createElement("span");
+    num.className = "num";
+    num.textContent = fmtRight(t);
+    li.append(id, num);
+    ul.append(li);
+  }
+}
+
+// Run panel
+async function loadRunForm() {
+  const profiles = await fetch("/api/profiles").then(r => r.json());
+  const sel = document.getElementById("run-profile");
+  sel.innerHTML = "";
+  const noneOpt = document.createElement("option");
+  noneOpt.value = "";
+  noneOpt.textContent = profiles.default_profile
+    ? `(default: ${profiles.default_profile})`
+    : "(base config)";
+  sel.append(noneOpt);
+  for (const p of profiles.profiles) {
+    const opt = document.createElement("option");
+    opt.value = p;
+    opt.textContent = p;
+    if (profiles.default_profile === p) opt.selected = true;
+    sel.append(opt);
+  }
+}
+function readToks(id) {
+  const v = document.getElementById(id).value.trim();
+  return v ? v.split(/\s+/) : [];
+}
+function readStr(id) {
+  const v = document.getElementById(id).value.trim();
+  return v || null;
+}
+function readNum(id) {
+  const v = document.getElementById(id).value.trim();
+  return v ? parseInt(v, 10) : null;
+}
+
+// Toggle visibility of the max-iterations row when until-failure is set.
+document.getElementById("run-until-failure").addEventListener("change", (e) => {
+  document.getElementById("run-max-iter-row").style.display = e.target.checked ? "block" : "none";
+});
+
+// Update the "Advanced options" summary so the user can see at a glance
+// when a hidden option is non-default. We count fields whose value is set
+// to something other than empty/unchecked.
+const advancedFieldIds = [
+  "run-starting-with", "run-tags", "run-order",
+  "run-test-timeout", "run-max-duration", "run-no-output-timeout",
+  "run-test-args", "run-isolated", "run-partial", "run-until-failure",
+  "run-max-iterations",
+];
+function refreshAdvancedSummary() {
+  let n = 0;
+  for (const id of advancedFieldIds) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (el.type === "checkbox") {
+      if (el.checked) n++;
+    } else if (el.value && el.value.trim() !== "") {
+      n++;
+    }
+  }
+  const summaryEl = document.getElementById("run-advanced-summary");
+  summaryEl.textContent = n > 0 ? `(${n} set)` : "";
+  // Auto-open when the user has set something so they can see it on
+  // re-entry, but don't force-close if they explicitly opened it.
+  if (n > 0) {
+    document.getElementById("run-advanced").open = true;
+  }
+}
+document.getElementById("run-form").addEventListener("input", refreshAdvancedSummary);
+document.getElementById("run-form").addEventListener("change", refreshAdvancedSummary);
+
+document.getElementById("run-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const payload = {
+    profile: document.getElementById("run-profile").value || null,
+    filters: readToks("run-filters"),
+    starting_with: readToks("run-starting-with"),
+    tags: readToks("run-tags"),
+    parallel: readNum("run-parallel"),
+    order: readStr("run-order"),
+    test_timeout: readStr("run-test-timeout"),
+    max_duration: readStr("run-max-duration"),
+    no_output_timeout: readStr("run-no-output-timeout"),
+    test_args: readToks("run-test-args"),
+    failing: document.getElementById("run-failing-only").checked,
+    isolated: document.getElementById("run-isolated").checked,
+    partial: document.getElementById("run-partial").checked,
+    until_failure: document.getElementById("run-until-failure").checked,
+    max_iterations: readNum("run-max-iterations"),
+  };
+  startRun(payload);
+  switchTab("tests");
+});
+
+// Run dispatch
+document.getElementById("run-all").onclick = () => startRun({});
+document.getElementById("run-failing").onclick = () => startRun({ failing: true });
+
+async function startRun(payload) {
+  if (activeRun) {
+    setStatus("a run is already in progress");
+    return;
+  }
+  setStatus("starting run…");
+  // Best-effort total for the progress bar. If the caller named tests
+  // explicitly, that's the denominator. Otherwise fall back to the size of
+  // the most recent run, then to the count of currently-known tests, then
+  // to 0 (the bar will still grow as `started` events come in).
+  let total = 0;
+  if (payload.test_ids && payload.test_ids.length > 0) {
+    total = payload.test_ids.length;
+  } else if (testStats.size > 0) {
+    total = testStats.size;
+  }
+  const resp = await fetch("/api/run", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    setStatus("failed to start: " + await resp.text());
+    return;
+  }
+  const { handle } = await resp.json();
+  attachSse(handle, total);
+}
+
+function findRow(tid) {
+  return tree.querySelector(`li[data-test-id="${CSS.escape(tid)}"]`);
+}
+function setBadge(tid, cls) {
+  liveStatuses.set(tid, cls);
+  const row = findRow(tid);
+  if (!row) return;
+  // The first `<span class="badge">` direct-child is the leading status dot;
+  // detail-table rows have their own badges further down so we anchor on the
+  // direct child only.
+  const dot = row.querySelector(":scope > .badge");
+  if (dot) dot.className = "badge " + cls;
+  // Recompute the parent group's rollup status. We walk to the enclosing
+  // <details>, collect data-test-id values from its <li> rows, and update
+  // the summary's leading badge + count breakdown.
+  const det = row.closest("details.group");
+  if (det) refreshGroupRollup(det);
+}
+
+function refreshGroupRollup(detEl) {
+  const tids = Array.from(detEl.querySelectorAll(":scope > ul > li[data-test-id]"))
+    .map(li => li.dataset.testId);
+  const rollup = groupRollupStatus(tids);
+  const sumDot = detEl.querySelector(":scope > summary > .badge");
+  if (sumDot) sumDot.className = "badge " + rollup.cls;
+  const cnt = detEl.querySelector(":scope > summary > .count");
+  if (cnt) {
+    const parts = [`${tids.length} test${tids.length === 1 ? "" : "s"}`];
+    if (rollup.failed > 0) parts.push(`<span style="color:var(--fail);">${rollup.failed} failed</span>`);
+    if (rollup.running > 0) parts.push(`<span style="color:var(--running);">${rollup.running} running</span>`);
+    if (rollup.skipped > 0) parts.push(`${rollup.skipped} skipped`);
+    cnt.innerHTML = parts.join(" · ");
+  }
+}
+
+const logWrap = document.getElementById("log-wrap");
+const logPane = document.getElementById("log-pane");
+const logCount = document.getElementById("log-count");
+function appendLog(line) {
+  if (!logWrap.style.display || logWrap.style.display === "none") {
+    logWrap.style.display = "block";
+    logWrap.open = true;
+  }
+  // Cap the log at ~5000 lines so a runaway child doesn't lock up the page.
+  const lines = logPane.textContent.split("\n");
+  if (lines.length > 5000) {
+    logPane.textContent = lines.slice(lines.length - 4000).join("\n");
+  }
+  logPane.textContent += (logPane.textContent ? "\n" : "") + line;
+  logPane.scrollTop = logPane.scrollHeight;
+  const total = logPane.textContent.split("\n").length;
+  logCount.textContent = `(${total} line${total === 1 ? "" : "s"})`;
+}
+function resetLog() {
+  logPane.textContent = "";
+  logCount.textContent = "";
+  logWrap.style.display = "none";
+  logWrap.open = false;
+}
+
+function attachSse(handle, initialTotal) {
+  activeRun = handle;
+  liveStatuses.clear();
+  resetLog();
+  showCancelBtn(true);
+  let runningCount = 0;
+  let completedCount = 0;
+  let failedCount = 0;
+  let total = initialTotal || 0;
+  let spawned = false;
+  const startedSeen = new Set();
+
+  const update = () => {
+    setProgress({
+      done: completedCount,
+      active: runningCount,
+      failed: failedCount,
+      total: Math.max(total, completedCount + runningCount),
+    });
+    let label;
+    if (!spawned) {
+      label = "starting…";
+    } else if (completedCount === 0 && runningCount === 0) {
+      label = "child running, waiting for first test (build/discovery)…";
+    } else {
+      label = `running… ${completedCount} done` +
+        (failedCount > 0 ? ` (${failedCount} failed)` : "") +
+        `, ${runningCount} active`;
+    }
+    setStatus(label);
+  };
+  update();
+
+  const es = new EventSource(`/api/active/${handle}/events`);
+  es.addEventListener("run", (ev) => {
+    const data = JSON.parse(ev.data);
+    if (data.kind === "spawned") {
+      spawned = true;
+      appendLog(`$ ${data.command}`);
+      update();
+    } else if (data.kind === "log") {
+      appendLog(data.line);
+    } else if (data.kind === "started") {
+      if (!startedSeen.has(data.test_id)) {
+        startedSeen.add(data.test_id);
+        if (startedSeen.size > total) total = startedSeen.size;
+      }
+      runningCount++;
+      setBadge(data.test_id, "running");
+      update();
+    } else if (data.kind === "completed") {
+      runningCount = Math.max(0, runningCount - 1);
+      completedCount++;
+      if (data.status === "failure" || data.status === "error") failedCount++;
+      setBadge(data.test_id, data.status);
+      update();
+    } else if (data.kind === "finished") {
+      es.close();
+      activeRun = null;
+      showCancelBtn(false);
+      setStatus(`run finished (exit ${data.exit_code}). reloading…`);
+      // Collapse (but don't hide) the log so the page returns to its
+      // pre-run layout. Content remains accessible by clicking the
+      // disclosure triangle.
+      logWrap.open = false;
+      // Keep the bar visible briefly so the user can see the final state.
+      setTimeout(() => {
+        clearProgress();
+        liveStatuses.clear();
+        loadTests({ discover: lastDiscoveryRun });
+        refreshFailuresBadge();
+      }, 1500);
+    } else if (data.kind === "error") {
+      es.close();
+      activeRun = null;
+      showCancelBtn(false);
+      setStatus("error: " + data.message);
+      appendLog(`! ${data.message}`);
+      clearProgress();
+      // Leave the log open on error so the message is visible.
+    }
+  });
+  es.onerror = () => {
+    es.close();
+    if (activeRun === handle) {
+      activeRun = null;
+      showCancelBtn(false);
+      setStatus("connection lost");
+      clearProgress();
+    }
+  };
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+  })[c]);
+}
+
+// Keyboard navigation. The "highlighted row" is whichever element in the
+// active panel has data-kb-active="1". j/k moves it within the same panel,
+// enter expands, r re-runs, / focuses search.
+const kbHelp = document.getElementById("kb-help");
+kbHelp.addEventListener("click", () => kbHelp.classList.remove("visible"));
+
+function activePanelId() {
+  for (const k of Object.keys(panels)) {
+    if (panels[k].classList.contains("active")) return k;
+  }
+  return null;
+}
+
+function kbRows() {
+  // Return the list of rows the highlight can move between in the active
+  // panel. Each row should be visible (its <details> open if applicable)
+  // so j/k traversal doesn't jump into hidden content.
+  const id = activePanelId();
+  if (id === "tests") {
+    return Array.from(tree.querySelectorAll("details.group[open] > ul > li[data-test-id]"));
+  }
+  if (id === "runs") {
+    return Array.from(document.querySelectorAll("#runs-body > tr[data-run-id]"));
+  }
+  return [];
+}
+
+function kbActive() {
+  return document.querySelector('[data-kb-active="1"]');
+}
+
+function kbSetActive(el) {
+  const prev = kbActive();
+  if (prev) prev.removeAttribute("data-kb-active");
+  if (el) {
+    el.setAttribute("data-kb-active", "1");
+    el.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function kbMove(delta) {
+  const rows = kbRows();
+  if (rows.length === 0) return;
+  const cur = kbActive();
+  let idx = cur ? rows.indexOf(cur) : -1;
+  if (idx === -1) {
+    // Nothing highlighted yet — start at 0 for j, end for k.
+    idx = delta > 0 ? 0 : rows.length - 1;
+  } else {
+    idx = Math.max(0, Math.min(rows.length - 1, idx + delta));
+  }
+  kbSetActive(rows[idx]);
+}
+
+function kbJump(toEnd) {
+  const rows = kbRows();
+  if (rows.length === 0) return;
+  kbSetActive(toEnd ? rows[rows.length - 1] : rows[0]);
+}
+
+function kbActivate() {
+  // Enter: simulate a click on the highlighted row, which is what the
+  // existing handlers already key off of.
+  const el = kbActive();
+  if (el) el.click();
+}
+
+function kbRun() {
+  const el = kbActive();
+  if (!el) return;
+  if (el.dataset.testId) {
+    startRun({ test_ids: [el.dataset.testId] });
+  } else if (el.dataset.runId) {
+    // Re-run the same selection by running every test in that run. We don't
+    // have a "rerun N" endpoint here, so for now just open run #N's detail.
+    el.click();
+  }
+}
+
+document.addEventListener("keydown", (e) => {
+  // Ignore typing into form fields (search, run-form inputs, etc.).
+  const tag = (e.target.tagName || "").toLowerCase();
+  const inField = tag === "input" || tag === "textarea" || tag === "select"
+    || (e.target.isContentEditable);
+
+  if (e.key === "Escape") {
+    if (kbHelp.classList.contains("visible")) {
+      kbHelp.classList.remove("visible");
+      e.preventDefault();
+      return;
+    }
+    if (inField && tag === "input" && e.target.type === "search") {
+      e.target.blur();
+      e.preventDefault();
+      return;
+    }
+  }
+
+  if (inField) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+  switch (e.key) {
+    case "j":
+    case "ArrowDown":
+      kbMove(1); e.preventDefault(); break;
+    case "k":
+    case "ArrowUp":
+      kbMove(-1); e.preventDefault(); break;
+    case "g":
+      kbJump(false); e.preventDefault(); break;
+    case "G":
+      kbJump(true); e.preventDefault(); break;
+    case "Enter":
+      kbActivate(); e.preventDefault(); break;
+    case "r":
+      kbRun(); e.preventDefault(); break;
+    case "/":
+      search.focus();
+      search.select();
+      e.preventDefault();
+      break;
+    case "1":
+      switchTab("tests"); e.preventDefault(); break;
+    case "2":
+      switchTab("failures"); e.preventDefault(); break;
+    case "3":
+      switchTab("runs"); e.preventDefault(); break;
+    case "4":
+      switchTab("repo"); e.preventDefault(); break;
+    case "5":
+      switchTab("run"); e.preventDefault(); break;
+    case "?":
+      kbHelp.classList.add("visible"); e.preventDefault(); break;
+  }
+});
+
+loadTests().catch(e => setStatus("load failed: " + e));
+refreshFailuresBadge();
+</script>
+</body>
+</html>

@@ -31,6 +31,8 @@ pub mod stats;
 pub mod upgrade;
 pub mod utils;
 pub mod wait;
+#[cfg(feature = "web")]
+pub mod web;
 
 pub use analyze_isolation::AnalyzeIsolationCommand;
 pub use auto::AutoCommand;
@@ -57,6 +59,8 @@ pub use stats::StatsCommand;
 #[cfg(feature = "testr")]
 pub use upgrade::UpgradeCommand;
 pub use wait::WaitCommand;
+#[cfg(feature = "web")]
+pub use web::WebCommand;
 
 /// Trait that all commands must implement
 pub trait Command {
