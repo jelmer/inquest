@@ -103,6 +103,10 @@ pub struct RunCommand {
     /// Active profile name from `--profile` / `INQ_PROFILE` (None = base
     /// only or `default_profile` from the config file).
     pub profile: Option<String>,
+    /// True when invoked as bare `inq` (no subcommand). Tweaks the
+    /// concurrency-resolution messaging so the user is told how to opt out
+    /// of the auto-parallel default. Has no effect on actual concurrency.
+    pub implicit_run: bool,
 }
 
 impl RunCommand {
@@ -416,10 +420,18 @@ impl RunCommand {
         let concurrency = if let Some(explicit_concurrency) = self.concurrency {
             if explicit_concurrency == 0 {
                 let cpu_count = num_cpus::get();
-                ui.output(&format!(
-                    "Auto-detected {} CPUs for parallel execution",
-                    cpu_count
-                ))?;
+                if self.implicit_run {
+                    ui.output(&format!(
+                        "Running in parallel mode across {} CPUs (auto-detected). \
+                         Run `inq run` to disable parallel mode, or `inq run -j N` to set a specific worker count.",
+                        cpu_count
+                    ))?;
+                } else {
+                    ui.output(&format!(
+                        "Auto-detected {} CPUs for parallel execution",
+                        cpu_count
+                    ))?;
+                }
                 cpu_count
             } else {
                 explicit_concurrency
@@ -431,6 +443,7 @@ impl RunCommand {
             ))?;
             callout_concurrency
         } else {
+            suggest_parallel_for_explicit_run(ui, &test_ids, &historical_times)?;
             1
         };
 
@@ -628,6 +641,74 @@ impl RunCommand {
     }
 }
 
+/// Print a hint suggesting `--parallel` when an explicit `inq run` is about
+/// to execute serially. Includes a wall-clock estimate based on historical
+/// test durations divided across the available CPUs (with a small overhead
+/// factor) so the user can judge whether enabling parallel is worth it.
+///
+/// No-op when historical_times is empty (no useful estimate to give) or
+/// when test_ids is empty (nothing to estimate).
+fn suggest_parallel_for_explicit_run(
+    ui: &mut dyn UI,
+    test_ids: &Option<Vec<crate::repository::TestId>>,
+    historical_times: &std::collections::HashMap<crate::repository::TestId, Duration>,
+) -> Result<()> {
+    if historical_times.is_empty() {
+        return Ok(());
+    }
+    let cpu_count = num_cpus::get();
+    if cpu_count <= 1 {
+        return Ok(());
+    }
+
+    let (serial_secs, sample_size) = match test_ids {
+        Some(ids) if !ids.is_empty() => {
+            let total: Duration = ids
+                .iter()
+                .filter_map(|id| historical_times.get(id).copied())
+                .sum();
+            (total.as_secs_f64(), ids.len())
+        }
+        _ => {
+            // No materialized list — base the estimate on the full history.
+            let total: Duration = historical_times.values().sum();
+            (total.as_secs_f64(), historical_times.len())
+        }
+    };
+
+    if serial_secs < 5.0 || sample_size == 0 {
+        return Ok(());
+    }
+
+    let parallel_secs = serial_secs / cpu_count as f64;
+    ui.output(&format!(
+        "Hint: pass --parallel (or -j {}) to run across {} CPUs. \
+         Estimated wall time: ~{} parallel vs ~{} serial (based on history).",
+        cpu_count,
+        cpu_count,
+        format_short_duration_secs(parallel_secs),
+        format_short_duration_secs(serial_secs),
+    ))?;
+    Ok(())
+}
+
+/// Format a duration in seconds as a short human-readable string
+/// (e.g. "45s", "1m 30s", "2h 05m").
+fn format_short_duration_secs(secs: f64) -> String {
+    let secs = secs.max(0.0).round() as u64;
+    if secs >= 3600 {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        format!("{}h {:02}m", hours, mins)
+    } else if secs >= 60 {
+        let mins = secs / 60;
+        let remaining_secs = secs % 60;
+        format!("{}m {:02}s", mins, remaining_secs)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
 /// Walk every recorded run and tally how often each test produced a
 /// failing status. Used by [`TestOrder::FrequentFailingFirst`].
 fn compute_failure_counts(
@@ -712,5 +793,70 @@ test_command=echo "test1"
     fn test_run_command_name() {
         let cmd = RunCommand::new(None);
         assert_eq!(cmd.name(), "run");
+    }
+
+    #[test]
+    fn format_short_duration_secs_seconds() {
+        assert_eq!(format_short_duration_secs(0.0), "0s");
+        assert_eq!(format_short_duration_secs(45.0), "45s");
+    }
+
+    #[test]
+    fn format_short_duration_secs_minutes() {
+        assert_eq!(format_short_duration_secs(90.0), "1m 30s");
+    }
+
+    #[test]
+    fn format_short_duration_secs_hours() {
+        assert_eq!(format_short_duration_secs(3661.0), "1h 01m");
+    }
+
+    #[test]
+    fn format_short_duration_secs_negative_clamps_to_zero() {
+        assert_eq!(format_short_duration_secs(-10.0), "0s");
+    }
+
+    #[test]
+    fn suggest_parallel_no_history_is_silent() {
+        let mut ui = TestUI::new();
+        let history = std::collections::HashMap::new();
+        suggest_parallel_for_explicit_run(&mut ui, &None, &history).unwrap();
+        assert!(ui.output.is_empty());
+    }
+
+    #[test]
+    fn suggest_parallel_short_run_is_silent() {
+        let mut ui = TestUI::new();
+        let mut history = std::collections::HashMap::new();
+        history.insert(crate::repository::TestId::new("a"), Duration::from_secs(1));
+        history.insert(crate::repository::TestId::new("b"), Duration::from_secs(2));
+        // Total < 5s threshold, so no hint.
+        suggest_parallel_for_explicit_run(&mut ui, &None, &history).unwrap();
+        assert!(ui.output.is_empty());
+    }
+
+    #[test]
+    fn suggest_parallel_emits_hint_with_history() {
+        let mut ui = TestUI::new();
+        let mut history = std::collections::HashMap::new();
+        // Sum well over the 5s threshold.
+        for i in 0..10 {
+            history.insert(
+                crate::repository::TestId::new(format!("test{}", i)),
+                Duration::from_secs(5),
+            );
+        }
+        suggest_parallel_for_explicit_run(&mut ui, &None, &history).unwrap();
+        if num_cpus::get() > 1 {
+            assert_eq!(ui.output.len(), 1);
+            assert!(ui.output[0].contains("--parallel"), "got: {:?}", ui.output);
+            assert!(
+                ui.output[0].contains("Estimated wall time"),
+                "got: {:?}",
+                ui.output
+            );
+        } else {
+            assert!(ui.output.is_empty());
+        }
     }
 }
