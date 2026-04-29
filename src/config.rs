@@ -250,6 +250,11 @@ pub struct ConfigLayer {
     /// Default test ordering strategy
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_order: Option<String>,
+    /// Mirror each completed run into git notes — one blob per run for the
+    /// subunit stream and one for the metadata JSON, attached to the commit
+    /// the run was executed against under `refs/notes/inquest`. Opt-in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror_to_git_notes: Option<bool>,
 }
 
 impl ConfigLayer {
@@ -320,6 +325,7 @@ impl ConfigLayer {
         overlay_field!(instance_execute);
         overlay_field!(instance_dispose);
         overlay_field!(test_order);
+        overlay_field!(mirror_to_git_notes);
     }
 }
 
@@ -503,6 +509,7 @@ impl ConfigFile {
         check!(instance_execute);
         check!(instance_dispose);
         check!(test_order);
+        check!(mirror_to_git_notes);
         set
     }
 
@@ -573,6 +580,9 @@ fn parse_ini_base(contents: &str) -> Result<ConfigLayer> {
         instance_execute: default.get("instance_execute").cloned(),
         instance_dispose: default.get("instance_dispose").cloned(),
         test_order: default.get("test_order").cloned(),
+        // mirror_to_git_notes is not exposed in the legacy .testr.conf format;
+        // it is only configurable from inquest.toml.
+        mirror_to_git_notes: None,
     })
 }
 
@@ -630,6 +640,10 @@ pub struct TestrConfig {
     /// "alphabetical", "failing-first", "spread", "shuffle[:<seed>]",
     /// "slowest-first", "fastest-first", "frequent-failing-first".
     pub test_order: Option<String>,
+
+    /// Mirror each completed run into git notes under `refs/notes/inquest`.
+    /// Best-effort and one-way: `.inquest/` remains the source of truth.
+    pub mirror_to_git_notes: Option<bool>,
 }
 
 impl TestrConfig {
@@ -713,6 +727,7 @@ impl TestrConfig {
             instance_execute: layer.instance_execute,
             instance_dispose: layer.instance_dispose,
             test_order: layer.test_order,
+            mirror_to_git_notes: layer.mirror_to_git_notes,
         })
     }
 
@@ -1569,5 +1584,52 @@ test_list_option = "--list"
         let (resolved, active) = cfg.resolve(None).unwrap();
         assert!(active.is_none());
         assert_eq!(resolved.test_command, "cargo subunit $LISTOPT $IDOPTION");
+    }
+
+    #[test]
+    fn mirror_to_git_notes_defaults_to_none() {
+        let cfg = ConfigFile::parse_toml(r#"test_command = "echo""#).unwrap();
+        let (resolved, _) = cfg.resolve(None).unwrap();
+        assert_eq!(resolved.mirror_to_git_notes, None);
+    }
+
+    #[test]
+    fn mirror_to_git_notes_round_trips_via_toml() {
+        let cfg = ConfigFile::parse_toml(
+            r#"
+test_command = "echo"
+mirror_to_git_notes = true
+"#,
+        )
+        .unwrap();
+        let (resolved, _) = cfg.resolve(None).unwrap();
+        assert_eq!(resolved.mirror_to_git_notes, Some(true));
+
+        let serialized = resolved.to_toml().unwrap();
+        assert!(serialized.contains("mirror_to_git_notes = true"));
+    }
+
+    #[test]
+    fn mirror_to_git_notes_profile_overlay() {
+        let cfg = ConfigFile::parse_toml(
+            r#"
+test_command = "echo"
+mirror_to_git_notes = false
+
+[profiles.share]
+mirror_to_git_notes = true
+"#,
+        )
+        .unwrap();
+
+        let (base, _) = cfg.resolve(None).unwrap();
+        assert_eq!(base.mirror_to_git_notes, Some(false));
+
+        let (overlaid, active) = cfg.resolve(Some("share")).unwrap();
+        assert_eq!(active.as_deref(), Some("share"));
+        assert_eq!(overlaid.mirror_to_git_notes, Some(true));
+
+        let from = cfg.fields_from_profile(Some("share"));
+        assert!(from.contains("mirror_to_git_notes"));
     }
 }
