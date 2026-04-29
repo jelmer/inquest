@@ -63,5 +63,9 @@ mod tests {
         // Keyboard navigation hooks must be present.
         assert!(html.contains("data-kb-active"));
         assert!(html.contains("kb-help"));
+        // The Run form's advanced options must live behind a <details>
+        // disclosure so the default view stays uncluttered.
+        assert!(html.contains("run-advanced"));
+        assert!(html.contains("Advanced options"));
     }
 }

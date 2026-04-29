@@ -425,6 +425,22 @@
     font: inherit;
   }
   .run-form .submit:disabled { opacity: 0.5; cursor: not-allowed; }
+  .run-form details.advanced {
+    margin: 4px 0 14px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+  }
+  .run-form details.advanced > summary {
+    cursor: pointer;
+    user-select: none;
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 4px 0;
+  }
+  .run-form details.advanced[open] > summary { color: var(--fg); }
+  .run-form details.advanced > .body { margin-top: 10px; }
 
   #status {
     padding: 6px 10px;
@@ -610,65 +626,73 @@
         <div class="help">Positional args to <code>inq run</code>. Leave empty to run everything.</div>
       </div>
       <div class="row">
-        <label for="run-starting-with">Starting-with prefixes</label>
-        <input type="text" id="run-starting-with" placeholder="e.g. crate::commands my::other::mod">
-        <div class="help">Space-separated. Each becomes <code>-s &lt;prefix&gt;</code>. Dotted/colon-separated abbreviations supported.</div>
+        <label for="run-parallel">Parallel workers</label>
+        <input type="number" id="run-parallel" min="1" placeholder="serial">
+        <div class="help">Empty = serial. Equivalent to <code>-j N</code>.</div>
       </div>
-      <div class="row">
-        <label for="run-tags">Tag filters</label>
-        <input type="text" id="run-tags" placeholder="e.g. worker-0 !slow">
-        <div class="help">Space-separated. Prefix with <code>!</code> to exclude. Forwarded as <code>--tag</code>.</div>
-      </div>
-      <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-        <div>
-          <label for="run-order">Test order</label>
-          <select id="run-order">
-            <option value="">(default)</option>
-            <option value="auto">auto</option>
-            <option value="discovery">discovery</option>
-            <option value="alphabetical">alphabetical</option>
-            <option value="failing-first">failing-first</option>
-            <option value="frequent-failing-first">frequent-failing-first</option>
-            <option value="slowest-first">slowest-first</option>
-            <option value="fastest-first">fastest-first</option>
-            <option value="spread">spread</option>
-            <option value="shuffle">shuffle</option>
-          </select>
-        </div>
-        <div>
-          <label for="run-parallel">Parallel workers</label>
-          <input type="number" id="run-parallel" min="1" placeholder="serial">
-        </div>
-      </div>
-      <div class="row" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
-        <div>
-          <label for="run-test-timeout">Per-test timeout</label>
-          <input type="text" id="run-test-timeout" placeholder='"5m" / "auto" / "disabled"'>
-        </div>
-        <div>
-          <label for="run-max-duration">Run timeout</label>
-          <input type="text" id="run-max-duration" placeholder='"30m" / "auto" / "disabled"'>
-        </div>
-        <div>
-          <label for="run-no-output-timeout">No-output timeout</label>
-          <input type="text" id="run-no-output-timeout" placeholder="e.g. 60s">
-        </div>
-      </div>
-      <div class="row">
-        <label for="run-test-args">Extra test args (after <code>--</code>)</label>
-        <input type="text" id="run-test-args" placeholder="passed verbatim to the underlying test command">
-        <div class="help">Space-separated tokens. Forwarded after <code>--</code>.</div>
-      </div>
-      <div class="row checks" style="flex-wrap:wrap;row-gap:6px;">
+      <div class="row checks">
         <label><input type="checkbox" id="run-failing-only"> Only previously-failing tests</label>
-        <label><input type="checkbox" id="run-isolated"> Isolated (one process per test)</label>
-        <label><input type="checkbox" id="run-partial"> Partial (merge into failing set)</label>
-        <label><input type="checkbox" id="run-until-failure"> Until-failure loop</label>
       </div>
-      <div class="row" id="run-max-iter-row" style="display:none;">
-        <label for="run-max-iterations">Max iterations</label>
-        <input type="number" id="run-max-iterations" min="1" placeholder="unbounded">
-      </div>
+
+      <details class="advanced" id="run-advanced">
+        <summary>Advanced options <span id="run-advanced-summary" style="text-transform:none;letter-spacing:normal;color:var(--muted);font-weight:normal;margin-left:6px;"></span></summary>
+        <div class="body">
+          <div class="row">
+            <label for="run-starting-with">Starting-with prefixes</label>
+            <input type="text" id="run-starting-with" placeholder="e.g. crate::commands my::other::mod">
+            <div class="help">Space-separated. Each becomes <code>-s &lt;prefix&gt;</code>. Dotted/colon-separated abbreviations supported.</div>
+          </div>
+          <div class="row">
+            <label for="run-tags">Tag filters</label>
+            <input type="text" id="run-tags" placeholder="e.g. worker-0 !slow">
+            <div class="help">Space-separated. Prefix with <code>!</code> to exclude. Forwarded as <code>--tag</code>.</div>
+          </div>
+          <div class="row">
+            <label for="run-order">Test order</label>
+            <select id="run-order">
+              <option value="">(default)</option>
+              <option value="auto">auto</option>
+              <option value="discovery">discovery</option>
+              <option value="alphabetical">alphabetical</option>
+              <option value="failing-first">failing-first</option>
+              <option value="frequent-failing-first">frequent-failing-first</option>
+              <option value="slowest-first">slowest-first</option>
+              <option value="fastest-first">fastest-first</option>
+              <option value="spread">spread</option>
+              <option value="shuffle">shuffle</option>
+            </select>
+          </div>
+          <div class="row" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+            <div>
+              <label for="run-test-timeout">Per-test timeout</label>
+              <input type="text" id="run-test-timeout" placeholder='"5m" / "auto" / "disabled"'>
+            </div>
+            <div>
+              <label for="run-max-duration">Run timeout</label>
+              <input type="text" id="run-max-duration" placeholder='"30m" / "auto" / "disabled"'>
+            </div>
+            <div>
+              <label for="run-no-output-timeout">No-output timeout</label>
+              <input type="text" id="run-no-output-timeout" placeholder="e.g. 60s">
+            </div>
+          </div>
+          <div class="row">
+            <label for="run-test-args">Extra test args (after <code>--</code>)</label>
+            <input type="text" id="run-test-args" placeholder="passed verbatim to the underlying test command">
+            <div class="help">Space-separated tokens. Forwarded after <code>--</code>.</div>
+          </div>
+          <div class="row checks" style="flex-wrap:wrap;row-gap:6px;">
+            <label><input type="checkbox" id="run-isolated"> Isolated (one process per test)</label>
+            <label><input type="checkbox" id="run-partial"> Partial (merge into failing set)</label>
+            <label><input type="checkbox" id="run-until-failure"> Until-failure loop</label>
+          </div>
+          <div class="row" id="run-max-iter-row" style="display:none;">
+            <label for="run-max-iterations">Max iterations</label>
+            <input type="number" id="run-max-iterations" min="1" placeholder="unbounded">
+          </div>
+        </div>
+      </details>
+
       <button type="submit" class="submit">Start run</button>
     </form>
   </section>
@@ -1701,6 +1725,37 @@ function readNum(id) {
 document.getElementById("run-until-failure").addEventListener("change", (e) => {
   document.getElementById("run-max-iter-row").style.display = e.target.checked ? "block" : "none";
 });
+
+// Update the "Advanced options" summary so the user can see at a glance
+// when a hidden option is non-default. We count fields whose value is set
+// to something other than empty/unchecked.
+const advancedFieldIds = [
+  "run-starting-with", "run-tags", "run-order",
+  "run-test-timeout", "run-max-duration", "run-no-output-timeout",
+  "run-test-args", "run-isolated", "run-partial", "run-until-failure",
+  "run-max-iterations",
+];
+function refreshAdvancedSummary() {
+  let n = 0;
+  for (const id of advancedFieldIds) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (el.type === "checkbox") {
+      if (el.checked) n++;
+    } else if (el.value && el.value.trim() !== "") {
+      n++;
+    }
+  }
+  const summaryEl = document.getElementById("run-advanced-summary");
+  summaryEl.textContent = n > 0 ? `(${n} set)` : "";
+  // Auto-open when the user has set something so they can see it on
+  // re-entry, but don't force-close if they explicitly opened it.
+  if (n > 0) {
+    document.getElementById("run-advanced").open = true;
+  }
+}
+document.getElementById("run-form").addEventListener("input", refreshAdvancedSummary);
+document.getElementById("run-form").addEventListener("change", refreshAdvancedSummary);
 
 document.getElementById("run-form").addEventListener("submit", (e) => {
   e.preventDefault();
