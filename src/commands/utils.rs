@@ -16,7 +16,7 @@ use std::path::Path;
 /// Tries the inquest-native format (`.inquest/`) first, then falls back
 /// to the legacy format (`.testrepository/`).
 pub fn open_repository(base_path: Option<&str>) -> Result<Box<dyn Repository>> {
-    let base = base_path.map(Path::new).unwrap_or_else(|| Path::new("."));
+    let base = base_path.map_or_else(|| Path::new("."), Path::new);
 
     // Try inquest-native format first
     let inquest_factory = InquestRepositoryFactory;
@@ -41,7 +41,7 @@ pub fn open_repository(base_path: Option<&str>) -> Result<Box<dyn Repository>> {
 ///
 /// Uses the inquest-native format (`.inquest/`) by default.
 pub fn init_repository(base_path: Option<&str>) -> Result<Box<dyn Repository>> {
-    let base = base_path.map(Path::new).unwrap_or_else(|| Path::new("."));
+    let base = base_path.map_or_else(|| Path::new("."), Path::new);
 
     let factory = InquestRepositoryFactory;
     factory.initialise(base)
@@ -49,7 +49,7 @@ pub fn init_repository(base_path: Option<&str>) -> Result<Box<dyn Repository>> {
 
 /// Check whether a configuration file exists in the given directory.
 pub fn has_config_file(base_path: Option<&str>) -> bool {
-    let base = base_path.map(Path::new).unwrap_or_else(|| Path::new("."));
+    let base = base_path.map_or_else(|| Path::new("."), Path::new);
     CONFIG_FILE_NAMES
         .iter()
         .any(|name| base.join(name).exists())
@@ -410,7 +410,7 @@ pub fn persist_and_display_run(
         Some(duration),
         Some(exit_code),
         test_args,
-        profile.clone(),
+        profile,
         predicted_duration,
     )?;
 

@@ -29,8 +29,7 @@ impl Command for ListTestsCommand {
         let base = self
             .base_path
             .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new("."));
+            .map_or_else(|| Path::new("."), Path::new);
 
         let test_cmd = TestCommand::from_directory(base)?;
 

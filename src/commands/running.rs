@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::repository::{estimate_progress, RunId, TestId, TestRun};
 use crate::ui::UI;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 fn format_duration_secs(secs: i64) -> String {
@@ -46,13 +47,13 @@ fn format_running_line(
     );
 
     if let Some(p) = percent {
-        line.push_str(&format!(", {:.0}% complete", p * 100.0));
+        let _ = write!(line, ", {:.0}% complete", p * 100.0);
     }
 
-    line.push_str(&format!(", elapsed {}", format_duration_secs(elapsed_secs)));
+    let _ = write!(line, ", elapsed {}", format_duration_secs(elapsed_secs));
 
     if let Some(eta) = eta_secs {
-        line.push_str(&format!(", ETA {}", format_duration_secs(eta as i64)));
+        let _ = write!(line, ", ETA {}", format_duration_secs(eta as i64));
     }
 
     line

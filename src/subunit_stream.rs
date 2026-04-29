@@ -129,7 +129,7 @@ where
 {
     use std::collections::HashMap;
 
-    let mut test_run = TestRun::new(run_id.clone());
+    let mut test_run = TestRun::new(run_id);
     let mut start_times: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
     let mut consecutive_errors = 0;
 
@@ -393,7 +393,7 @@ where
 pub fn parse_stream<R: Read>(reader: R, run_id: RunId) -> Result<TestRun> {
     use std::collections::HashMap;
 
-    let mut test_run = TestRun::new(run_id.clone());
+    let mut test_run = TestRun::new(run_id);
     let mut start_times: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
     let mut consecutive_errors = 0;
 

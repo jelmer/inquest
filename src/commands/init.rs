@@ -30,8 +30,7 @@ impl Command for InitCommand {
         let base = self
             .base_path
             .as_deref()
-            .map(Path::new)
-            .unwrap_or_else(|| Path::new("."));
+            .map_or_else(|| Path::new("."), Path::new);
 
         // Check for legacy .testrepository/ and suggest upgrade
         #[cfg(feature = "testr")]

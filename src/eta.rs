@@ -208,8 +208,7 @@ impl EtaState {
         let actual = progress
             .in_flight
             .remove(test_id)
-            .map(|(started_at, _)| started_at.elapsed())
-            .unwrap_or(expected);
+            .map_or(expected, |(started_at, _)| started_at.elapsed());
         progress.completed_duration += actual;
         // Refine the target: if the test ran faster than predicted, the
         // remaining work shrinks; if slower, it grows. Without this the
