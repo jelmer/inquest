@@ -1,0 +1,14 @@
+{
+  "name": "inquest",
+  "owner": {
+    "name": "Jelmer Vernooĳ",
+    "email": "jelmer@jelmer.uk"
+  },
+  "plugins": [
+    {
+      "name": "inquest",
+      "source": "./plugins/claude",
+      "description": "Inquest test repository MCP server for Claude Code"
+    }
+  ]
+}
