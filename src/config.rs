@@ -39,9 +39,11 @@ pub const MAX_TEST_RESTARTS: usize = 10;
 pub const SLOW_TEST_WARNING_MULTIPLIER: f64 = 3.0;
 
 /// Minimum absolute duration for a test to be considered for slow-test warnings.
-/// Tests faster than this are treated as noise even if they exceed the multiplier,
-/// since small absolute variations produce huge ratios on sub-second tests.
-pub const SLOW_TEST_WARNING_MIN_DURATION: std::time::Duration = std::time::Duration::from_millis(2);
+/// Both the current and historical durations must clear this floor; otherwise
+/// tiny absolute variations produce huge (or infinite) ratios on sub-second
+/// tests and the warning is just noise.
+pub const SLOW_TEST_WARNING_MIN_DURATION: std::time::Duration =
+    std::time::Duration::from_millis(100);
 
 /// Timeout configuration that supports "disabled", "auto", or an explicit duration.
 ///
