@@ -266,6 +266,42 @@ test_timeout = "10m"
 }
 
 #[test]
+fn shard_help_documents_spec_and_options() {
+    let out = Command::new(inq_bin())
+        .arg("shard")
+        .arg("--help")
+        .output()
+        .expect("run inq shard --help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("<N/M>"),
+        "expected <N/M> placeholder: {stdout}"
+    );
+    assert!(
+        stdout.contains("--group-regex"),
+        "expected --group-regex flag: {stdout}"
+    );
+    assert!(
+        stdout.contains("--zero-indexed"),
+        "expected --zero-indexed flag: {stdout}"
+    );
+}
+
+#[test]
+fn shard_rejects_invalid_spec() {
+    let temp = TempDir::new().unwrap();
+    let out = Command::new(inq_bin())
+        .arg("-C")
+        .arg(temp.path())
+        .arg("shard")
+        .arg("not-a-spec")
+        .output()
+        .expect("run inq shard");
+    assert!(!out.status.success());
+}
+
+#[test]
 fn flat_config_still_works_unchanged() {
     // Backwards-compat smoke test: a flat config (no profiles, no
     // default_profile) loads and resolves with no profile annotations.

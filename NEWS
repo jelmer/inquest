@@ -8,6 +8,13 @@ UNRELEASED
 CHANGES
 -------
 
+* Add ``inq shard <N/M>`` for distributed CI sharding. Each node calls
+  ``inq shard N/M`` to print a load-balanced, disjoint slice of the
+  suite, balanced by historical per-test durations (or round-robin when
+  no history exists). Honours ``group_regex`` so related tests stay on
+  the same shard. The partition is deterministic across machines, so
+  the union of all shards equals the full suite. (Jelmer Vernooĳ)
+
 * Add support for named **profiles** in ``inquest.toml``. Top-level
   fields form the implicit base layer; ``[profiles.<name>]`` tables
   declare overlayable variants. Select one with ``inq --profile NAME``,

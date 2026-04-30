@@ -211,6 +211,34 @@ Example:
 inq log 'test.module.TestCase.*'
 ```
 
+### `inq shard <N/M>`
+
+Print the test IDs assigned to one shard of an `M`-way balanced split.
+Distributed CI nodes can each call `inq shard N/M` to claim a disjoint,
+load-balanced slice of the suite. Historical durations from the repository
+are used to balance shards when available; without history, the split
+degrades to round-robin.
+
+The partition is deterministic given the same suite and history, so two
+nodes calling `inq shard 1/4` and `inq shard 2/4` produce disjoint shards
+whose union is the full suite.
+
+Options:
+- `--group-regex <REGEX>`: Override the config's `group_regex`. Pass an
+  empty string to disable grouping for this command only.
+- `--zero-indexed`: Treat the shard index as 0-based (i.e. `0/4..3/4`).
+
+Example (GitHub Actions matrix):
+
+```yaml
+strategy:
+  matrix:
+    shard: [1, 2, 3, 4]
+steps:
+  - run: inq shard ${{ matrix.shard }}/4 > shard.txt
+  - run: inq run --load-list shard.txt
+```
+
 ### `inq prune`
 
 Drop older test runs from the repository. Exactly one selection mode must be

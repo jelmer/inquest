@@ -49,8 +49,10 @@ pub fn partition_tests(
         }
     }
 
-    // Sort tests with durations from longest to shortest
-    with_duration.sort_by_key(|b| std::cmp::Reverse(b.1));
+    // Sort tests with durations from longest to shortest. Tie-break by test ID
+    // so the partition layout is deterministic across machines (used by
+    // `inq shard` to keep distributed CI nodes consistent).
+    with_duration.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     // Initialize partitions with expected runtime tracking
     let mut partitions: Vec<(Vec<TestId>, Duration)> = (0..concurrency)
@@ -126,8 +128,10 @@ pub fn partition_tests_with_grouping(
         })
         .collect();
 
-    // Sort groups by duration (longest first)
-    group_durations.sort_by_key(|b| std::cmp::Reverse(b.2));
+    // Sort groups by duration (longest first). Tie-break by group name so the
+    // partition layout is deterministic across machines (used by `inq shard`
+    // to keep distributed CI nodes consistent).
+    group_durations.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
 
     // Initialize partitions
     let mut partitions: Vec<(Vec<TestId>, Duration)> = (0..concurrency)
@@ -335,6 +339,33 @@ mod tests {
         // One should be ~10s (slow module), other ~0.2s (fast module)
         let total_duration = partition0_duration + partition1_duration;
         assert_eq!(total_duration.as_millis(), 10200);
+    }
+
+    #[test]
+    fn test_partition_is_deterministic_with_equal_durations() {
+        // Several tests share the same duration, so the greedy LPT algorithm
+        // can hit ties at every step. Without a stable tie-breaker the layout
+        // would depend on insertion order; with one, two callers see the same
+        // partitions. This is what makes `inq shard` work across machines.
+        let tests: Vec<TestId> = (0..8).map(|i| TestId::new(format!("t{}", i))).collect();
+        let mut durations = HashMap::new();
+        for t in &tests {
+            durations.insert(t.clone(), Duration::from_secs(1));
+        }
+        let a = partition_tests(&tests, &durations, 4);
+        let b = partition_tests(&tests, &durations, 4);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_partition_with_grouping_is_deterministic() {
+        let tests: Vec<TestId> = (0..6)
+            .map(|i| TestId::new(format!("mod{}.test_a", i)))
+            .collect();
+        let durations = HashMap::new();
+        let a = partition_tests_with_grouping(&tests, &durations, 3, Some(r"^([^.]+)\.")).unwrap();
+        let b = partition_tests_with_grouping(&tests, &durations, 3, Some(r"^([^.]+)\.")).unwrap();
+        assert_eq!(a, b);
     }
 
     #[test]
