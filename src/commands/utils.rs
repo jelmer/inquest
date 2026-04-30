@@ -327,6 +327,9 @@ pub fn warn_slow_tests(
                 return None;
             }
             let historical = historical_times.get(&result.test_id)?;
+            if *historical < SLOW_TEST_WARNING_MIN_DURATION {
+                return None;
+            }
             let threshold = std::time::Duration::from_secs_f64(
                 historical.as_secs_f64() * SLOW_TEST_WARNING_MULTIPLIER,
             );
@@ -644,6 +647,25 @@ mod tests {
         historical.insert(
             crate::repository::TestId::new("fast_test"),
             std::time::Duration::from_micros(10),
+        );
+        warn_slow_tests(&mut ui, &run, &historical).unwrap();
+        assert!(ui.output.is_empty());
+    }
+
+    #[test]
+    fn test_warn_slow_tests_ignores_tiny_historical() {
+        // A test with a near-zero historical average shouldn't generate a warning
+        // even if the current run exceeds the multiplier — the ratios are noise.
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let mut run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
+        run.add_result(
+            crate::repository::TestResult::success("blip")
+                .with_duration(std::time::Duration::from_secs(1)),
+        );
+        let mut historical = std::collections::HashMap::new();
+        historical.insert(
+            crate::repository::TestId::new("blip"),
+            std::time::Duration::from_micros(50),
         );
         warn_slow_tests(&mut ui, &run, &historical).unwrap();
         assert!(ui.output.is_empty());
