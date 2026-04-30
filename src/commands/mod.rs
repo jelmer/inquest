@@ -25,6 +25,7 @@ pub mod quickstart;
 pub mod rerun;
 pub mod run;
 pub mod running;
+pub mod shard;
 pub mod slowest;
 pub mod stats;
 #[cfg(feature = "testr")]
@@ -54,6 +55,7 @@ pub use quickstart::QuickstartCommand;
 pub use rerun::RerunCommand;
 pub use run::RunCommand;
 pub use running::RunningCommand;
+pub use shard::ShardCommand;
 pub use slowest::SlowestCommand;
 pub use stats::StatsCommand;
 #[cfg(feature = "testr")]

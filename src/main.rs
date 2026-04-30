@@ -9,7 +9,7 @@ use inquest::error::Result;
 use inquest::ui::UI;
 
 // Explicit imports for commands not covered by wildcard
-use inquest::commands::{AnalyzeIsolationCommand, BisectCommand};
+use inquest::commands::{AnalyzeIsolationCommand, BisectCommand, ShardCommand};
 
 #[derive(Parser)]
 #[command(name = "inq")]
@@ -225,6 +225,23 @@ enum Commands {
     /// List all available tests
     #[command(name = "list-tests")]
     ListTests,
+
+    /// Print the test IDs assigned to one shard of a balanced split
+    Shard {
+        /// Shard spec as N/M (e.g. "1/4" picks shard 1 of 4). N is 1-based by
+        /// default; pass --zero-indexed to use 0..M-1 instead.
+        #[arg(value_name = "N/M")]
+        spec: String,
+
+        /// Override the config's group_regex. Pass an empty string to disable
+        /// grouping for this command only.
+        #[arg(long, value_name = "REGEX")]
+        group_regex: Option<String>,
+
+        /// Treat the shard index as 0-based instead of 1-based
+        #[arg(long)]
+        zero_indexed: bool,
+    },
 
     /// Drop older test runs from the repository
     Prune {
@@ -634,6 +651,20 @@ fn main() {
             let cmd = ListTestsCommand::new(cli.directory);
             cmd.execute(&mut ui)
         }
+        Commands::Shard {
+            spec,
+            group_regex,
+            zero_indexed,
+        } => match ShardCommand::parse_spec(&spec, zero_indexed) {
+            Ok((shard, total)) => {
+                let cmd = ShardCommand::new(cli.directory, shard, total, group_regex);
+                cmd.execute(&mut ui)
+            }
+            Err(e) => {
+                tracing::error!("{}", e);
+                std::process::exit(1);
+            }
+        },
         Commands::Prune {
             keep,
             older_than,
