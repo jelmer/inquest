@@ -199,6 +199,20 @@ Options:
 Each row reports `flake%` (transitions / max(1, runs - 1)), `fail%`
 (failures / runs), the raw transition count, and the number of recorded runs.
 
+### `inq summarize`
+
+Group a run's failing tests by their common failure cause. Each failure's
+traceback is normalized (file paths, line numbers, hex addresses, temp dirs,
+durations are replaced with placeholders), anchored at the last line that
+names the failure (e.g. `AssertionError:`, `panicked at`, `FAILED`), and
+clustered with other failures whose normalized tails share a common suffix.
+Each cluster is reported with the longest line sequence shared by every
+member, so you see the unique failure once and the count of tests it covers.
+
+Options:
+- `-r, --run <ID>`: Run ID to summarize (defaults to latest; supports negative indices)
+- `--samples <N>`: Maximum sample test IDs to list per group (default: 5)
+
 ### `inq log <TESTPATTERN>`
 
 Show logs and tracebacks for specific tests, matched by glob-style patterns.

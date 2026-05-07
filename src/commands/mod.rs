@@ -28,6 +28,7 @@ pub mod running;
 pub mod shard;
 pub mod slowest;
 pub mod stats;
+pub mod summarize;
 #[cfg(feature = "testr")]
 pub mod upgrade;
 pub mod utils;
@@ -58,6 +59,7 @@ pub use running::RunningCommand;
 pub use shard::ShardCommand;
 pub use slowest::SlowestCommand;
 pub use stats::StatsCommand;
+pub use summarize::SummarizeCommand;
 #[cfg(feature = "testr")]
 pub use upgrade::UpgradeCommand;
 pub use wait::WaitCommand;

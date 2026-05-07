@@ -184,6 +184,17 @@ enum Commands {
     /// Show repository statistics
     Stats,
 
+    /// Group a run's failures by their common, normalized traceback tail
+    Summarize {
+        /// Run ID to summarize (defaults to latest; supports negative indices like -1, -2)
+        #[arg(long, short = 'r', value_hint = ValueHint::Other)]
+        run: Option<String>,
+
+        /// Maximum sample test IDs to list per group
+        #[arg(long, default_value_t = inquest::commands::summarize::DEFAULT_SAMPLES)]
+        samples: usize,
+    },
+
     /// Show the slowest tests from the last run
     #[command(name = "slowest")]
     Slowest {
@@ -621,6 +632,10 @@ fn main() {
         Commands::Slowest { count, all } => {
             let display_count = if all { usize::MAX } else { count };
             let cmd = SlowestCommand::with_count(cli.directory, display_count);
+            cmd.execute(&mut ui)
+        }
+        Commands::Summarize { run, samples } => {
+            let cmd = SummarizeCommand::new(cli.directory, run, samples);
             cmd.execute(&mut ui)
         }
         Commands::Flaky {
