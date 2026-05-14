@@ -329,6 +329,60 @@ enum Commands {
         #[arg(long)]
         open: bool,
     },
+    /// Run tests repeatedly to surface flaky tests
+    Stress {
+        /// Number of iterations to run
+        #[arg(short = 'n', long, default_value_t = inquest::commands::stress::DEFAULT_ITERATIONS)]
+        iterations: usize,
+
+        /// Stop as soon as a flaky test is observed (default: run all iterations)
+        #[arg(long)]
+        stop_on_flaky: bool,
+
+        /// Only run tests listed in the named file (one test ID per line)
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        load_list: Option<String>,
+
+        /// Run tests in parallel across multiple workers (defaults to number of CPUs if no value given)
+        #[arg(long, short = 'j', value_name = "N", alias = "concurrency", num_args = 0..=1, default_missing_value = "0")]
+        parallel: Option<usize>,
+
+        /// Run each test in a separate process (completely isolated)
+        #[arg(long)]
+        isolated: bool,
+
+        /// Test ID filters (regex patterns to filter which tests to run)
+        #[arg(value_name = "TESTFILTER")]
+        testfilters: Vec<String>,
+
+        /// Run only tests whose ID starts with this prefix. May be given multiple times.
+        #[arg(long = "starting-with", short = 's', value_name = "TESTID")]
+        starting_with: Vec<String>,
+
+        /// Per-test timeout: "5m", "auto" (from history), or "disabled" (default)
+        #[arg(long, value_name = "TIMEOUT")]
+        test_timeout: Option<String>,
+
+        /// Overall run timeout: "30m", "auto" (from history), or "disabled" (default)
+        #[arg(long, value_name = "DURATION")]
+        max_duration: Option<String>,
+
+        /// Kill test process if no output for this duration (e.g. "60s")
+        #[arg(long, value_name = "DURATION")]
+        no_output_timeout: Option<String>,
+
+        /// Maximum number of test process restarts on timeout or crash
+        #[arg(long, value_name = "N")]
+        max_restarts: Option<usize>,
+
+        /// Test ordering for each iteration
+        #[arg(long, value_name = "ORDER")]
+        order: Option<String>,
+
+        /// Additional arguments to pass to the test command (use after --)
+        #[arg(last = true, value_name = "TESTARGS")]
+        testargs: Vec<String>,
+    },
 
     /// Run tests and load results
     Run {
@@ -743,9 +797,96 @@ fn main() {
                 }
             }
         }
+        Commands::Stress {
+            iterations,
+            stop_on_flaky,
+            load_list,
+            parallel,
+            isolated,
+            testfilters,
+            starting_with,
+            test_timeout,
+            max_duration,
+            no_output_timeout,
+            max_restarts,
+            order,
+            testargs,
+        } => {
+            let test_timeout = match test_timeout {
+                Some(s) => match TimeoutSetting::parse(&s) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => TimeoutSetting::Disabled,
+            };
+            let max_duration = match max_duration {
+                Some(s) => match TimeoutSetting::parse(&s) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => TimeoutSetting::Disabled,
+            };
+            let no_output_timeout = match no_output_timeout {
+                Some(s) => match parse_duration_string(&s) {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
+            let test_order = match order {
+                Some(s) => match s.parse::<inquest::ordering::TestOrder>() {
+                    Ok(o) => Some(o),
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
+
+            let cmd = StressCommand {
+                base_path: cli.directory,
+                iterations,
+                stop_on_flaky,
+                load_list,
+                concurrency: parallel,
+                isolated,
+                test_filters: if testfilters.is_empty() {
+                    None
+                } else {
+                    Some(testfilters)
+                },
+                starting_with: if starting_with.is_empty() {
+                    None
+                } else {
+                    Some(starting_with)
+                },
+                test_args: if testargs.is_empty() {
+                    None
+                } else {
+                    Some(testargs)
+                },
+                test_timeout,
+                max_duration,
+                no_output_timeout,
+                max_restarts,
+                test_order,
+            };
+            cmd.execute(&mut ui)
+        }
         #[cfg(feature = "web")]
         Commands::Web { bind, port, open } => {
             let cmd = inquest::commands::WebCommand::new(cli.directory, bind, port, open);
+
             cmd.execute(&mut ui)
         }
         Commands::Run {
