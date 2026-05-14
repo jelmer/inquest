@@ -289,6 +289,27 @@ pub struct RunParam {
     pub order: Option<String>,
 }
 
+/// Parameters for the stress tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct StressParam {
+    /// Number of iterations to run. Each iteration is a normal recorded
+    /// run, so it also shows up in inq_log / inq_flaky afterwards.
+    /// Default 10.
+    pub iterations: Option<usize>,
+    /// Stop early as soon as any flaky test is observed.
+    /// Default false (run all iterations to get fuller pass/fail counts).
+    pub stop_on_flaky: Option<bool>,
+    /// Number of parallel test workers per iteration.
+    pub concurrency: Option<usize>,
+    /// Regex patterns to filter which tests to run.
+    pub test_filters: Option<Vec<String>>,
+    /// Run each test in a separate process per iteration.
+    pub isolated: Option<bool>,
+    /// Test ordering inside each iteration (same vocabulary as inq_run's
+    /// `order` parameter).
+    pub order: Option<String>,
+}
+
 /// Parameters for the cancel tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CancelParam {
@@ -333,6 +354,38 @@ fn take_limited<T>(mut items: Vec<T>, limit: usize) -> (Vec<T>, usize) {
         let extra = items.len() - limit;
         items.truncate(limit);
         (items, extra)
+    }
+}
+
+fn stress_summarise(
+    repo: &dyn Repository,
+    run_ids: &[crate::repository::RunId],
+) -> crate::error::Result<Vec<crate::repository::TestFlakiness>> {
+    crate::commands::stress::summarise_run_ids(repo, run_ids)
+}
+
+fn build_stress_response(
+    run_ids: Vec<crate::repository::RunId>,
+    flaky: Vec<crate::repository::TestFlakiness>,
+    stopped_early: bool,
+    any_iteration_failed: bool,
+) -> StressResponse {
+    StressResponse {
+        iterations: run_ids.len(),
+        run_ids: run_ids.iter().map(|r| r.as_str().to_string()).collect(),
+        stopped_early,
+        any_iteration_failed,
+        flaky_tests: flaky
+            .into_iter()
+            .map(|s| StressFlakyTest {
+                test_id: s.test_id.as_str().to_string(),
+                runs: s.runs,
+                failures: s.failures,
+                transitions: s.transitions,
+                flakiness_score: s.flakiness_score,
+                failure_rate: s.failure_rate,
+            })
+            .collect(),
     }
 }
 
@@ -652,6 +705,39 @@ struct FlakyResponse {
     /// when the default kicked in.
     min_runs: usize,
     tests: Vec<FlakyTest>,
+}
+
+#[derive(Serialize)]
+struct StressFlakyTest {
+    test_id: String,
+    /// Number of stress iterations in which this test ran.
+    runs: u32,
+    /// Number of those iterations in which it failed.
+    failures: u32,
+    /// Pass↔fail transitions across the stress iterations.
+    transitions: u32,
+    /// `transitions / (runs - 1)`, in `[0, 1]`.
+    flakiness_score: f64,
+    /// `failures / runs`, in `[0, 1]`.
+    failure_rate: f64,
+}
+
+#[derive(Serialize)]
+struct StressResponse {
+    /// Number of iterations that actually executed (may be less than the
+    /// requested count when `stop_on_flaky` triggered early).
+    iterations: usize,
+    /// Run IDs assigned to each iteration, in order.
+    run_ids: Vec<String>,
+    /// True if `stop_on_flaky` caused the loop to exit before reaching
+    /// `iterations`.
+    stopped_early: bool,
+    /// True if at least one iteration finished with a non-zero exit code,
+    /// independent of whether any tests turned out to be flaky.
+    any_iteration_failed: bool,
+    /// Tests that flipped between pass and fail across the stress window.
+    /// Sorted by transitions desc, then failure_rate desc, then test_id asc.
+    flaky_tests: Vec<StressFlakyTest>,
 }
 
 #[derive(Serialize)]
@@ -1910,6 +1996,144 @@ impl InquestMcpService {
                 error_output,
             })
         }
+    }
+
+    /// Run the suite repeatedly to surface flaky tests.
+    #[tool(
+        description = "Run the test suite (optionally filtered) multiple times and report any \
+                        tests that flipped between pass and fail across iterations. Each \
+                        iteration is recorded as a normal run, so it also shows up in inq_log \
+                        / inq_flaky afterwards. Default 10 iterations. Use stop_on_flaky to \
+                        return as soon as the first flaky test is observed; otherwise all \
+                        iterations run so pass/fail counts are more meaningful. Long suites \
+                        can blow the client's tool-call timeout — attach a progressToken to \
+                        keep the connection alive between iterations.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn inq_stress(
+        &self,
+        params: Parameters<StressParam>,
+        peer: Peer<RoleServer>,
+        meta: Meta,
+    ) -> Result<CallToolResult, ErrorData> {
+        let reporter = ProgressReporter::from_meta(&peer, &meta);
+        let params = params.0;
+
+        let iterations = params
+            .iterations
+            .unwrap_or(crate::commands::stress::DEFAULT_ITERATIONS);
+        if iterations == 0 {
+            return Err(ErrorData::invalid_params(
+                "stress: iterations must be at least 1".to_string(),
+                None,
+            ));
+        }
+        let stop_on_flaky = params.stop_on_flaky.unwrap_or(false);
+        let test_order = match &params.order {
+            Some(s) => Some(
+                s.parse::<crate::ordering::TestOrder>()
+                    .map_err(to_mcp_err)?,
+            ),
+            None => None,
+        };
+        let test_filters = params.test_filters.filter(|f| !f.is_empty());
+        let concurrency = params.concurrency;
+        let isolated = params.isolated.unwrap_or(false);
+
+        struct NullUI;
+        impl crate::ui::UI for NullUI {
+            fn output(&mut self, _: &str) -> crate::error::Result<()> {
+                Ok(())
+            }
+            fn error(&mut self, _: &str) -> crate::error::Result<()> {
+                Ok(())
+            }
+            fn warning(&mut self, _: &str) -> crate::error::Result<()> {
+                Ok(())
+            }
+        }
+
+        let base_path = self.dir_str();
+        let mut run_ids: Vec<crate::repository::RunId> = Vec::with_capacity(iterations);
+        let mut any_iteration_failed = false;
+        let mut stopped_early = false;
+
+        for iteration in 1..=iterations {
+            if let Some(r) = reporter.as_ref() {
+                r.notify(
+                    iteration as u64,
+                    format!("stress iteration {}/{}", iteration, iterations),
+                )
+                .await;
+            }
+
+            let base_path_for_task = base_path.clone();
+            let test_filters_for_task = test_filters.clone();
+            let test_order_for_task = test_order.clone();
+            let work = move || {
+                let mut ui = NullUI;
+                let cmd = crate::commands::RunCommand {
+                    base_path: Some(base_path_for_task),
+                    force_init: true,
+                    concurrency,
+                    isolated,
+                    test_filters: test_filters_for_task,
+                    test_order: test_order_for_task,
+                    ..Default::default()
+                };
+                cmd.execute_returning_run_id(&mut ui)
+            };
+
+            let cli_output = run_blocking_with_progress(reporter.clone(), "stress iteration", work)
+                .await
+                .map_err(|e| {
+                    ErrorData::internal_error(format!("Stress iteration panicked: {}", e), None)
+                })?
+                .map_err(|e| {
+                    ErrorData::internal_error(format!("Stress iteration failed: {}", e), None)
+                })?;
+
+            let Some(run_id) = cli_output.run_id else {
+                return Err(ErrorData::internal_error(
+                    "Stress aborted: no test run was recorded for an iteration. \
+                    Check that your filters match at least one test."
+                        .to_string(),
+                    None,
+                ));
+            };
+            run_ids.push(run_id);
+            if cli_output.exit_code != 0 {
+                any_iteration_failed = true;
+            }
+
+            if stop_on_flaky && run_ids.len() >= 2 {
+                let repo = self.open_repo()?;
+                let flaky = stress_summarise(&*repo, &run_ids).map_err(to_mcp_err)?;
+                if !flaky.is_empty() {
+                    stopped_early = iteration < iterations;
+                    return ok_json(&build_stress_response(
+                        run_ids,
+                        flaky,
+                        stopped_early,
+                        any_iteration_failed,
+                    ));
+                }
+            }
+        }
+
+        let repo = self.open_repo()?;
+        let flaky = stress_summarise(&*repo, &run_ids).map_err(to_mcp_err)?;
+        ok_json(&build_stress_response(
+            run_ids,
+            flaky,
+            stopped_early,
+            any_iteration_failed,
+        ))
     }
 
     /// List available tests.
