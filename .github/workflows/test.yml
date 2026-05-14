@@ -44,6 +44,11 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
+      # Explicitly ensure rustfmt is installed - workaround for macOS where
+      # the component sometimes isn't properly installed by the toolchain action
+      - name: Ensure rustfmt is installed
+        run: rustup component add rustfmt
+
       - name: Check formatting
         run: cargo fmt --check
 
