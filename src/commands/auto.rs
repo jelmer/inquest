@@ -9,7 +9,7 @@ use std::path::Path;
 /// A detected project type with its recommended inquest configuration.
 struct Detection {
     name: &'static str,
-    test_command: &'static str,
+    test_command: String,
     test_id_option: Option<&'static str>,
     test_list_option: Option<&'static str>,
     group_regex: Option<&'static str>,
@@ -25,7 +25,7 @@ fn detect_project(base: &Path) -> Vec<Detection> {
     if base.join("Cargo.toml").exists() {
         detections.push(Detection {
             name: "Cargo (Rust)",
-            test_command: "cargo subunit $LISTOPT $IDOPTION",
+            test_command: "cargo subunit $LISTOPT $IDOPTION".to_string(),
             test_id_option: Some("--load-list $IDFILE"),
             test_list_option: Some("--list"),
             group_regex: Some("^(.*)::[^:]+$"),
@@ -36,18 +36,32 @@ fn detect_project(base: &Path) -> Vec<Detection> {
     if has_pytest(base) {
         detections.push(Detection {
             name: "pytest (Python)",
-            test_command: "pytest --subunit $IDOPTION",
+            test_command: "pytest --subunit $IDOPTION".to_string(),
             test_id_option: Some("--load-list $IDFILE"),
             test_list_option: None,
             group_regex: Some("^(.*)::[^:]+$"),
         });
     }
 
-    // Python project with unittest / subunit
+    // Python project with unittest / subunit. When tests live in a
+    // dedicated top-level directory (the modern layout, with the suite
+    // moved out of the installed package), scope `discover` to that
+    // directory: a bare `discover` walks the whole project root and, if
+    // doctests or duplicate package copies are present, aborts with
+    // "Duplicate test ids detected". `-t .` keeps the project root as the
+    // import root so test IDs stay prefixed with the directory name.
     if has_python_unittest(base) {
+        let discover_target = python_test_dir(base)
+            .map(|dir| format!("-t . {dir}"))
+            .unwrap_or_default();
+        let test_command = if discover_target.is_empty() {
+            "python3 -m subunit.run discover $IDOPTION $LISTOPT".to_string()
+        } else {
+            format!("python3 -m subunit.run discover {discover_target} $IDOPTION $LISTOPT")
+        };
         detections.push(Detection {
             name: "unittest/subunit (Python)",
-            test_command: "python3 -m subunit.run discover $IDOPTION $LISTOPT",
+            test_command,
             test_id_option: Some("--load-list $IDFILE"),
             test_list_option: Some("--list"),
             group_regex: Some("^(.*)\\.[^.]+$"),
@@ -64,7 +78,7 @@ fn detect_project(base: &Path) -> Vec<Detection> {
     if has_go(base) {
         detections.push(Detection {
             name: "go test (Go)",
-            test_command: "gotest-run $LISTOPT $IDOPTION",
+            test_command: "gotest-run $LISTOPT $IDOPTION".to_string(),
             test_id_option: Some("--id-file $IDFILE"),
             test_list_option: Some("--list"),
             group_regex: Some("^(.*)\\.[^.]+$"),
@@ -75,7 +89,7 @@ fn detect_project(base: &Path) -> Vec<Detection> {
     if has_perl(base) {
         detections.push(Detection {
             name: "prove (Perl)",
-            test_command: "prove-subunit",
+            test_command: "prove-subunit".to_string(),
             test_id_option: None,
             test_list_option: None,
             group_regex: None,
@@ -88,7 +102,7 @@ fn detect_project(base: &Path) -> Vec<Detection> {
     if has_vitest(base) {
         detections.push(Detection {
             name: "vitest (Node.js)",
-            test_command: "vitest run --reporter=tap | tap2subunit",
+            test_command: "vitest run --reporter=tap | tap2subunit".to_string(),
             test_id_option: None,
             test_list_option: None,
             group_regex: None,
@@ -104,7 +118,8 @@ fn detect_project(base: &Path) -> Vec<Detection> {
     if has_jest(base) {
         detections.push(Detection {
             name: "jest (Node.js)",
-            test_command: "jest --ci --reporters=jest-junit; junitxml2subunit junit.xml",
+            test_command: "jest --ci --reporters=jest-junit; junitxml2subunit junit.xml"
+                .to_string(),
             test_id_option: None,
             test_list_option: None,
             group_regex: None,
@@ -154,6 +169,40 @@ fn has_python_unittest(base: &Path) -> bool {
         }
     }
 
+    false
+}
+
+/// Find a dedicated top-level test directory for a Python unittest project.
+///
+/// Returns the directory name (`tests` or `test`) when one exists and holds
+/// `test_*.py` files, so `discover` can be scoped to it. Returns `None` when
+/// no such directory is found, in which case the tests presumably live inside
+/// the package and a bare `discover` of the project root is appropriate.
+fn python_test_dir(base: &Path) -> Option<&'static str> {
+    for name in &["tests", "test"] {
+        let dir = base.join(name);
+        if dir.is_dir() && dir_has_python_tests(&dir) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Check whether a directory directly contains `test_*.py` files.
+fn dir_has_python_tests(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "py") {
+            if let Some(stem) = path.file_name().and_then(|n| n.to_str()) {
+                if stem.starts_with("test_") {
+                    return true;
+                }
+            }
+        }
+    }
     false
 }
 
@@ -460,6 +509,74 @@ mod tests {
             )]
         );
 
+        let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
+        assert_eq!(
+            content,
+            "test_command = \"python3 -m subunit.run discover $IDOPTION $LISTOPT\"\n\
+             test_id_option = \"--load-list $IDFILE\"\n\
+             test_list_option = \"--list\"\n\
+             group_regex = \"^(.*)\\\\.[^.]+$\"\n"
+        );
+    }
+
+    #[test]
+    fn test_auto_detect_python_unittest_with_tests_dir() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("setup.py"), "").unwrap();
+        std::fs::create_dir(temp.path().join("tests")).unwrap();
+        std::fs::write(temp.path().join("tests").join("test_foo.py"), "").unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
+        assert_eq!(
+            content,
+            "test_command = \"python3 -m subunit.run discover -t . tests $IDOPTION $LISTOPT\"\n\
+             test_id_option = \"--load-list $IDFILE\"\n\
+             test_list_option = \"--list\"\n\
+             group_regex = \"^(.*)\\\\.[^.]+$\"\n"
+        );
+    }
+
+    #[test]
+    fn test_auto_detect_python_unittest_with_test_dir_singular() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("pyproject.toml"), "").unwrap();
+        std::fs::create_dir(temp.path().join("test")).unwrap();
+        std::fs::write(temp.path().join("test").join("test_bar.py"), "").unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
+        let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
+        assert_eq!(
+            content,
+            "test_command = \"python3 -m subunit.run discover -t . test $IDOPTION $LISTOPT\"\n\
+             test_id_option = \"--load-list $IDFILE\"\n\
+             test_list_option = \"--list\"\n\
+             group_regex = \"^(.*)\\\\.[^.]+$\"\n"
+        );
+    }
+
+    #[test]
+    fn test_auto_detect_python_unittest_tests_dir_without_test_files() {
+        // A `tests` directory with no `test_*.py` files (e.g. only fixtures)
+        // should not be used as the discover target.
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("setup.py"), "").unwrap();
+        std::fs::create_dir(temp.path().join("tests")).unwrap();
+        std::fs::write(temp.path().join("tests").join("fixture.py"), "").unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
+        let result = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(result, 0);
         let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
         assert_eq!(
             content,
@@ -799,7 +916,7 @@ mod tests {
     fn test_format_toml_all_fields() {
         let detection = Detection {
             name: "test",
-            test_command: "test-cmd $LISTOPT $IDOPTION",
+            test_command: "test-cmd $LISTOPT $IDOPTION".to_string(),
             test_id_option: Some("--load-list $IDFILE"),
             test_list_option: Some("--list"),
             group_regex: Some("^(.*)::[^:]+$"),
@@ -817,7 +934,7 @@ mod tests {
     fn test_format_toml_minimal() {
         let detection = Detection {
             name: "test",
-            test_command: "test-cmd",
+            test_command: "test-cmd".to_string(),
             test_id_option: None,
             test_list_option: None,
             group_regex: None,
