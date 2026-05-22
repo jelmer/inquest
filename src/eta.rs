@@ -523,6 +523,15 @@ mod tests {
     }
 
     #[test]
+    fn format_duration_short_hours_with_many_minutes() {
+        // 2h 25m 05s. The minutes component is (secs % 3600) / 60: with 8705
+        // that is 5105 / 60 = 85... no — 8705 % 3600 = 1505, 1505 / 60 = 25.
+        // A value where the remainder exceeds 60 distinguishes `/ 60` from
+        // `% 60` (the latter would yield 1505 % 60 = 5).
+        assert_eq!(format_duration_short(Duration::from_secs(8705)), "2h 25m");
+    }
+
+    #[test]
     fn format_duration_short_zero() {
         assert_eq!(format_duration_short(Duration::ZERO), "0s");
     }
@@ -701,6 +710,54 @@ mod tests {
     }
 
     #[test]
+    fn eta_state_estimated_total_grows_when_test_is_slow() {
+        // A test that runs longer than its history pushes estimated_total up
+        // by (actual - expected). With expected = 50ms and an actual of
+        // roughly 200ms, estimated_total should grow by ~150ms.
+        let state = EtaState::new(Duration::from_secs(1));
+        state.mark_started(&TestId::new("a"), Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(200));
+        state.add_completed(&TestId::new("a"), Duration::from_millis(50));
+        let total = state.estimated_total();
+        // Correct: 1000ms + (~200ms - 50ms) ≈ 1150ms. The `actual + expected`
+        // mutant would instead add ~250ms, landing past 1200ms.
+        assert!(
+            total > Duration::from_millis(1100),
+            "estimated_total = {:?}, expected to grow past 1100ms",
+            total
+        );
+        assert!(
+            total < Duration::from_millis(1200),
+            "estimated_total = {:?}, expected below 1200ms",
+            total
+        );
+    }
+
+    #[test]
+    fn eta_state_estimated_total_shrink_uses_expected_minus_actual() {
+        // A test that finishes faster than predicted shrinks estimated_total
+        // by (expected - actual). With expected = 300ms and an actual of
+        // roughly 60ms, the target should drop by ~240ms.
+        let state = EtaState::new(Duration::from_secs(1));
+        state.mark_started(&TestId::new("a"), Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(60));
+        state.add_completed(&TestId::new("a"), Duration::from_millis(300));
+        let total = state.estimated_total();
+        // Correct: 1000ms - (300ms - ~60ms) ≈ 760ms. The `expected + actual`
+        // mutant would subtract ~360ms instead, landing below 700ms.
+        assert!(
+            total > Duration::from_millis(710),
+            "estimated_total = {:?}, expected above 710ms",
+            total
+        );
+        assert!(
+            total < Duration::from_millis(810),
+            "estimated_total = {:?}, expected below 810ms",
+            total
+        );
+    }
+
+    #[test]
     fn eta_state_completion_removes_from_in_flight() {
         // After completion, the test no longer contributes via in-flight
         // credit; only via completed_duration. Two starts then one
@@ -845,6 +902,77 @@ mod tests {
         assert_eq!(samples[0].concurrency, 2);
         assert!((samples[0].predicted_secs - 30.0).abs() < 1e-9);
         assert!((samples[0].actual_secs - 45.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn calibration_debug_reports_only_valid_bucket_samples() {
+        // calibration_debug must filter the bucket exactly as calibration_factor
+        // does: matching concurrency AND strictly-positive predicted/actual.
+        let samples = vec![
+            sample(2, 60.0, 120.0), // valid: ratio 2.0
+            sample(2, 0.0, 120.0),  // predicted == 0: excluded
+            sample(2, 60.0, 0.0),   // actual == 0: excluded
+            sample(2, -5.0, 30.0),  // predicted < 0: excluded
+            sample(4, 60.0, 90.0),  // wrong concurrency: excluded
+            sample(2, 60.0, 90.0),  // valid: ratio 1.5
+        ];
+        let debug = calibration_debug(&samples, 2);
+        assert_eq!(debug.total_samples, 6);
+        assert_eq!(debug.concurrency, 2);
+        // Only the two strictly-positive concurrency-2 samples survive.
+        assert_eq!(debug.bucket_samples, 2);
+        // Restored to chronological (oldest-first) order: 2.0 then 1.5.
+        assert_eq!(debug.recent_ratios, vec![2.0, 1.5]);
+    }
+
+    #[test]
+    fn calibration_debug_excludes_exactly_zero_predicted() {
+        // A sample whose predicted is exactly 0.0 must be dropped — guards the
+        // strict `> 0.0` (vs `>= 0.0`) on the predicted side.
+        let samples = vec![sample(1, 0.0, 50.0)];
+        let debug = calibration_debug(&samples, 1);
+        assert_eq!(debug.bucket_samples, 0);
+        assert!(debug.recent_ratios.is_empty());
+    }
+
+    #[test]
+    fn calibration_debug_excludes_exactly_zero_actual() {
+        // Mirror of the above for the actual side.
+        let samples = vec![sample(1, 50.0, 0.0)];
+        let debug = calibration_debug(&samples, 1);
+        assert_eq!(debug.bucket_samples, 0);
+        assert!(debug.recent_ratios.is_empty());
+    }
+
+    #[test]
+    fn format_prediction_debug_counts_only_listed_tests() {
+        // historical_times carries an extra test that is not in the selected
+        // list; format_prediction_debug must restrict the model to the listed
+        // tests, so the unrelated entry does not leak into the estimate.
+        //
+        // `c` has no history, so the model's mean fallback is used for it.
+        // The mean is computed from the *restricted* map: with the listed
+        // tests it is (10s + 20s) / 2 = 15s. If the restriction filter were
+        // inverted, `unrelated` (9999s) would leak in and the mean would jump
+        // into the thousands of seconds.
+        let tests = [TestId::new("a"), TestId::new("b"), TestId::new("c")];
+        let mut history = HashMap::new();
+        history.insert(TestId::new("a"), Duration::from_secs(10));
+        history.insert(TestId::new("b"), Duration::from_secs(20));
+        history.insert(TestId::new("unrelated"), Duration::from_secs(9999));
+        let lines = format_prediction_debug(&tests, &history, 1, 1.0);
+        let joined = lines.join("\n");
+        // Two selected tests have history, one (`c`) is new.
+        assert!(joined.contains("2 with history, 1 new"), "got: {}", joined);
+        // Mean fallback is the mean of the restricted history, i.e. 15s.
+        assert!(joined.contains("mean fallback 15s"), "got: {}", joined);
+        // Raw estimate is 10s + 20s + 15s (fallback) = 45s.
+        assert!(joined.contains("45s"), "got: {}", joined);
+        assert!(
+            !joined.contains("9999"),
+            "leaked unrelated test: {}",
+            joined
+        );
     }
 
     #[test]

@@ -149,4 +149,22 @@ mod tests {
         let groups = group_tests(&tests, r"^(.*)$").unwrap();
         assert_eq!(groups.len(), 0);
     }
+
+    #[test]
+    fn test_no_capture_group_uses_whole_match() {
+        // A regex with no capture group at all groups by the whole match.
+        let tests = vec![
+            TestId::new("package.module1.test_a"),
+            TestId::new("package.module2.test_b"),
+            TestId::new("other.module.test_c"),
+        ];
+
+        // Matches the leading package segment; no parentheses, so the group
+        // name is the matched text itself.
+        let groups = group_tests(&tests, r"^[a-z]+").unwrap();
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups.get("package").unwrap().len(), 2);
+        assert_eq!(groups.get("other").unwrap().len(), 1);
+    }
 }

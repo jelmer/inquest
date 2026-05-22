@@ -240,4 +240,48 @@ mod tests {
         let err = expand_abbreviation("abc.x", &tests).unwrap_err();
         assert!(err.to_string().contains("no known tests"));
     }
+
+    #[test]
+    fn more_pieces_than_segments_does_not_match() {
+        // The abbreviation has a head piece beyond the test's segment count.
+        // After the first piece matches the only segment literally, the
+        // recursion reaches seg_idx == segments.len() with a piece still
+        // pending: it must report no match rather than indexing past the end.
+        let tests = vec!["alpha"];
+        let err = expand_abbreviation("alpha.beta.test_x", &tests).unwrap_err();
+        assert!(err.to_string().contains("no known tests"), "{}", err);
+    }
+
+    #[test]
+    fn literal_then_letter_group_after_offset() {
+        // First piece matches `breezy` literally (advancing the segment
+        // cursor to 1), then `tg` is a two-letter group covering `tests`
+        // and `git`. The letter group must continue from the post-literal
+        // offset, so the expansion is `breezy.tests.git`.
+        let tests = vec!["breezy.tests.git.test_x"];
+        let got = expand_abbreviation("breezy.tg.test_x", &tests).unwrap();
+        assert_eq!(got, "breezy.tests.git.test_x");
+    }
+
+    #[test]
+    fn letter_group_advances_cursor_for_following_piece() {
+        // `breezy` matches literally (cursor -> 1), `tg` is a two-letter group
+        // over `tests` and `git` (cursor must advance to 3), and `plugins`
+        // then matches literally at segment 3. If the post-letter-group offset
+        // were miscomputed, the trailing `plugins` piece would be matched
+        // against the wrong segment and the expansion would fail.
+        let tests = vec!["breezy.tests.git.plugins.test_x"];
+        let got = expand_abbreviation("breezy.tg.plugins.test_x", &tests).unwrap();
+        assert_eq!(got, "breezy.tests.git.plugins.test_x");
+    }
+
+    #[test]
+    fn letter_group_after_offset_rejects_wrong_segments() {
+        // Same shape, but the second segment after the literal does not start
+        // with `g`. If the recursion miscomputed the offset it could wrongly
+        // accept this; it must report no match.
+        let tests = vec!["breezy.tests.svn.test_x"];
+        let err = expand_abbreviation("breezy.tg.test_x", &tests).unwrap_err();
+        assert!(err.to_string().contains("no known tests"), "{}", err);
+    }
 }

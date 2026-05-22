@@ -755,4 +755,87 @@ mod tests {
             assert_eq!(result, tests);
         }
     }
+
+    #[test]
+    fn splitmix64_matches_reference_output() {
+        // SplitMix64 is a fixed algorithm: a given seed must produce a known
+        // stream. Pinning the first outputs guards against any accidental
+        // change to the bit-mixing constants or operators.
+        let mut rng = SplitMix64::new(0);
+        assert_eq!(rng.next(), 7960286522194355700);
+        assert_eq!(rng.next(), 487617019471545679);
+        assert_eq!(rng.next(), 17909611376780542444);
+
+        let mut rng = SplitMix64::new(42);
+        assert_eq!(rng.next(), 2949826092126892291);
+        assert_eq!(rng.next(), 5139283748462763858);
+        assert_eq!(rng.next(), 6349198060258255764);
+    }
+
+    #[test]
+    fn shuffle_produces_exact_permutation_for_seed() {
+        // Pin the full permutation, not just "it's deterministic" — that way a
+        // change to the RNG or the Fisher-Yates index math is detected even
+        // though the output stays a valid permutation.
+        let tests = ids(&["a", "b", "c", "d", "e", "f", "g"]);
+        let r42 = apply_order(
+            tests.clone(),
+            &TestOrder::Shuffle { seed: Some(42) },
+            &empty_ctx(),
+        )
+        .unwrap();
+        assert_eq!(r42, ids(&["d", "b", "g", "c", "e", "a", "f"]));
+
+        let r1 = apply_order(tests, &TestOrder::Shuffle { seed: Some(1) }, &empty_ctx()).unwrap();
+        assert_eq!(r1, ids(&["e", "d", "c", "b", "f", "g", "a"]));
+    }
+
+    #[test]
+    fn spread_regex_without_capture_group_uses_whole_match() {
+        // A group_regex with no capture group falls back to the whole match.
+        // `[a-z]+` matches the leading run of letters, so `mod1a` and `mod1b`
+        // both yield prefix `mod` and interleave.
+        let tests = ids(&["mod1a", "mod1b", "other1"]);
+        let ctx = OrderingContext {
+            failing_tests: &[],
+            historical_times: &HashMap::new(),
+            failure_counts: &HashMap::new(),
+            group_regex: Some(r"[a-z]+"),
+        };
+        let result = apply_order(tests, &TestOrder::Spread, &ctx).unwrap();
+        assert_eq!(result, ids(&["mod1a", "other1", "mod1b"]));
+    }
+
+    #[test]
+    fn spread_regex_no_match_falls_back_to_full_id() {
+        // When the regex does not match a test at all, that test forms its own
+        // bucket keyed on the full id.
+        let tests = ids(&["pkg::a::one", "pkg::a::two", "nomatch"]);
+        let ctx = OrderingContext {
+            failing_tests: &[],
+            historical_times: &HashMap::new(),
+            failure_counts: &HashMap::new(),
+            group_regex: Some(r"^pkg::(?P<group>\w+)::"),
+        };
+        let result = apply_order(tests, &TestOrder::Spread, &ctx).unwrap();
+        assert_eq!(result, ids(&["pkg::a::one", "nomatch", "pkg::a::two"]));
+    }
+
+    #[test]
+    fn spread_unnamed_capture_group_uses_first_group() {
+        // An unnamed capture group must key the bucket on group 1, not the
+        // whole match. `^([a-z]+)\d` captures only the letter run, so
+        // `mod1` and `mod2` interleave but `other1` is a separate bucket.
+        // (Keying on the whole match instead would give distinct `mod1`,
+        // `mod2` buckets and no interleaving.)
+        let tests = ids(&["mod1", "mod2", "other1", "mod3"]);
+        let ctx = OrderingContext {
+            failing_tests: &[],
+            historical_times: &HashMap::new(),
+            failure_counts: &HashMap::new(),
+            group_regex: Some(r"^([a-z]+)\d"),
+        };
+        let result = apply_order(tests, &TestOrder::Spread, &ctx).unwrap();
+        assert_eq!(result, ids(&["mod1", "other1", "mod2", "mod3"]));
+    }
 }
