@@ -441,7 +441,10 @@ impl RunCommand {
                 }
             }
             crate::testcommand::ConcurrencySource::ConfigCallout(c) => {
-                ui.output(&format!("Using concurrency from test_run_concurrency: {}", c))?;
+                ui.output(&format!(
+                    "Using concurrency from test_run_concurrency: {}",
+                    c
+                ))?;
             }
             crate::testcommand::ConcurrencySource::Default => {
                 suggest_parallel_for_explicit_run(ui, &test_ids, &historical_times)?;

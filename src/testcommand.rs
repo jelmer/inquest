@@ -121,7 +121,10 @@ impl TestCommand {
     /// A value of 0 means auto-detect (number of CPUs).
     ///
     /// Returns (concurrency, source) where source describes where the value came from.
-    pub fn resolve_concurrency(&self, explicit: Option<usize>) -> Result<(usize, ConcurrencySource)> {
+    pub fn resolve_concurrency(
+        &self,
+        explicit: Option<usize>,
+    ) -> Result<(usize, ConcurrencySource)> {
         if let Some(0) = explicit {
             let cpus = num_cpus::get();
             return Ok((cpus, ConcurrencySource::AutoDetected(cpus)));
