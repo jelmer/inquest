@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: ""
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            # gdbm doesn't build on Windows; mirror the test workflow's
+            # Windows configuration so the release binary matches what we
+            # actually verify in CI.
+            features: "--no-default-features --features=testr,junit"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libgdbm-dev libsqlite3-dev
+
+      - name: Install system dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install gdbm
+          echo "LIBRARY_PATH=$(brew --prefix gdbm)/lib" >> $GITHUB_ENV
+          echo "CPATH=$(brew --prefix gdbm)/include" >> $GITHUB_ENV
+
+      - name: Install system dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        run: vcpkg install sqlite3:x64-windows
+        shell: bash
+
+      - name: Set vcpkg environment (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> $GITHUB_ENV
+          echo "VCPKGRS_DYNAMIC=1" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked --bin inq --target ${{ matrix.target }} ${{ matrix.features }}
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          staging="inq-${TARGET}"
+          mkdir "$staging"
+          cp "target/${TARGET}/release/inq" "$staging/"
+          cp README.md COPYING Apache-2.0 BSD "$staging/" 2>/dev/null || true
+          tar -czf "${staging}.tar.gz" "$staging"
+          shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          staging="inq-${TARGET}"
+          mkdir "$staging"
+          cp "target/${TARGET}/release/inq.exe" "$staging/"
+          cp README.md COPYING Apache-2.0 BSD "$staging/" 2>/dev/null || true
+          7z a "${staging}.zip" "$staging"
+          # 7z also exists on the windows runner; use it for both archive
+          # and checksum so we don't depend on a separate sha utility.
+          certutil -hashfile "${staging}.zip" SHA256 | grep -v "hash\|CertUtil" > "${staging}.zip.sha256"
+
+      - name: Upload assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            gh release upload "$TAG" "inq-${TARGET}.zip" "inq-${TARGET}.zip.sha256" --clobber
+          else
+            gh release upload "$TAG" "inq-${TARGET}.tar.gz" "inq-${TARGET}.tar.gz.sha256" --clobber
+          fi
