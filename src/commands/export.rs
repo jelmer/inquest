@@ -97,7 +97,7 @@ fn export_json(test_run: &TestRun) -> Result<String> {
 }
 
 #[cfg(feature = "junit")]
-fn export_junit(test_run: &TestRun) -> Result<String> {
+pub(crate) fn export_junit(test_run: &TestRun) -> Result<String> {
     use quick_junit::{NonSuccessKind, Report, TestCase, TestCaseStatus, TestSuite};
 
     let mut suite = TestSuite::new(format!("run-{}", test_run.id));

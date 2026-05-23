@@ -432,6 +432,19 @@ enum Commands {
         /// Additional arguments to pass to the test command (use after --)
         #[arg(last = true, value_name = "TESTARGS")]
         testargs: Vec<String>,
+
+        /// Write a JUnit XML report to this path after the run. GitLab picks
+        /// it up via `artifacts:reports:junit:` and shows failures inline
+        /// on the MR. Most other CI systems also consume JUnit.
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+        junit_path: Option<std::path::PathBuf>,
+
+        /// Write step outputs (passed/failed/flaky/duration/run_id) to this
+        /// path as `key=value` lines. GitLab picks it up via
+        /// `artifacts:reports:dotenv:` and exposes them as env vars in
+        /// downstream jobs.
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+        dotenv_path: Option<std::path::PathBuf>,
     },
 
     /// Run tests and load results
@@ -949,6 +962,8 @@ fn main() {
             testfilters,
             starting_with,
             testargs,
+            junit_path,
+            dotenv_path,
         } => {
             let format = match format.parse::<inquest::commands::CiFormat>() {
                 Ok(f) => f,
@@ -999,6 +1014,8 @@ fn main() {
                 max_duration,
                 test_args: testargs,
                 profile,
+                junit_path,
+                dotenv_path,
             };
             cmd.execute(&mut ui)
         }

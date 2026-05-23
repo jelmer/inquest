@@ -128,6 +128,17 @@ pub struct CiCommand {
     pub test_args: Vec<String>,
     /// Active profile name from `--profile` / `INQ_PROFILE`.
     pub profile: Option<String>,
+    /// If set, write a JUnit XML report to this path after the initial run.
+    /// GitLab picks it up via `artifacts:reports:junit:` and shows test
+    /// failures inline on the MR; most other CI systems consume JUnit too.
+    /// Requires the `junit` cargo feature (enabled by default).
+    pub junit_path: Option<std::path::PathBuf>,
+    /// If set, write `key=value` lines (the same set `$GITHUB_OUTPUT` gets) to
+    /// this path. GitLab picks it up via `artifacts:reports:dotenv:` and
+    /// exposes the values as env vars in downstream jobs. `$GITHUB_OUTPUT`,
+    /// when set, is always written in addition to this — the two are
+    /// independent integration points.
+    pub dotenv_path: Option<std::path::PathBuf>,
 }
 
 impl CiCommand {
@@ -145,6 +156,8 @@ impl CiCommand {
             max_duration: TimeoutSetting::default(),
             test_args: Vec::new(),
             profile: None,
+            junit_path: None,
+            dotenv_path: None,
         }
     }
 }
@@ -185,7 +198,8 @@ impl CiCommand {
             None
         };
         let emit_errors_now = streaming && self.retries == 0;
-        let result_callback = self.build_result_callback(streamed_ids.clone(), emit_errors_now);
+        let result_callback =
+            self.build_result_callback(streamed_ids.clone(), emit_errors_now, format);
 
         let total_start = std::time::Instant::now();
         let initial_run_id = match self.run_initial(ui, order.clone(), result_callback)? {
@@ -242,6 +256,19 @@ impl CiCommand {
             total_start.elapsed(),
         )?;
 
+        if let Some(path) = &self.junit_path {
+            write_junit_report(&initial_run, path)?;
+        }
+        if let Some(path) = &self.dotenv_path {
+            write_dotenv(
+                &initial_run,
+                &flaky,
+                &initial_run_id,
+                total_start.elapsed(),
+                path,
+            )?;
+        }
+
         Ok(if still_failing.is_empty() { 0 } else { 1 })
     }
 
@@ -252,6 +279,7 @@ impl CiCommand {
         &self,
         streamed_ids: Option<Arc<Mutex<HashSet<TestId>>>>,
         emit_errors_now: bool,
+        format: CiFormat,
     ) -> Option<test_executor::ResultCallback> {
         let streamed_ids = streamed_ids?;
         Some(Arc::new(move |result: &TestResult| {
@@ -260,7 +288,7 @@ impl CiCommand {
             }
 
             let mut out = String::new();
-            out.push_str(&format_group_block(result));
+            out.push_str(&format_group_block(result, format));
             if emit_errors_now {
                 out.push_str(&format_error_annotation(result));
             }
@@ -574,7 +602,7 @@ fn emit_ci_output(
 
             // Per-failing-test log groups (foldable in the workflow log). Skip
             // any test whose group was already streamed live during the run.
-            out.push_str(&format_failure_groups(run, already_streamed));
+            out.push_str(&format_failure_groups(run, already_streamed, format));
 
             // Warning annotations for recovered (flaky) tests. Always
             // emitted post-hoc: we only know which tests recovered after
@@ -612,20 +640,16 @@ fn emit_ci_output(
     }
 }
 
-/// Write `key=value` lines to `$GITHUB_OUTPUT` so downstream workflow steps
-/// can branch on the result. No-op when the env var is unset (i.e. not running
-/// inside a GitHub Actions step).
-fn write_github_output(
-    env: &dyn EnvLookup,
+/// Render the standard `key=value` step-output block. Used by both
+/// `$GITHUB_OUTPUT` (where GitHub Actions concatenates from multiple writers,
+/// so append makes sense) and `--dotenv-path` (where GitLab's dotenv report
+/// expects the same wire format).
+fn format_step_outputs(
     run: &TestRun,
     flaky: &[TestId],
     run_id: &RunId,
     duration: Duration,
-) -> Result<()> {
-    let Some(path) = env.get("GITHUB_OUTPUT") else {
-        return Ok(());
-    };
-
+) -> String {
     let mut passed = 0usize;
     let mut failed = 0usize;
     for r in run.results.values() {
@@ -644,13 +668,67 @@ fn write_github_output(
     let _ = writeln!(body, "flaky={}", flaky.len());
     let _ = writeln!(body, "duration={:.3}", duration.as_secs_f64());
     let _ = writeln!(body, "run_id={}", run_id.as_str());
+    body
+}
 
+/// Write `key=value` lines to `$GITHUB_OUTPUT` so downstream workflow steps
+/// can branch on the result. No-op when the env var is unset (i.e. not running
+/// inside a GitHub Actions step).
+fn write_github_output(
+    env: &dyn EnvLookup,
+    run: &TestRun,
+    flaky: &[TestId],
+    run_id: &RunId,
+    duration: Duration,
+) -> Result<()> {
+    let Some(path) = env.get("GITHUB_OUTPUT") else {
+        return Ok(());
+    };
+
+    let body = format_step_outputs(run, flaky, run_id, duration);
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)?;
     file.write_all(body.as_bytes())?;
     Ok(())
+}
+
+/// Write the same key=value block to an explicit path, for GitLab's
+/// `artifacts:reports:dotenv:` and any other CI that consumes dotenv files.
+/// Truncates the target — unlike `$GITHUB_OUTPUT`, this path is owned by inq
+/// for the duration of the job, so there's no concatenation from other steps
+/// to preserve.
+fn write_dotenv(
+    run: &TestRun,
+    flaky: &[TestId],
+    run_id: &RunId,
+    duration: Duration,
+    path: &std::path::Path,
+) -> Result<()> {
+    let body = format_step_outputs(run, flaky, run_id, duration);
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
+/// Write a JUnit XML report so GitLab (`artifacts:reports:junit:`) and other
+/// JUnit-consuming CI integrations can surface test results inline on the
+/// MR/PR view.
+#[cfg(feature = "junit")]
+fn write_junit_report(run: &TestRun, path: &std::path::Path) -> Result<()> {
+    let xml = crate::commands::export::export_junit(run)?;
+    std::fs::write(path, xml)?;
+    Ok(())
+}
+
+/// Without the `junit` feature, `--junit-path` becomes a hard error: silently
+/// ignoring it would let a CI workflow that depends on the artifact think it
+/// was produced.
+#[cfg(not(feature = "junit"))]
+fn write_junit_report(_run: &TestRun, _path: &std::path::Path) -> Result<()> {
+    Err(crate::error::Error::Config(
+        "--junit-path requires the 'junit' cargo feature".to_string(),
+    ))
 }
 
 fn is_failure(status: TestStatus) -> bool {
@@ -660,10 +738,17 @@ fn is_failure(status: TestStatus) -> bool {
     )
 }
 
-/// Emit one `::group::TEST_ID` / `::endgroup::` block per failing test, with
-/// the test's `details` (traceback, captured output) as the group body.
-/// Skips any test whose id is in `skip` (typically: already streamed live).
-fn format_failure_groups(run: &TestRun, skip: Option<&HashSet<TestId>>) -> String {
+/// Emit one collapsible-section block per failing test, with the test's
+/// `details` (traceback, captured output) as the body. Format is GitHub's
+/// `::group::` / `::endgroup::` for `CiFormat::Github` and GitLab's
+/// `section_start` / `section_end` ANSI sequences for `CiFormat::Gitlab`;
+/// other formats fall back to the GitHub form. Skips any test whose id is in
+/// `skip` (typically: already streamed live).
+fn format_failure_groups(
+    run: &TestRun,
+    skip: Option<&HashSet<TestId>>,
+    format: CiFormat,
+) -> String {
     let mut out = String::new();
     let mut failures: Vec<_> = run
         .results
@@ -674,15 +759,54 @@ fn format_failure_groups(run: &TestRun, skip: Option<&HashSet<TestId>>) -> Strin
     failures.sort_by(|a, b| a.test_id.as_str().cmp(b.test_id.as_str()));
 
     for result in failures {
-        out.push_str(&format_group_block(result));
+        out.push_str(&format_group_block(result, format));
     }
     out
 }
 
-/// `::group::TEST_ID` / `::endgroup::` block for a single result.
-fn format_group_block(result: &TestResult) -> String {
+/// Collapsible block for a single result. GitLab's collapsible-section
+/// protocol uses ANSI control codes around `section_start`/`section_end`
+/// pseudo-events that the runner intercepts; everything else uses the
+/// GitHub `::group::` workflow command.
+fn format_group_block(result: &TestResult, format: CiFormat) -> String {
+    format_group_block_with(result, format, gitlab_section_timestamp)
+}
+
+/// Live timestamp source used by `format_group_block` in production. Pulled
+/// out as a free function so tests can substitute a deterministic clock via
+/// `format_group_block_with`.
+fn gitlab_section_timestamp() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// Like `format_group_block` but accepts an explicit timestamp source, so
+/// tests can pin the GitLab section markers to a known value.
+fn format_group_block_with(
+    result: &TestResult,
+    format: CiFormat,
+    timestamp: fn() -> i64,
+) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "::group::{}", result.test_id.as_str());
+    let test_id = result.test_id.as_str();
+    let (open, close) = match format {
+        CiFormat::Gitlab => {
+            let name = sanitize_gitlab_section_name(test_id);
+            // GitLab uses the timestamp only to derive the section's
+            // displayed duration; it doesn't need to be wall-clock. We reuse
+            // the same value for start/end here, which makes the section
+            // show no duration — fine for failure-detail blocks.
+            let ts = timestamp();
+            (
+                format!("\x1b[0Ksection_start:{ts}:{name}[collapsed=true]\r\x1b[0K{test_id}\n"),
+                format!("\x1b[0Ksection_end:{ts}:{name}\r\x1b[0K\n"),
+            )
+        }
+        _ => (
+            format!("::group::{test_id}\n"),
+            "::endgroup::\n".to_string(),
+        ),
+    };
+    out.push_str(&open);
     if let Some(msg) = &result.message {
         let trimmed = msg.trim();
         if !trimmed.is_empty() {
@@ -697,7 +821,27 @@ fn format_group_block(result: &TestResult) -> String {
             out.push('\n');
         }
     }
-    out.push_str("::endgroup::\n");
+    out.push_str(&close);
+    out
+}
+
+/// GitLab section names must contain only ASCII letters, numbers, periods,
+/// underscores, and hyphens (per the GitLab CI docs). Test ids commonly
+/// contain `::`, `,`, `/`, and `[]`; replace any unsupported character with
+/// `_` so the runner accepts the section. Names are not human-shown — they're
+/// only used to match start/end pairs — so a lossy mapping is fine.
+fn sanitize_gitlab_section_name(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
     out
 }
 
@@ -953,24 +1097,18 @@ mod tests {
     }
 
     #[test]
-    fn failure_groups_only_for_failing_tests() {
+    fn failure_groups_emits_one_block_per_failure_for_github() {
         let run = make_run();
-        let out = format_failure_groups(&run, None);
-        assert!(out.contains("::group::tests.b"));
-        assert!(out.contains("::group::tests.c"));
-        assert!(!out.contains("::group::tests.a"));
-        assert!(!out.contains("::group::tests.d"));
-        // Each group is properly closed.
-        assert_eq!(out.matches("::group::").count(), 2);
-        assert_eq!(out.matches("::endgroup::").count(), 2);
-    }
-
-    #[test]
-    fn failure_group_body_carries_message_and_details() {
-        let run = make_run();
-        let out = format_failure_groups(&run, None);
-        assert!(out.contains("boom"));
-        assert!(out.contains("AssertionError"));
+        let out = format_failure_groups(&run, None, CiFormat::Github);
+        let expected = "::group::tests.b\n\
+                        boom\n\
+                        File \"tests/b.py\", line 7, in test\n    \
+                        raise AssertionError\n\
+                        ::endgroup::\n\
+                        ::group::tests.c\n\
+                        timeout\n\
+                        ::endgroup::\n";
+        assert_eq!(out, expected);
     }
 
     #[test]
@@ -978,11 +1116,10 @@ mod tests {
         let run = make_run();
         let flaky = vec![TestId::new("tests.b")];
         let out = format_flaky_warnings(&run, &flaky);
-        assert!(out.starts_with("::warning "));
-        assert!(out.contains("file=tests/b.py"));
-        assert!(out.contains("line=7"));
-        assert!(out.contains("title=Flaky: tests.b"));
-        assert!(out.contains("passed on retry"));
+        assert_eq!(
+            out,
+            "::warning file=tests/b.py,line=7,title=Flaky: tests.b::boom (passed on retry)\n"
+        );
     }
 
     #[test]
@@ -996,12 +1133,20 @@ mod tests {
     fn step_summary_counts_and_lists_failures() {
         let run = make_run();
         let summary = format_step_summary(&run, &[]);
-        assert!(summary.contains("## Test results"));
         // total=4, passed=1, failed=1, errored=1, skipped=1, flaky=0
-        assert!(summary.contains("| 4 | 1 | 1 | 1 | 1 | 0 |"));
-        assert!(summary.contains("Failing tests (2)"));
-        assert!(summary.contains("`tests.b`"));
-        assert!(summary.contains("`tests.c`"));
+        let expected = "## Test results\n\
+                        \n\
+                        | Total | Passed | Failed | Errored | Skipped | Flaky |\n\
+                        |------:|-------:|-------:|--------:|--------:|------:|\n\
+                        | 4 | 1 | 1 | 1 | 1 | 0 |\n\
+                        \n\
+                        <details><summary>Failing tests (2)</summary>\n\
+                        \n\
+                        - `tests.b` — boom\n\
+                        - `tests.c` — timeout\n\
+                        \n\
+                        </details>\n";
+        assert_eq!(summary, expected);
     }
 
     #[test]
@@ -1009,9 +1154,26 @@ mod tests {
         let run = make_run();
         let flaky = vec![TestId::new("tests.b")];
         let summary = format_step_summary(&run, &flaky);
-        // tests.b is now flaky, so failing list shows only tests.c.
-        assert!(summary.contains("Failing tests (1)"));
-        assert!(summary.contains("Flaky tests (1)"));
+        // tests.b is now flaky, so failing list shows only tests.c, and
+        // there's a separate flaky-tests block at the end.
+        let expected = "## Test results\n\
+                        \n\
+                        | Total | Passed | Failed | Errored | Skipped | Flaky |\n\
+                        |------:|-------:|-------:|--------:|--------:|------:|\n\
+                        | 4 | 1 | 1 | 1 | 1 | 1 |\n\
+                        \n\
+                        <details><summary>Failing tests (1)</summary>\n\
+                        \n\
+                        - `tests.c` — timeout\n\
+                        \n\
+                        </details>\n\
+                        \n\
+                        <details><summary>Flaky tests (1)</summary>\n\
+                        \n\
+                        - `tests.b` (passed on retry)\n\
+                        \n\
+                        </details>\n";
+        assert_eq!(summary, expected);
     }
 
     #[test]
@@ -1033,10 +1195,10 @@ mod tests {
         // streaming and batched paths produce identical workflow output.
         let run = make_run();
         let beta = run.results.get(&TestId::new("tests.b")).unwrap();
-        let single = format_group_block(beta);
+        let single = format_group_block(beta, CiFormat::Github);
         let mut only_beta = TestRun::new(RunId::new("only"));
         only_beta.add_result(beta.clone());
-        let batched = format_failure_groups(&only_beta, None);
+        let batched = format_failure_groups(&only_beta, None, CiFormat::Github);
         assert_eq!(single, batched);
     }
 
@@ -1046,8 +1208,47 @@ mod tests {
         // produce a well-formed group with just the header and endgroup.
         let mut result = TestResult::failure("tests.empty", "   ");
         result.details = None;
-        let out = format_group_block(&result);
+        let out = format_group_block(&result, CiFormat::Github);
         assert_eq!(out, "::group::tests.empty\n::endgroup::\n");
+    }
+
+    /// Deterministic clock for GitLab section tests. The actual timestamp
+    /// value is irrelevant to GitLab's section matching (it only uses it for
+    /// the cosmetic duration display); we just want it stable for `assert_eq!`.
+    fn fake_clock() -> i64 {
+        1_700_000_000
+    }
+
+    #[test]
+    fn format_group_block_uses_gitlab_section_markers() {
+        let run = make_run();
+        let beta = run.results.get(&TestId::new("tests.b")).unwrap();
+        let out = format_group_block_with(beta, CiFormat::Gitlab, fake_clock);
+        let expected = "\x1b[0Ksection_start:1700000000:tests.b[collapsed=true]\r\x1b[0Ktests.b\n\
+                        boom\n\
+                        File \"tests/b.py\", line 7, in test\n    \
+                        raise AssertionError\n\
+                        \x1b[0Ksection_end:1700000000:tests.b\r\x1b[0K\n";
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn gitlab_section_name_sanitizes_disallowed_chars() {
+        // GitLab section names allow only [A-Za-z0-9._-]; everything else
+        // gets replaced with `_` so the runner accepts the marker.
+        assert_eq!(
+            sanitize_gitlab_section_name("foo::bar::baz"),
+            "foo__bar__baz"
+        );
+        assert_eq!(sanitize_gitlab_section_name("mod/file.rs"), "mod_file.rs");
+        assert_eq!(
+            sanitize_gitlab_section_name("test[case,with,commas]"),
+            "test_case_with_commas_"
+        );
+        assert_eq!(sanitize_gitlab_section_name("plain.id-9_x"), "plain.id-9_x");
+        // Empty input collapses to a single underscore so the section name
+        // is never empty (GitLab rejects empty names).
+        assert_eq!(sanitize_gitlab_section_name(""), "_");
     }
 
     #[test]
@@ -1055,11 +1256,7 @@ mod tests {
         let run = make_run();
         let beta = run.results.get(&TestId::new("tests.b")).unwrap();
         let out = format_error_annotation(beta);
-        assert!(out.starts_with("::error "));
-        assert!(out.contains("file=tests/b.py"));
-        assert!(out.contains("line=7"));
-        assert!(out.contains("title=tests.b"));
-        assert!(out.contains("boom"));
+        assert_eq!(out, "::error file=tests/b.py,line=7,title=tests.b::boom\n");
     }
 
     #[test]
@@ -1076,11 +1273,25 @@ mod tests {
         let run = make_run();
         let mut skip: HashSet<TestId> = HashSet::new();
         skip.insert(TestId::new("tests.b"));
-        let out = format_failure_groups(&run, Some(&skip));
-        // tests.b was already streamed; only tests.c should appear.
-        assert!(!out.contains("::group::tests.b"));
-        assert!(out.contains("::group::tests.c"));
-        assert_eq!(out.matches("::group::").count(), 1);
+        let out = format_failure_groups(&run, Some(&skip), CiFormat::Github);
+        // tests.b was already streamed live; only tests.c remains for the
+        // batched emission.
+        assert_eq!(
+            out,
+            "::group::tests.c\n\
+             timeout\n\
+             ::endgroup::\n"
+        );
+    }
+
+    /// Expected step-output body for `make_run()` (1 success, 1 failure,
+    /// 1 error, 1 skip). Each test constructs the exact `flaky` /
+    /// `run_id` / `duration` it wants and reuses this fragment.
+    fn expected_step_outputs(failed: usize, flaky: usize, run_id: &str, duration: &str) -> String {
+        format!(
+            "passed=1\nfailed={}\nflaky={}\nduration={}\nrun_id={}\n",
+            failed, flaky, duration, run_id,
+        )
     }
 
     #[test]
@@ -1090,19 +1301,17 @@ mod tests {
         let e = env(&[("GITHUB_OUTPUT", path.as_str())]);
 
         let run = make_run();
-        let flaky: Vec<TestId> = Vec::new();
-        let run_id = RunId::new("42");
-        let duration = Duration::from_millis(2500);
-
-        write_github_output(&e, &run, &flaky, &run_id, duration).unwrap();
+        write_github_output(
+            &e,
+            &run,
+            &[],
+            &RunId::new("42"),
+            Duration::from_millis(2500),
+        )
+        .unwrap();
 
         let body = std::fs::read_to_string(temp.path()).unwrap();
-        // 1 passed (tests.a), 2 failed (tests.b + tests.c), 0 flaky.
-        assert!(body.contains("passed=1\n"));
-        assert!(body.contains("failed=2\n"));
-        assert!(body.contains("flaky=0\n"));
-        assert!(body.contains("duration=2.500\n"));
-        assert!(body.contains("run_id=42\n"));
+        assert_eq!(body, expected_step_outputs(2, 0, "42", "2.500"));
     }
 
     #[test]
@@ -1117,8 +1326,7 @@ mod tests {
 
         let body = std::fs::read_to_string(temp.path()).unwrap();
         // tests.b recovered on retry, so it counts as flaky, not failed.
-        assert!(body.contains("failed=1\n"));
-        assert!(body.contains("flaky=1\n"));
+        assert_eq!(body, expected_step_outputs(1, 1, "1", "0.000"));
     }
 
     #[test]
@@ -1134,8 +1342,8 @@ mod tests {
         let body = std::fs::read_to_string(temp.path()).unwrap();
         // GitHub Actions concatenates outputs from multiple writers in a
         // single step; we must append, not truncate.
-        assert!(body.starts_with("prior=value\n"));
-        assert!(body.contains("run_id=1\n"));
+        let expected = format!("prior=value\n{}", expected_step_outputs(2, 0, "1", "0.000"));
+        assert_eq!(body, expected);
     }
 
     #[test]
@@ -1149,7 +1357,8 @@ mod tests {
     #[test]
     fn emit_ci_output_skips_streamed_error_annotations() {
         // When the streaming callback already wrote error annotations,
-        // emit_ci_output must not duplicate them.
+        // emit_ci_output must not duplicate them — only the foldable
+        // groups should reach the UI.
         let run = make_run();
         let mut ui = crate::ui::test_ui::TestUI::new();
         let e = env(&[]);
@@ -1165,11 +1374,20 @@ mod tests {
             Duration::ZERO,
         )
         .unwrap();
-        let captured = ui.output.join("\n");
-        // Groups still come from the post-hoc path (we passed None for
-        // already_streamed) but error lines should not appear.
-        assert!(captured.contains("::group::tests.b"));
-        assert!(!captured.contains("::error "));
+        // ui.output() trims the trailing newline before recording, so the
+        // captured form drops the final `\n` after the last `::endgroup::`.
+        assert_eq!(
+            ui.output,
+            vec!["::group::tests.b\n\
+                 boom\n\
+                 File \"tests/b.py\", line 7, in test\n    \
+                 raise AssertionError\n\
+                 ::endgroup::\n\
+                 ::group::tests.c\n\
+                 timeout\n\
+                 ::endgroup::"
+                .to_string()]
+        );
     }
 
     #[test]
@@ -1200,6 +1418,51 @@ mod tests {
     }
 
     #[test]
+    fn write_dotenv_writes_step_outputs_to_explicit_path() {
+        // `--dotenv-path` is the GitLab path: same wire format as
+        // `$GITHUB_OUTPUT`, but written to a user-named file the pipeline
+        // declares as `artifacts:reports:dotenv:`.
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let run = make_run();
+        write_dotenv(
+            &run,
+            &[],
+            &RunId::new("7"),
+            Duration::from_millis(500),
+            temp.path(),
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(temp.path()).unwrap();
+        assert_eq!(body, expected_step_outputs(2, 0, "7", "0.500"));
+    }
+
+    #[test]
+    fn write_dotenv_truncates_existing_content() {
+        // Unlike $GITHUB_OUTPUT, the dotenv path is owned by inq for the
+        // run; pre-existing content must be replaced, not appended.
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), "stale=true\n").unwrap();
+        let run = make_run();
+        write_dotenv(&run, &[], &RunId::new("1"), Duration::ZERO, temp.path()).unwrap();
+        let body = std::fs::read_to_string(temp.path()).unwrap();
+        assert_eq!(body, expected_step_outputs(2, 0, "1", "0.000"));
+    }
+
+    #[cfg(feature = "junit")]
+    #[test]
+    fn write_junit_report_matches_export_junit_output() {
+        // `write_junit_report` is a thin wrapper around `export_junit`. We
+        // care about the exact bytes hitting disk because GitLab parses the
+        // XML structurally — any drift between the two paths would be a bug.
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let run = make_run();
+        write_junit_report(&run, temp.path()).unwrap();
+        let body = std::fs::read_to_string(temp.path()).unwrap();
+        let expected = crate::commands::export::export_junit(&run).unwrap();
+        assert_eq!(body, expected);
+    }
+
+    #[test]
     fn emit_ci_output_writes_step_outputs_for_github() {
         // The GitHub branch wires `$GITHUB_OUTPUT` through, so a downstream
         // step can read passed/failed/run_id without inq needing a separate
@@ -1224,7 +1487,6 @@ mod tests {
         )
         .unwrap();
         let body = std::fs::read_to_string(temp.path()).unwrap();
-        assert!(body.contains("run_id=99\n"));
-        assert!(body.contains("passed=1\n"));
+        assert_eq!(body, expected_step_outputs(2, 0, "99", "0.000"));
     }
 }
