@@ -454,7 +454,47 @@ on the changed lines of the PR diff, each failing test gets its own
 foldable section in the workflow log, and a markdown summary with
 pass/fail counts is rendered on the workflow run page.
 
-Minimal usage:
+### Using the `jelmer/inquest` action
+
+The simplest way to wire inquest into a workflow is the bundled composite
+action. It installs `inq` (prebuilt binary if available, `cargo install`
+fallback), restores and saves the `.inquest` history cache, and runs
+`inq ci`:
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jelmer/inquest@main
+```
+
+Once `v0` is tagged, pin to `@v0` (or a specific release) instead of
+`@main` for stability.
+
+Inputs:
+
+- `version` (default `latest`): inquest release to install, e.g. `0.1.5`.
+- `args` (default empty): extra arguments forwarded to `inq ci`, e.g.
+  `--retry=2` or `-j 4`.
+- `working-directory` (default workspace root): where to run `inq ci` and
+  where the `.inquest` cache lives.
+- `cache` (default `true`): set to `false` to skip the history cache.
+- `cache-key-prefix` (default `inquest`): override if multiple jobs in
+  the same repo should keep separate histories.
+- `install-cargo-fallback` (default `true`): set to `false` to fail when
+  no prebuilt binary exists for the runner (useful when you want
+  predictable cold-start times).
+
+The action exposes the `inq ci` exit code as the `exit-code` output, so
+follow-up steps can branch on it without losing the workflow's overall
+pass/fail signal.
+
+### Manual setup
+
+If you'd rather not depend on the action, install inquest yourself and
+call `inq ci` directly:
 
 ```yaml
 jobs:
@@ -477,6 +517,7 @@ when piping output through another tool that strips the env var).
 directory across CI runs unlocks the features that depend on history:
 the `frequent-failing-first` ordering (so a known-bad test fails the run
 fast), the slow-test warnings, the `auto` timeout, and ETA reporting.
+The `jelmer/inquest` action does this for you; the manual equivalent is:
 
 ```yaml
 - uses: actions/cache@v4

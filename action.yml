@@ -1,0 +1,184 @@
+name: inquest
+description: Run tests with inquest and publish CI-friendly output (log groups, inline annotations, job summary)
+author: Jelmer Vernooĳ
+branding:
+  icon: search
+  color: blue
+
+inputs:
+  version:
+    description: |
+      Version of inquest to install (e.g. "0.1.5"). Defaults to "latest",
+      which resolves to the latest GitHub release of jelmer/inquest.
+    required: false
+    default: latest
+
+  args:
+    description: |
+      Additional arguments passed to `inq ci`. Examples: "--retry=2",
+      "--order=spread", "-j 4". The `--format` flag is left to autodetection
+      unless you set it here.
+    required: false
+    default: ""
+
+  working-directory:
+    description: |
+      Directory to run `inq ci` in. Defaults to the workspace root. The
+      `.inquest` cache (if enabled) lives under this directory.
+    required: false
+    default: ""
+
+  cache:
+    description: |
+      Restore and save the `.inquest` directory across runs so the
+      history-aware features (frequent-failing-first ordering, slow-test
+      warnings, auto timeouts, ETA) have something to work with. Set to
+      "false" to skip.
+    required: false
+    default: "true"
+
+  cache-key-prefix:
+    description: |
+      Prefix for the `.inquest` cache key. Override if you run inquest in
+      multiple distinct jobs in the same repo and want them to keep
+      separate histories.
+    required: false
+    default: inquest
+
+  install-cargo-fallback:
+    description: |
+      When no prebuilt binary is available for the requested version, fall
+      back to `cargo install inquest@<version>`. Set to "false" to fail
+      hard instead.
+    required: false
+    default: "true"
+
+outputs:
+  exit-code:
+    description: Exit code from `inq ci` (0 on success, non-zero on test failures).
+    value: ${{ steps.run.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve inquest version
+      id: resolve
+      shell: bash
+      env:
+        REQUESTED_VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        if [ "$REQUESTED_VERSION" = "latest" ]; then
+          # Take the latest non-prerelease tag from this action's source repo.
+          tag=$(gh release view --repo jelmer/inquest --json tagName --jq .tagName)
+        else
+          # Normalise "0.1.5" and "v0.1.5" both to "v0.1.5".
+          case "$REQUESTED_VERSION" in
+            v*) tag="$REQUESTED_VERSION" ;;
+            *)  tag="v$REQUESTED_VERSION" ;;
+          esac
+        fi
+        version="${tag#v}"
+        echo "tag=$tag"         >> "$GITHUB_OUTPUT"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    - name: Cache inquest binary
+      id: bin-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/inq
+        key: inquest-bin-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.version }}
+
+    - name: Download prebuilt inquest
+      id: prebuilt
+      if: steps.bin-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        TAG: ${{ steps.resolve.outputs.tag }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        # Releases (when published) name binaries by target triple, e.g.
+        # inq-x86_64-unknown-linux-gnu. Match the current runner.
+        case "${{ runner.os }}-${{ runner.arch }}" in
+          Linux-X64)   target=x86_64-unknown-linux-gnu ;;
+          Linux-ARM64) target=aarch64-unknown-linux-gnu ;;
+          macOS-X64)   target=x86_64-apple-darwin ;;
+          macOS-ARM64) target=aarch64-apple-darwin ;;
+          Windows-X64) target=x86_64-pc-windows-msvc ;;
+          *)
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No prebuilt target for ${{ runner.os }}-${{ runner.arch }}; will try cargo install"
+            exit 0
+            ;;
+        esac
+        asset="inq-${target}.tar.gz"
+        tmpdir=$(mktemp -d)
+        if gh release download "$TAG" --repo jelmer/inquest --pattern "$asset" --dir "$tmpdir" 2>/dev/null; then
+          tar -xzf "$tmpdir/$asset" -C "$tmpdir"
+          mkdir -p "$HOME/.cargo/bin"
+          mv "$tmpdir/inq" "$HOME/.cargo/bin/inq"
+          chmod +x "$HOME/.cargo/bin/inq"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "found=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::No prebuilt binary for $TAG/$target; falling back to cargo install"
+        fi
+
+    - name: Install via cargo
+      if: steps.bin-cache.outputs.cache-hit != 'true' && steps.prebuilt.outputs.found != 'true'
+      shell: bash
+      env:
+        VERSION: ${{ steps.resolve.outputs.version }}
+        FALLBACK_ALLOWED: ${{ inputs.install-cargo-fallback }}
+      run: |
+        set -euo pipefail
+        if [ "$FALLBACK_ALLOWED" != "true" ]; then
+          echo "::error::No prebuilt binary for inquest $VERSION on this runner, and install-cargo-fallback=false"
+          exit 1
+        fi
+        if ! command -v cargo >/dev/null 2>&1; then
+          echo "::error::cargo is not available; either pre-install Rust or use a runner image that has it"
+          exit 1
+        fi
+        cargo install --locked --version "$VERSION" inquest
+
+    - name: Add cargo bin to PATH
+      shell: bash
+      run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+    - name: Resolve working directory
+      id: wd
+      shell: bash
+      env:
+        REQUESTED: ${{ inputs.working-directory }}
+      run: |
+        if [ -z "$REQUESTED" ]; then
+          echo "path=${{ github.workspace }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "path=$REQUESTED" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Restore inquest history cache
+      if: inputs.cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.wd.outputs.path }}/.inquest
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ github.run_id }}
+        restore-keys: |
+          ${{ inputs.cache-key-prefix }}-${{ runner.os }}-
+
+    - name: Run inq ci
+      id: run
+      shell: bash
+      working-directory: ${{ steps.wd.outputs.path }}
+      env:
+        INQ_ARGS: ${{ inputs.args }}
+      run: |
+        set +e
+        # shellcheck disable=SC2086
+        inq ci $INQ_ARGS
+        code=$?
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        exit $code
