@@ -167,7 +167,16 @@ pub struct TestExecutorConfig {
     /// the usual forwarding. Used by the MCP server to surface stderr on the
     /// response when a run fails to produce subunit output.
     pub stderr_capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+    /// Invoked once per completed test as soon as the executor parses its
+    /// result. Used by `inq ci` to emit streaming CI annotations, so failures
+    /// appear in the workflow log the moment they happen rather than after the
+    /// whole run finishes. `None` skips the per-result hook entirely.
+    pub result_callback: Option<ResultCallback>,
 }
+
+/// Per-result callback fired by the executor as each test completes. Shared
+/// across worker threads, so it must be `Send + Sync`.
+pub type ResultCallback = std::sync::Arc<dyn Fn(&TestResult) + Send + Sync>;
 
 impl TestExecutorConfig {
     fn output_filter(&self) -> subunit_stream::OutputFilter {
@@ -453,6 +462,7 @@ impl<'a> TestExecutor<'a> {
             let eta_state_for_thread = eta_state
                 .clone()
                 .unwrap_or_else(|| EtaState::new(Duration::ZERO));
+            let result_callback_for_thread = self.config.result_callback.clone();
 
             let parse_thread = std::thread::spawn(move || {
                 let progress_bar_for_bytes = progress_bar_clone.clone();
@@ -483,6 +493,11 @@ impl<'a> TestExecutor<'a> {
                     },
                     |bytes| {
                         write_non_subunit_output(&progress_bar_for_bytes, bytes);
+                    },
+                    |result| {
+                        if let Some(cb) = &result_callback_for_thread {
+                            cb(result);
+                        }
                     },
                     output_filter,
                 )
@@ -949,6 +964,7 @@ impl<'a> TestExecutor<'a> {
                 let overall_eta_state_for_thread = overall_eta_state.clone();
 
                 let output_filter_clone = output_filter;
+                let result_callback_for_worker = self.config.result_callback.clone();
                 let parse_thread = std::thread::spawn(move || {
                     let worker_bar_for_bytes = worker_bar_clone.clone();
                     let mut tracker = BarProgress::new(
@@ -1013,6 +1029,11 @@ impl<'a> TestExecutor<'a> {
                         },
                         |bytes| {
                             write_non_subunit_output(&worker_bar_for_bytes, bytes);
+                        },
+                        |result| {
+                            if let Some(cb) = &result_callback_for_worker {
+                                cb(result);
+                            }
                         },
                         output_filter_clone,
                     )

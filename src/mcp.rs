@@ -1370,6 +1370,7 @@ impl InquestMcpService {
             run_id.clone(),
             |_test_id, _status| {},
             |_bytes| {},
+            |_result| {},
             subunit_stream::OutputFilter::All,
         )
         .map_err(to_mcp_err)?;

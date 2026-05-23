@@ -114,18 +114,24 @@ pub fn parse_stream_bytes(data: &[u8], run_id: RunId) -> Result<TestRun> {
 /// - OutputFilter::All: Show all output immediately
 /// - OutputFilter::FailuresOnly: Only show output from failed/unexpected success tests
 ///
+/// The result_callback is called once per completed test with the assembled
+/// `TestResult`, so callers can react to results as they arrive (e.g. emit
+/// streaming CI annotations) without waiting for the run to finish.
+///
 /// If the stream is incomplete or interrupted, returns partial results collected before the error.
 /// Returns an error only for invalid timestamps in otherwise valid events.
-pub fn parse_stream_with_progress<R: Read, F, B>(
+pub fn parse_stream_with_progress<R: Read, F, B, R2>(
     reader: R,
     run_id: RunId,
     mut progress_callback: F,
     mut bytes_callback: B,
+    mut result_callback: R2,
     output_filter: OutputFilter,
 ) -> Result<TestRun>
 where
     F: FnMut(&str, ProgressStatus),
     B: FnMut(&[u8]),
+    R2: FnMut(&TestResult),
 {
     use std::collections::HashMap;
 
@@ -363,14 +369,16 @@ where
                         None
                     };
 
-                    test_run.add_result(TestResult {
+                    let result = TestResult {
                         test_id,
                         status,
                         duration,
                         message,
                         details,
                         tags,
-                    });
+                    };
+                    result_callback(&result);
+                    test_run.add_result(result);
                 }
             }
         }

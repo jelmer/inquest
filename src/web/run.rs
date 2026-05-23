@@ -319,6 +319,7 @@ fn drive_child_run(
                 emit(&history_for_parser, &tx_for_parser, event);
             },
             |_bytes| {},
+            |_result| {},
             crate::subunit_stream::OutputFilter::FailuresOnly,
         )
     })

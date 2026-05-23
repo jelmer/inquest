@@ -138,6 +138,7 @@ impl Command for LastCommand {
                     // Output callback - write to UI
                     let _ = ui.output_bytes(bytes);
                 },
+                |_result| {},
                 output_filter,
             )?;
 
