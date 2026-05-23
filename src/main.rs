@@ -384,6 +384,56 @@ enum Commands {
         testargs: Vec<String>,
     },
 
+    /// Run tests with output formatted for a CI provider
+    ///
+    /// Detects GitHub Actions or GitLab CI from the environment and emits
+    /// log groups per failing test, inline annotations, and (on GitHub) a
+    /// markdown summary written to $GITHUB_STEP_SUMMARY.
+    ///
+    /// To carry test history across CI runs, restore .inquest from cache
+    /// before this step and save it after, then point `-C .` at it.
+    /// Example workflow snippet: cache `.inquest` keyed on `github.run_id`
+    /// with `restore-keys: inquest-`, then `inq ci`.
+    Ci {
+        /// CI provider format: auto (detect), github, gitlab, or plain
+        #[arg(long, default_value = "auto")]
+        format: String,
+
+        /// Re-run failing tests N times; tests that pass on retry are
+        /// reported as warnings instead of errors (CI stays green)
+        #[arg(long, default_value_t = 0, value_name = "N")]
+        retry: usize,
+
+        /// Test ordering. Defaults to "frequent-failing-first" when the
+        /// repository has run history, otherwise "discovery".
+        #[arg(long, value_name = "ORDER")]
+        order: Option<String>,
+
+        /// Number of parallel test workers
+        #[arg(long, short = 'j', value_name = "N", alias = "concurrency", num_args = 0..=1, default_missing_value = "0")]
+        parallel: Option<usize>,
+
+        /// Per-test timeout: "5m", "auto", or "disabled"
+        #[arg(long, value_name = "TIMEOUT")]
+        test_timeout: Option<String>,
+
+        /// Overall run timeout: "30m", "auto", or "disabled"
+        #[arg(long, value_name = "DURATION")]
+        max_duration: Option<String>,
+
+        /// Test ID filters (regex patterns)
+        #[arg(value_name = "TESTFILTER")]
+        testfilters: Vec<String>,
+
+        /// Run only tests whose ID starts with this prefix. May repeat.
+        #[arg(long = "starting-with", short = 's', value_name = "TESTID")]
+        starting_with: Vec<String>,
+
+        /// Additional arguments to pass to the test command (use after --)
+        #[arg(last = true, value_name = "TESTARGS")]
+        testargs: Vec<String>,
+    },
+
     /// Run tests and load results
     Run {
         /// Run only the tests that failed in the last run
@@ -887,6 +937,69 @@ fn main() {
         Commands::Web { bind, port, open } => {
             let cmd = inquest::commands::WebCommand::new(cli.directory, bind, port, open);
 
+            cmd.execute(&mut ui)
+        }
+        Commands::Ci {
+            format,
+            retry,
+            order,
+            parallel,
+            test_timeout,
+            max_duration,
+            testfilters,
+            starting_with,
+            testargs,
+        } => {
+            let format = match format.parse::<inquest::commands::CiFormat>() {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::error!("{}", e);
+                    std::process::exit(1);
+                }
+            };
+            let test_order = match order {
+                Some(s) => match s.parse::<inquest::ordering::TestOrder>() {
+                    Ok(o) => Some(o),
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
+            let test_timeout = match test_timeout {
+                Some(s) => match TimeoutSetting::parse(&s) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => TimeoutSetting::Disabled,
+            };
+            let max_duration = match max_duration {
+                Some(s) => match TimeoutSetting::parse(&s) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        std::process::exit(1);
+                    }
+                },
+                None => TimeoutSetting::Disabled,
+            };
+            let cmd = inquest::commands::CiCommand {
+                base_path: cli.directory,
+                format,
+                retries: retry,
+                order: test_order,
+                test_filters: testfilters,
+                starting_with,
+                concurrency: parallel,
+                test_timeout,
+                max_duration,
+                test_args: testargs,
+                profile,
+            };
             cmd.execute(&mut ui)
         }
         Commands::Run {
