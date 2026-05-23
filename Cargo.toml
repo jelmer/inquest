@@ -10,7 +10,7 @@ keywords = ["subunit", "testrunner", "unittest", "testing"]
 categories = ["development-tools::testing"]
 
 [features]
-default = ["gdbm", "testr", "junit"]
+default = ["testr", "junit"]
 testr = []
 gdbm = ["testr", "dep:gdbm"]
 junit = ["dep:quick-junit"]
