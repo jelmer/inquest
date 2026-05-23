@@ -153,7 +153,13 @@ runs:
           echo "::error::cargo is not available; either pre-install Rust or use a runner image that has it"
           exit 1
         fi
-        cargo install --locked --version "$VERSION" inquest
+        # Build without default features so the fallback stays hermetic:
+        # the gdbm feature links against libgdbm (an extra apt/brew step
+        # away on standard runners), and testr/junit pull in adapters that
+        # are not required for the formats `inq ci` consumes in CI.
+        cargo install --locked --version "$VERSION" \
+          --no-default-features \
+          inquest
 
     - name: Add cargo bin to PATH
       shell: bash
@@ -173,10 +179,14 @@ runs:
 
     - name: Restore inquest history cache
       if: inputs.cache == 'true'
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
         path: ${{ steps.wd.outputs.path }}/.inquest
-        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ github.run_id }}
+        # Always restore the latest cache for this project (any prior run),
+        # so slow-test timings and frequent-failing-first ordering carry
+        # across every run regardless of commit. The save step below uses a
+        # run-unique key so the updated history is always written back.
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-
         restore-keys: |
           ${{ inputs.cache-key-prefix }}-${{ runner.os }}-
 
@@ -193,3 +203,14 @@ runs:
         code=$?
         echo "exit-code=$code" >> "$GITHUB_OUTPUT"
         exit $code
+
+    - name: Save inquest history cache
+      # Runs even on test failure so the updated history (timings, failure
+      # counts) is captured. A fresh key per run guarantees the save happens;
+      # the restore step above picks up the most recent of these on the next
+      # run via its prefix.
+      if: inputs.cache == 'true' && always()
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.wd.outputs.path }}/.inquest
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
