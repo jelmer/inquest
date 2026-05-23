@@ -153,7 +153,13 @@ runs:
           echo "::error::cargo is not available; either pre-install Rust or use a runner image that has it"
           exit 1
         fi
-        cargo install --locked --version "$VERSION" inquest
+        # Build without default features so the fallback stays hermetic:
+        # the gdbm feature links against libgdbm (an extra apt/brew step
+        # away on standard runners), and testr/junit pull in adapters that
+        # are not required for the formats `inq ci` consumes in CI.
+        cargo install --locked --version "$VERSION" \
+          --no-default-features \
+          inquest
 
     - name: Add cargo bin to PATH
       shell: bash
