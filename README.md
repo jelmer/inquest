@@ -111,6 +111,34 @@ Options:
 - `TESTFILTER`: Regex patterns to filter which tests to run
 - `-- TESTARGS`: Additional arguments passed through to the test command
 
+### `inq ci`
+
+Run tests with output formatted for a CI provider. Wraps `inq run` with
+CI-friendly defaults and emits structured output that GitHub Actions or
+GitLab CI can render natively: foldable log groups per failing test,
+inline annotations on the changed lines, and a markdown job summary.
+
+Options:
+- `--format <auto|github|gitlab|plain>`: Output format. `auto` (default)
+  detects `GITHUB_ACTIONS=true` or `GITLAB_CI=true` from the environment
+  and falls back to `plain` otherwise.
+- `--retry <N>`: Re-run failing tests up to N times. Tests that pass on
+  retry are reported as warnings (the run still succeeds) rather than
+  errors. Opt-in; defaults to `0` so the first run is the honest signal.
+- `--order <ORDER>`: Test ordering. Defaults to `frequent-failing-first`
+  when the repository has run history (so known-bad tests fail fast),
+  otherwise `discovery`. Accepts the same vocabulary as `inq run --order`.
+- `-j, --parallel <N>`: Parallel worker count.
+- `--test-timeout <TIMEOUT>` / `--max-duration <DURATION>`: Timeout
+  overrides, same syntax as `inq run`.
+- `-s, --starting-with <PREFIX>`: Restrict to tests with the given prefix.
+- `TESTFILTER`: Regex patterns to filter which tests to run.
+- `-- TESTARGS`: Additional arguments passed through to the test command.
+
+See [GitHub Actions](#github-actions) below for a workflow example,
+including how to cache the `.inquest` directory across runs so the
+ordering heuristics have history to work with.
+
 ### `inq rerun`
 
 Re-run exactly the tests of a previous run, in the same order, forwarding the same `--`-style test arguments captured in the run's metadata. Without an argument, re-runs the latest run.
@@ -417,6 +445,79 @@ test_run_concurrency = "nproc"
 # Group tests by module (keeps related tests together)
 group_regex = "^(.*)::[^:]+$"
 ```
+
+## GitHub Actions
+
+`inq ci` formats test results as GitHub Actions workflow commands when it
+detects it's running inside a workflow. Failures show up as red annotations
+on the changed lines of the PR diff, each failing test gets its own
+foldable section in the workflow log, and a markdown summary with
+pass/fail counts is rendered on the workflow run page.
+
+Minimal usage:
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo install inquest
+      - run: inq ci
+```
+
+`inq ci` defaults to `--format=auto`, which detects `GITHUB_ACTIONS=true`
+in the environment and switches to the GitHub workflow-command format on
+its own. Pass `--format=github` explicitly if you want to force it (e.g.
+when piping output through another tool that strips the env var).
+
+### Caching test history across runs
+
+`inq` stores test history in a `.inquest/` directory. Persisting that
+directory across CI runs unlocks the features that depend on history:
+the `frequent-failing-first` ordering (so a known-bad test fails the run
+fast), the slow-test warnings, the `auto` timeout, and ETA reporting.
+
+```yaml
+- uses: actions/cache@v4
+  with:
+    path: .inquest
+    key: inquest-${{ github.run_id }}
+    restore-keys: inquest-
+- run: inq ci
+```
+
+The `restore-keys` prefix means any prior `inquest-*` cache entry is
+acceptable on a miss, so a fresh PR branch inherits history from `main`
+rather than starting empty. If your `.inquest/` directory lives somewhere
+other than the workspace root, pass `-C <path>` to point `inq` at it.
+
+### Tolerating flakes
+
+Use `--retry=N` to re-run failing tests up to N times. A test that passes
+on retry is reported as a `::warning::` annotation (still visible on the
+PR diff) but does not fail the run. Tests that still fail after every
+retry remain `::error::` annotations.
+
+```yaml
+- run: inq ci --retry=2
+```
+
+Retries are opt-in so the first run is always the honest signal; turn
+them on when you actively want flake tolerance.
+
+### Sharding across matrix jobs
+
+Combine `inq ci` with `inq shard` (see above) to split a large suite
+across parallel runners. Each shard produces its own annotations and
+summary section; if you also restore the same cache key in each shard,
+ordering decisions stay consistent across the matrix.
+
+### GitLab CI
+
+`--format=gitlab` (or `--format=auto` when `GITLAB_CI=true` is set) emits
+the same workflow-command wire format. GitLab renders the annotations in
+its job log; the markdown summary is GitHub-specific and is skipped.
 
 ## Repository Format
 

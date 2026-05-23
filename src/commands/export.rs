@@ -178,7 +178,7 @@ fn export_junit(test_run: &TestRun) -> Result<String> {
 /// Tests that lack file/line information in their traceback are still
 /// reported as `::error` lines without `file=`/`line=` attributes so they
 /// surface in the workflow log.
-fn export_github(test_run: &TestRun) -> String {
+pub(crate) fn export_github(test_run: &TestRun) -> String {
     let mut out = String::new();
 
     let mut results: Vec<_> = test_run.results.values().collect();
@@ -224,10 +224,10 @@ fn export_github(test_run: &TestRun) -> String {
 
 /// File:line(:col) location parsed from a test's traceback.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SourceLocation {
-    file: String,
-    line: u32,
-    col: Option<u32>,
+pub(crate) struct SourceLocation {
+    pub(crate) file: String,
+    pub(crate) line: u32,
+    pub(crate) col: Option<u32>,
 }
 
 /// Try to recover a source-file location from a test's traceback. Recognises
@@ -236,7 +236,7 @@ struct SourceLocation {
 /// formats. Returns the *last* match in the traceback (most-deeply-nested
 /// frame) so the annotation points at the failure site rather than the test
 /// harness entry-point.
-fn extract_source_location(details: &str) -> Option<SourceLocation> {
+pub(crate) fn extract_source_location(details: &str) -> Option<SourceLocation> {
     use regex::Regex;
 
     static PATTERNS: std::sync::OnceLock<Vec<Regex>> = std::sync::OnceLock::new();
@@ -271,7 +271,7 @@ fn extract_source_location(details: &str) -> Option<SourceLocation> {
 
 /// Escape the value of a workflow-command parameter (`file=`, `line=`, ...).
 /// GitHub uses URL-style percent-encoding for `%`, `\r`, `\n`, `:`, `,`.
-fn escape_param(s: &str) -> String {
+pub(crate) fn escape_param(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
@@ -288,7 +288,7 @@ fn escape_param(s: &str) -> String {
 
 /// Escape the message portion of a workflow command. Only `%`, `\r`, and
 /// `\n` need encoding; `:` and `,` are allowed in the message body.
-fn escape_data(s: &str) -> String {
+pub(crate) fn escape_data(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
