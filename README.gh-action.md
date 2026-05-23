@@ -74,18 +74,27 @@ fast), the slow-test warnings, the `auto` timeout, and ETA reporting.
 The `jelmer/inquest` action does this for you; the manual equivalent is:
 
 ```yaml
-- uses: actions/cache@v4
+- uses: actions/cache/restore@v4
   with:
     path: .inquest
-    key: inquest-${{ github.run_id }}
+    key: inquest-
     restore-keys: inquest-
 - run: inq ci
+- if: always()
+  uses: actions/cache/save@v4
+  with:
+    path: .inquest
+    key: inquest-${{ github.run_id }}-${{ github.run_attempt }}
 ```
 
-The `restore-keys` prefix means any prior `inquest-*` cache entry is
-acceptable on a miss, so a fresh PR branch inherits history from `main`
-rather than starting empty. If your `.inquest/` directory lives somewhere
-other than the workspace root, pass `-C <path>` to point `inq` at it.
+Splitting restore and save (rather than a single `actions/cache@v4` step)
+is what makes history accumulate. `actions/cache` only saves when the
+primary key wasn't already a hit, so a constant key freezes after the
+first run. With the split form, the restore uses a project-wide prefix
+to pick up the latest cache from any prior run, and the save uses a
+run-unique key so the updated `.inquest/` is always written back. If
+your `.inquest/` directory lives somewhere other than the workspace
+root, pass `-C <path>` to point `inq` at it.
 
 ## Tolerating flakes
 
