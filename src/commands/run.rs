@@ -424,35 +424,33 @@ impl RunCommand {
             );
         }
 
-        let concurrency = if let Some(explicit_concurrency) = self.concurrency {
-            if explicit_concurrency == 0 {
-                let cpu_count = num_cpus::get();
+        let (concurrency, concurrency_source) = test_cmd.resolve_concurrency(self.concurrency)?;
+        match &concurrency_source {
+            crate::testcommand::ConcurrencySource::AutoDetected(cpus) => {
                 if self.implicit_run {
                     ui.output(&format!(
                         "Running in parallel mode across {} CPUs (auto-detected). \
                          Run `inq run` to disable parallel mode, or `inq run -j N` to set a specific worker count.",
-                        cpu_count
+                        cpus
                     ))?;
                 } else {
                     ui.output(&format!(
                         "Auto-detected {} CPUs for parallel execution",
-                        cpu_count
+                        cpus
                     ))?;
                 }
-                cpu_count
-            } else {
-                explicit_concurrency
             }
-        } else if let Some(callout_concurrency) = test_cmd.get_concurrency()? {
-            ui.output(&format!(
-                "Using concurrency from test_run_concurrency: {}",
-                callout_concurrency
-            ))?;
-            callout_concurrency
-        } else {
-            suggest_parallel_for_explicit_run(ui, &test_ids, &historical_times)?;
-            1
-        };
+            crate::testcommand::ConcurrencySource::ConfigCallout(c) => {
+                ui.output(&format!(
+                    "Using concurrency from test_run_concurrency: {}",
+                    c
+                ))?;
+            }
+            crate::testcommand::ConcurrencySource::Default => {
+                suggest_parallel_for_explicit_run(ui, &test_ids, &historical_times)?;
+            }
+            crate::testcommand::ConcurrencySource::Explicit => {}
+        }
 
         let calibration_debug =
             crate::eta::calibration_debug(&calibration_samples, concurrency as u32);
