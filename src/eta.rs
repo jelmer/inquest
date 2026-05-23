@@ -209,6 +209,14 @@ impl EtaState {
             .in_flight
             .remove(test_id)
             .map_or(expected, |(started_at, _)| started_at.elapsed());
+        Self::apply_completion(&mut progress, actual, expected);
+    }
+
+    /// Apply the completion accounting given a known `actual` runtime. Split
+    /// out from [`add_completed`] so tests can drive the math with a chosen
+    /// `actual` rather than relying on a `thread::sleep` between
+    /// `mark_started` and `add_completed`.
+    fn apply_completion(progress: &mut EtaProgress, actual: Duration, expected: Duration) {
         progress.completed_duration += actual;
         // Refine the target: if the test ran faster than predicted, the
         // remaining work shrinks; if slower, it grows. Without this the
@@ -219,6 +227,17 @@ impl EtaState {
         } else {
             progress.estimated_total = progress.estimated_total.saturating_sub(expected - actual);
         }
+    }
+
+    /// Test-only: complete a test with an explicit `actual` runtime, bypassing
+    /// the `Instant::now()`-based timing used by [`add_completed`]. Tests use
+    /// this to verify the completion math deterministically without relying
+    /// on real sleeps.
+    #[cfg(test)]
+    fn add_completed_with_actual(&self, test_id: &TestId, expected: Duration, actual: Duration) {
+        let mut progress = self.progress.lock().unwrap();
+        progress.in_flight.remove(test_id);
+        Self::apply_completion(&mut progress, actual, expected);
     }
 
     /// Render the ETA string for indicatif's `{eta_hist}` template key.
@@ -691,70 +710,45 @@ mod tests {
 
     #[test]
     fn eta_state_estimated_total_shrinks_when_test_is_fast() {
+        // actual = 0, expected = 60s. estimated_total should shrink by 60s.
         let state = EtaState::new(Duration::from_secs(100));
         state.mark_started(&TestId::new("a"), Duration::from_secs(60));
-        // No sleep: actual ≈ 0, expected = 60s. estimated_total should
-        // shrink by ~60s.
-        state.add_completed(&TestId::new("a"), Duration::from_secs(60));
-        let total = state.estimated_total();
-        assert!(
-            total < Duration::from_secs(41),
-            "estimated_total = {:?}, expected ≈40s",
-            total
-        );
-        assert!(
-            total > Duration::from_secs(39),
-            "estimated_total = {:?}, expected ≈40s",
-            total
-        );
+        state.add_completed_with_actual(&TestId::new("a"), Duration::from_secs(60), Duration::ZERO);
+        assert_eq!(state.estimated_total(), Duration::from_secs(40));
     }
 
     #[test]
     fn eta_state_estimated_total_grows_when_test_is_slow() {
         // A test that runs longer than its history pushes estimated_total up
-        // by (actual - expected). With expected = 50ms and an actual of
-        // roughly 200ms, estimated_total should grow by ~150ms.
+        // by (actual - expected). Driven with explicit `actual` so the math
+        // is deterministic and CI scheduling jitter can't perturb it.
         let state = EtaState::new(Duration::from_secs(1));
         state.mark_started(&TestId::new("a"), Duration::from_millis(50));
-        std::thread::sleep(Duration::from_millis(200));
-        state.add_completed(&TestId::new("a"), Duration::from_millis(50));
-        let total = state.estimated_total();
-        // Correct: 1000ms + (~200ms - 50ms) ≈ 1150ms. The `actual + expected`
-        // mutant would instead add ~250ms, landing past 1200ms.
-        assert!(
-            total > Duration::from_millis(1100),
-            "estimated_total = {:?}, expected to grow past 1100ms",
-            total
+        state.add_completed_with_actual(
+            &TestId::new("a"),
+            Duration::from_millis(50),
+            Duration::from_millis(200),
         );
-        assert!(
-            total < Duration::from_millis(1200),
-            "estimated_total = {:?}, expected below 1200ms",
-            total
-        );
+        // Correct: 1000ms + (200ms - 50ms) = 1150ms. The `actual + expected`
+        // mutant would add 250ms instead, landing at 1250ms.
+        assert_eq!(state.estimated_total(), Duration::from_millis(1150));
     }
 
     #[test]
     fn eta_state_estimated_total_shrink_uses_expected_minus_actual() {
         // A test that finishes faster than predicted shrinks estimated_total
-        // by (expected - actual). With expected = 300ms and an actual of
-        // roughly 60ms, the target should drop by ~240ms.
+        // by (expected - actual). Driven with explicit `actual` so the math
+        // is deterministic.
         let state = EtaState::new(Duration::from_secs(1));
         state.mark_started(&TestId::new("a"), Duration::from_millis(300));
-        std::thread::sleep(Duration::from_millis(60));
-        state.add_completed(&TestId::new("a"), Duration::from_millis(300));
-        let total = state.estimated_total();
-        // Correct: 1000ms - (300ms - ~60ms) ≈ 760ms. The `expected + actual`
-        // mutant would subtract ~360ms instead, landing below 700ms.
-        assert!(
-            total > Duration::from_millis(710),
-            "estimated_total = {:?}, expected above 710ms",
-            total
+        state.add_completed_with_actual(
+            &TestId::new("a"),
+            Duration::from_millis(300),
+            Duration::from_millis(60),
         );
-        assert!(
-            total < Duration::from_millis(810),
-            "estimated_total = {:?}, expected below 810ms",
-            total
-        );
+        // Correct: 1000ms - (300ms - 60ms) = 760ms. The `expected + actual`
+        // mutant would subtract 360ms instead, landing at 640ms.
+        assert_eq!(state.estimated_total(), Duration::from_millis(760));
     }
 
     #[test]
