@@ -87,7 +87,12 @@ runs:
       id: bin-cache
       uses: actions/cache@v4
       with:
-        path: ~/.cargo/bin/inq
+        # `inq.exe` on Windows, `inq` everywhere else. actions/cache happily
+        # caches a non-existent path on miss and ignores missing entries on
+        # hit, so listing both is safe.
+        path: |
+          ~/.cargo/bin/inq
+          ~/.cargo/bin/inq.exe
         key: inquest-bin-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.version }}
 
     - name: Download prebuilt inquest
@@ -99,27 +104,33 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # Releases (when published) name binaries by target triple, e.g.
-        # inq-x86_64-unknown-linux-gnu. Match the current runner.
+        # Release assets are named by target triple, e.g.
+        # inq-x86_64-unknown-linux-gnu.tar.gz (or .zip on Windows).
+        # Match the current runner.
         case "${{ runner.os }}-${{ runner.arch }}" in
-          Linux-X64)   target=x86_64-unknown-linux-gnu ;;
-          Linux-ARM64) target=aarch64-unknown-linux-gnu ;;
-          macOS-X64)   target=x86_64-apple-darwin ;;
-          macOS-ARM64) target=aarch64-apple-darwin ;;
-          Windows-X64) target=x86_64-pc-windows-msvc ;;
+          Linux-X64)   target=x86_64-unknown-linux-gnu;   ext=tar.gz; bin=inq ;;
+          Linux-ARM64) target=aarch64-unknown-linux-gnu;  ext=tar.gz; bin=inq ;;
+          macOS-X64)   target=x86_64-apple-darwin;        ext=tar.gz; bin=inq ;;
+          macOS-ARM64) target=aarch64-apple-darwin;       ext=tar.gz; bin=inq ;;
+          Windows-X64) target=x86_64-pc-windows-msvc;     ext=zip;    bin=inq.exe ;;
           *)
             echo "found=false" >> "$GITHUB_OUTPUT"
             echo "::warning::No prebuilt target for ${{ runner.os }}-${{ runner.arch }}; will try cargo install"
             exit 0
             ;;
         esac
-        asset="inq-${target}.tar.gz"
+        asset="inq-${target}.${ext}"
         tmpdir=$(mktemp -d)
         if gh release download "$TAG" --repo jelmer/inquest --pattern "$asset" --dir "$tmpdir" 2>/dev/null; then
-          tar -xzf "$tmpdir/$asset" -C "$tmpdir"
+          if [ "$ext" = "zip" ]; then
+            unzip -q "$tmpdir/$asset" -d "$tmpdir"
+          else
+            tar -xzf "$tmpdir/$asset" -C "$tmpdir"
+          fi
           mkdir -p "$HOME/.cargo/bin"
-          mv "$tmpdir/inq" "$HOME/.cargo/bin/inq"
-          chmod +x "$HOME/.cargo/bin/inq"
+          # Release tarball lays the binary out at inq-<target>/<bin>.
+          mv "$tmpdir/inq-${target}/$bin" "$HOME/.cargo/bin/$bin"
+          chmod +x "$HOME/.cargo/bin/$bin"
           echo "found=true" >> "$GITHUB_OUTPUT"
         else
           echo "found=false" >> "$GITHUB_OUTPUT"
