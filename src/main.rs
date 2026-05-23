@@ -386,16 +386,21 @@ enum Commands {
 
     /// Run tests with output formatted for a CI provider
     ///
-    /// Detects GitHub Actions or GitLab CI from the environment and emits
-    /// log groups per failing test, inline annotations, and (on GitHub) a
-    /// markdown summary written to $GITHUB_STEP_SUMMARY.
+    /// Autodetects GitHub Actions, GitLab CI, Forgejo Actions (Codeberg),
+    /// and Woodpecker CI from the environment. GitHub and GitLab get
+    /// log groups per failing test, inline annotations, and (on GitHub)
+    /// a markdown summary written to $GITHUB_STEP_SUMMARY. Forgejo
+    /// honours $GITHUB_OUTPUT for step outputs but doesn't render
+    /// workflow commands, so log markup is skipped. Use `--junit-path`
+    /// and `--dotenv-path` for artifact-based integration on any provider.
     ///
     /// To carry test history across CI runs, restore .inquest from cache
     /// before this step and save it after, then point `-C .` at it.
     /// Example workflow snippet: cache `.inquest` keyed on `github.run_id`
     /// with `restore-keys: inquest-`, then `inq ci`.
     Ci {
-        /// CI provider format: auto (detect), github, gitlab, or plain
+        /// CI provider format: auto (detect), github, gitlab, forgejo
+        /// (also: codeberg, gitea), woodpecker, or plain
         #[arg(long, default_value = "auto")]
         format: String,
 

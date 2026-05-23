@@ -1,11 +1,21 @@
 //! `inq ci` - run tests with output formatted for a CI provider.
 //!
 //! Runs the test executor directly (no `RunCommand` wrap) with CI-friendly
-//! defaults: smart ordering, CI provider auto-detection, opt-in flake retries,
-//! streaming `::error::` / `::group::` annotations as failures land in the
-//! workflow log, a markdown job summary at `$GITHUB_STEP_SUMMARY`, and
-//! step outputs written to `$GITHUB_OUTPUT` so downstream steps can read
-//! `passed`/`failed`/`flaky`/`duration`/`run_id`.
+//! defaults: smart ordering, opt-in flake retries, and provider-specific
+//! output. Autodetects GitHub Actions, GitLab CI, Forgejo Actions (Codeberg),
+//! and Woodpecker CI from environment variables; each gets only the features
+//! its runner actually renders:
+//!
+//! - **GitHub**: streaming `::error::` / `::group::` annotations as failures
+//!   land in the workflow log, a markdown job summary at
+//!   `$GITHUB_STEP_SUMMARY`, and step outputs written to `$GITHUB_OUTPUT`.
+//! - **GitLab**: collapsible `section_start` / `section_end` ANSI markers,
+//!   `::error::`/`::warning::` annotations.
+//! - **Forgejo**: no workflow-command markup (Forgejo's runner doesn't render
+//!   it), but `$GITHUB_OUTPUT` writes go through the runner's compatibility
+//!   mirror so downstream steps still see the counters.
+//! - **Woodpecker**: plain output. Provider integration happens exclusively
+//!   via the explicit `--junit-path` / `--dotenv-path` artifacts.
 //!
 //! To persist results across runs on GitHub Actions, restore the `.inquest`
 //! directory from cache before this step and save it after:
@@ -48,8 +58,18 @@ pub enum CiFormat {
     /// GitHub Actions workflow commands plus a markdown job summary when
     /// `$GITHUB_STEP_SUMMARY` is set.
     Github,
-    /// GitLab CI workflow commands (same wire format as GitHub).
+    /// GitLab CI workflow commands and collapsible-section ANSI markers.
     Gitlab,
+    /// Forgejo Actions (Codeberg). Forgejo runs workflows but does not
+    /// render GitHub's `::error::` / `::group::` workflow commands or
+    /// `$GITHUB_STEP_SUMMARY`, so we emit plain text with no markers. It
+    /// does honour `$GITHUB_OUTPUT` (mirrored from `$FORGEJO_OUTPUT`), so
+    /// step outputs still get passed to downstream jobs.
+    Forgejo,
+    /// Woodpecker CI. No workflow-command or step-summary surfaces; output
+    /// stays plain. Step outputs go through explicit `--dotenv-path` /
+    /// `--junit-path` artifacts only.
+    Woodpecker,
     /// Human-readable output with no provider-specific markers.
     Plain,
 }
@@ -62,9 +82,11 @@ impl std::str::FromStr for CiFormat {
             "auto" => Ok(CiFormat::Auto),
             "github" => Ok(CiFormat::Github),
             "gitlab" => Ok(CiFormat::Gitlab),
+            "forgejo" | "codeberg" | "gitea" => Ok(CiFormat::Forgejo),
+            "woodpecker" => Ok(CiFormat::Woodpecker),
             "plain" | "none" => Ok(CiFormat::Plain),
             other => Err(format!(
-                "unknown ci format '{}': expected auto, github, gitlab, or plain",
+                "unknown ci format '{}': expected auto, github, gitlab, forgejo, woodpecker, or plain",
                 other
             )),
         }
@@ -73,14 +95,21 @@ impl std::str::FromStr for CiFormat {
 
 impl CiFormat {
     /// Resolve `Auto` against the current environment. Concrete formats are
-    /// returned unchanged.
+    /// returned unchanged. Forgejo is checked before GitHub because Forgejo's
+    /// runner sets both `FORGEJO_ACTIONS` and `GITHUB_ACTIONS` for
+    /// GitHub-Actions compatibility — if we matched on `GITHUB_ACTIONS`
+    /// first we'd misclassify every Forgejo job.
     fn resolve(self, env: &dyn EnvLookup) -> CiFormat {
         match self {
             CiFormat::Auto => {
-                if env.get("GITHUB_ACTIONS").as_deref() == Some("true") {
+                if env.get("FORGEJO_ACTIONS").as_deref() == Some("true") {
+                    CiFormat::Forgejo
+                } else if env.get("GITHUB_ACTIONS").as_deref() == Some("true") {
                     CiFormat::Github
                 } else if env.get("GITLAB_CI").as_deref() == Some("true") {
                     CiFormat::Gitlab
+                } else if env.get("CI").as_deref() == Some("woodpecker") {
+                    CiFormat::Woodpecker
                 } else {
                     CiFormat::Plain
                 }
@@ -596,12 +625,29 @@ fn emit_ci_output(
     duration: Duration,
 ) -> Result<()> {
     match format {
+        // Plain and Auto stay silent: the test runner already printed each
+        // failure, and there are no provider-specific markers to add.
         CiFormat::Plain | CiFormat::Auto => Ok(()),
+
+        // Woodpecker has no log-markup or env-driven output surfaces;
+        // anything provider-specific would just be noise in the log. Users
+        // rely on `--junit-path` / `--dotenv-path` for artifacts.
+        CiFormat::Woodpecker => Ok(()),
+
+        // Forgejo Actions doesn't render workflow commands or step
+        // summaries, but it does honour `$GITHUB_OUTPUT` (mirrored from
+        // `$FORGEJO_OUTPUT`), so downstream steps can still read the
+        // run's pass/fail/flaky counters.
+        CiFormat::Forgejo => {
+            write_github_output(env, run, flaky, run_id, duration)?;
+            Ok(())
+        }
+
         CiFormat::Github | CiFormat::Gitlab => {
             let mut out = String::new();
 
-            // Per-failing-test log groups (foldable in the workflow log). Skip
-            // any test whose group was already streamed live during the run.
+            // Per-failing-test log groups (foldable in the workflow log).
+            // Skip any id streamed live during the run.
             out.push_str(&format_failure_groups(run, already_streamed, format));
 
             // Warning annotations for recovered (flaky) tests. Always
@@ -625,9 +671,7 @@ fn emit_ci_output(
                 ui.output(out.trim_end_matches('\n'))?;
             }
 
-            // GitHub-only: markdown summary + step outputs. Both no-op when
-            // their env vars are unset (i.e. running locally with
-            // `--format=github`).
+            // GitHub-only: markdown summary + step outputs.
             if format == CiFormat::Github {
                 if let Some(path) = env.get("GITHUB_STEP_SUMMARY") {
                     let summary = format_step_summary(run, flaky);
@@ -1076,10 +1120,51 @@ mod tests {
     }
 
     #[test]
+    fn ci_format_resolve_detects_forgejo() {
+        let e = env(&[("FORGEJO_ACTIONS", "true")]);
+        assert_eq!(CiFormat::Auto.resolve(&e), CiFormat::Forgejo);
+    }
+
+    #[test]
+    fn ci_format_resolve_prefers_forgejo_over_github_when_both_set() {
+        // Forgejo Actions sets BOTH `FORGEJO_ACTIONS` and `GITHUB_ACTIONS`
+        // for GitHub-compatibility. We must classify as Forgejo so we don't
+        // emit `::group::` / `::error::` markers that the Forgejo runner
+        // would render as literal log text.
+        let e = env(&[("FORGEJO_ACTIONS", "true"), ("GITHUB_ACTIONS", "true")]);
+        assert_eq!(CiFormat::Auto.resolve(&e), CiFormat::Forgejo);
+    }
+
+    #[test]
+    fn ci_format_resolve_detects_woodpecker() {
+        // Woodpecker uses `CI=woodpecker` rather than a dedicated flag.
+        let e = env(&[("CI", "woodpecker")]);
+        assert_eq!(CiFormat::Auto.resolve(&e), CiFormat::Woodpecker);
+    }
+
+    #[test]
+    fn ci_format_resolve_generic_ci_true_falls_back_to_plain() {
+        // Plenty of providers set `CI=true` (the generic convention); we
+        // only treat the `woodpecker` value as a positive identification.
+        let e = env(&[("CI", "true")]);
+        assert_eq!(CiFormat::Auto.resolve(&e), CiFormat::Plain);
+    }
+
+    #[test]
     fn ci_format_from_str() {
         assert_eq!("github".parse::<CiFormat>().unwrap(), CiFormat::Github);
         assert_eq!("AUTO".parse::<CiFormat>().unwrap(), CiFormat::Auto);
         assert_eq!("plain".parse::<CiFormat>().unwrap(), CiFormat::Plain);
+        assert_eq!("forgejo".parse::<CiFormat>().unwrap(), CiFormat::Forgejo);
+        // "codeberg" and "gitea" are accepted as aliases for the same
+        // underlying runner (Codeberg uses Forgejo; Gitea Actions is the
+        // upstream Forgejo Actions started from).
+        assert_eq!("codeberg".parse::<CiFormat>().unwrap(), CiFormat::Forgejo);
+        assert_eq!("gitea".parse::<CiFormat>().unwrap(), CiFormat::Forgejo);
+        assert_eq!(
+            "woodpecker".parse::<CiFormat>().unwrap(),
+            CiFormat::Woodpecker
+        );
         assert!("xml".parse::<CiFormat>().is_err());
     }
 
@@ -1415,6 +1500,95 @@ mod tests {
         .unwrap();
         let body = std::fs::read_to_string(temp.path()).unwrap();
         assert_eq!(body, "", "GitLab branch must not write to $GITHUB_OUTPUT");
+    }
+
+    #[test]
+    fn emit_ci_output_forgejo_writes_step_outputs_but_no_log_markup() {
+        // Forgejo doesn't render workflow commands but does honour
+        // `$GITHUB_OUTPUT` (mirrored from `$FORGEJO_OUTPUT`). Emitting
+        // `::group::` / `::error::` would just clutter the log, so the
+        // log output stays empty.
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let path = temp.path().to_string_lossy().to_string();
+        let e = env(&[("GITHUB_OUTPUT", path.as_str())]);
+
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let run = make_run();
+        emit_ci_output(
+            &mut ui,
+            &run,
+            &[],
+            CiFormat::Forgejo,
+            &e,
+            None,
+            false,
+            &RunId::new("forge"),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(ui.output, Vec::<String>::new());
+        let body = std::fs::read_to_string(temp.path()).unwrap();
+        assert_eq!(body, expected_step_outputs(2, 0, "forge", "0.000"));
+    }
+
+    #[test]
+    fn emit_ci_output_forgejo_skips_step_summary() {
+        // `$GITHUB_STEP_SUMMARY` is a GitHub-only feature; Forgejo doesn't
+        // render it. We must not touch the file even if the env var leaks
+        // in (e.g. from a copy-pasted workflow).
+        let out_temp = tempfile::NamedTempFile::new().unwrap();
+        let summary_temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(summary_temp.path(), "untouched\n").unwrap();
+        let out_path = out_temp.path().to_string_lossy().to_string();
+        let summary_path = summary_temp.path().to_string_lossy().to_string();
+        let e = env(&[
+            ("GITHUB_OUTPUT", out_path.as_str()),
+            ("GITHUB_STEP_SUMMARY", summary_path.as_str()),
+        ]);
+
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let run = make_run();
+        emit_ci_output(
+            &mut ui,
+            &run,
+            &[],
+            CiFormat::Forgejo,
+            &e,
+            None,
+            false,
+            &RunId::new("forge"),
+            Duration::ZERO,
+        )
+        .unwrap();
+        let summary = std::fs::read_to_string(summary_temp.path()).unwrap();
+        assert_eq!(summary, "untouched\n");
+    }
+
+    #[test]
+    fn emit_ci_output_woodpecker_writes_nothing_provider_specific() {
+        // Woodpecker has no workflow-command or env-driven output surfaces;
+        // both stdout and any `$GITHUB_OUTPUT`-like file must stay empty.
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let path = temp.path().to_string_lossy().to_string();
+        let e = env(&[("GITHUB_OUTPUT", path.as_str())]);
+
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let run = make_run();
+        emit_ci_output(
+            &mut ui,
+            &run,
+            &[],
+            CiFormat::Woodpecker,
+            &e,
+            None,
+            false,
+            &RunId::new("wp"),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(ui.output, Vec::<String>::new());
+        let body = std::fs::read_to_string(temp.path()).unwrap();
+        assert_eq!(body, "");
     }
 
     #[test]
