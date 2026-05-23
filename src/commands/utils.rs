@@ -27,13 +27,20 @@ pub fn open_repository(base_path: Option<&str>) -> Result<Box<dyn Repository>> {
 
     #[cfg(feature = "testr")]
     {
-        if let Ok(repo) = inquest_factory.open(base) {
-            return Ok(repo);
+        // Only fall back to the legacy `.testrepository/` format when the
+        // inquest-native repo is genuinely *absent*. If `.inquest/` exists
+        // but is unopenable (corrupted format file, missing metadata.db,
+        // schema mismatch, locked database, ...), surface that error
+        // instead of masking it with a misleading "RepositoryNotFound"
+        // from the legacy fallback.
+        match inquest_factory.open(base) {
+            Ok(repo) => Ok(repo),
+            Err(crate::error::Error::RepositoryNotFound(_)) => {
+                let file_factory = FileRepositoryFactory;
+                file_factory.open(base)
+            }
+            Err(e) => Err(e),
         }
-
-        // Fall back to legacy format
-        let file_factory = FileRepositoryFactory;
-        file_factory.open(base)
     }
 }
 
@@ -68,7 +75,13 @@ pub fn open_or_init_repository(
     match open_repository(base_path) {
         Ok(repo) => Ok(repo),
         Err(e) => {
-            if force_init || has_config_file(base_path) {
+            // Only attempt to initialise when the repository actually doesn't
+            // exist. If `.inquest` is present but unopenable (corrupted
+            // metadata, locked database, schema mismatch, ...), surface the
+            // original error rather than masking it with a confusing
+            // `RepositoryExists` from the subsequent init attempt.
+            let missing = matches!(e, crate::error::Error::RepositoryNotFound(_));
+            if missing && (force_init || has_config_file(base_path)) {
                 let base = base_path.unwrap_or(".");
                 let repo_path = Path::new(base).join(".inquest");
                 ui.output(&format!("Creating repository in {}", repo_path.display()))?;
@@ -494,6 +507,45 @@ mod tests {
         let repo = open_or_init_repository(Some(&path), true, &mut ui);
         assert!(repo.is_ok());
         assert!(temp.path().join(".inquest").exists());
+    }
+
+    #[test]
+    fn test_open_or_init_surfaces_invalid_format_instead_of_reinitialising() {
+        // Regression: if `.inquest` exists but is unopenable (corrupted
+        // format file, locked db, schema mismatch, etc), open_or_init must
+        // surface the underlying error rather than trying to init and
+        // masking it with a misleading "Repository already exists" error.
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().to_string_lossy().to_string();
+
+        // Build a broken repo: directory exists but the format file is wrong.
+        let repo_dir = temp.path().join(".inquest");
+        std::fs::create_dir(&repo_dir).unwrap();
+        std::fs::write(repo_dir.join("format"), "99\n").unwrap();
+        std::fs::write(
+            temp.path().join("inquest.toml"),
+            "test_command = \"true\"\n",
+        )
+        .unwrap();
+
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let result = open_or_init_repository(Some(&path), true, &mut ui);
+        let err = match result {
+            Ok(_) => panic!("must surface the open error"),
+            Err(e) => e,
+        };
+        // The error must be the actual open failure, not RepositoryExists.
+        assert!(
+            matches!(err, crate::error::Error::InvalidFormat(_)),
+            "expected InvalidFormat, got {err:?}"
+        );
+        // And we must not have printed the misleading "Creating repository"
+        // message: that path was the source of confusion in the bug report.
+        assert!(
+            !ui.output.iter().any(|s| s.contains("Creating repository")),
+            "must not claim to be creating the repository when it already exists: {:?}",
+            ui.output
+        );
     }
 
     #[test]
