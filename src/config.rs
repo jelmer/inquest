@@ -1219,8 +1219,6 @@ filter_tags = "worker-0  !slow"
         );
     }
 
-    // ----- Profile tests -----
-
     #[test]
     fn profile_overlay_overrides_base_fields() {
         let cfg = ConfigFile::parse_toml(

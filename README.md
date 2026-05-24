@@ -13,7 +13,7 @@ Test results are inserted using subunit (and thus anything that can output subun
 
 Inquest started as a Rust port of the Python [testrepository](https://github.com/testing-cabal/testrepository) tool, originally written by Robert Collins. It has since grown its own features and on-disk format.
 
-**Key Features:**
+**Features:**
 - Fast, native binary with no Python runtime required
 - SQLite-backed repository with rich run metadata
 - Timeout support (per-test, overall, no-output)
