@@ -2,6 +2,77 @@
 inquest release notes
 #######################
 
+0.3.0	2026-05-24
+++++++++++++++++++
+
+CHANGES
+-------
+
+* The ``gdbm`` feature is no longer enabled by default. Existing
+  repositories that use the gdbm backend continue to work when inquest
+  is built with ``--features gdbm``; the default build now relies on the
+  sqlite backend, which is portable across platforms and does not
+  require system gdbm headers. (Jelmer Vernooĳ)
+
+* Add ``inq ci`` support for Forgejo Actions and Woodpecker CI in
+  addition to the existing GitHub Actions and GitLab CI backends.
+  (Jelmer Vernooĳ)
+
+* ``inq ci`` now uses GitLab's native report surfaces (JUnit test
+  reports and Code Quality annotations) when run inside a GitLab CI
+  job, instead of only emitting log-scoped annotations.
+  (Jelmer Vernooĳ)
+
+* ``inq ci`` annotations are now streamed live as tests finish, and
+  GitHub Actions step outputs are emitted so downstream steps can
+  consume failure counts and the run id without re-parsing output.
+  (Jelmer Vernooĳ)
+
+* The inquest history cache is now shared across all runs, which
+  speeds up repeated commands in the same repository. (Jelmer Vernooĳ)
+
+* ``inq open`` now surfaces the underlying I/O or database error when
+  an ``.inquest/`` directory exists but cannot be opened, instead of
+  reporting a generic failure. (Jelmer Vernooĳ)
+
+* The ``cargo install`` fallback used by the GitHub Action installer
+  now builds without default features, so it works on hosts that lack
+  the gdbm system libraries. (Jelmer Vernooĳ)
+
+0.2.0	2026-05-23
+++++++++++++++++++
+
+CHANGES
+-------
+
+* Add ``inq summarize`` to cluster failing tests by their common cause,
+  using shared assertion/error fragments to group related failures into
+  buckets. Useful for triaging large failure sets where the same bug
+  surfaces across many tests. (Jelmer Vernooĳ)
+
+* Add ``inq stress`` for running a flaky test repeatedly to characterise
+  its failure rate, including support for running tests in parallel and
+  bailing out after a configurable number of failures. (Jelmer Vernooĳ)
+
+* Add ``inq ci`` for emitting CI-native annotations from inquest test
+  runs. Supports GitHub Actions workflow commands and GitLab CI log
+  sections out of the box. (Jelmer Vernooĳ)
+
+* Ship a composite GitHub Action that wraps ``inq ci`` so consumers can
+  drop a single ``uses:`` line into their workflow. Documented
+  separately in ``README.gh-action.md``. (Jelmer Vernooĳ)
+
+* Add a release workflow that publishes prebuilt ``inq`` binaries for
+  Linux, macOS and Windows on each GitHub release. (Jelmer Vernooĳ)
+
+* ``auto`` now scopes Python ``unittest discover`` to a dedicated test
+  directory rather than the project root, avoiding spurious discovery
+  of unrelated modules. (Jelmer Vernooĳ)
+
+* Extract a shared ``resolve_concurrency`` helper so MCP background
+  runs honour the configured concurrency instead of always defaulting
+  to single-threaded execution. (Jelmer Vernooĳ)
+
 0.1.5	2026-04-30
 ++++++++++++++++++
 
