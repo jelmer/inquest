@@ -144,6 +144,7 @@ impl RunCommand {
             cancellation_token: self.cancellation_token.clone(),
             max_restarts: self.max_restarts,
             stderr_capture,
+            result_callback: None,
         }
     }
 }
@@ -742,7 +743,7 @@ fn format_short_duration_secs(secs: f64) -> String {
 
 /// Walk every recorded run and tally how often each test produced a
 /// failing status. Used by [`TestOrder::FrequentFailingFirst`].
-fn compute_failure_counts(
+pub(crate) fn compute_failure_counts(
     repo: &dyn crate::repository::Repository,
 ) -> std::collections::HashMap<crate::repository::TestId, u32> {
     let mut counts: std::collections::HashMap<crate::repository::TestId, u32> =

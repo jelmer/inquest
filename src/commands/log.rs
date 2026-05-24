@@ -53,6 +53,7 @@ impl Command for LogCommand {
             run_id.clone(),
             |_test_id, _status| {},
             |_bytes| {},
+            |_result| {},
             subunit_stream::OutputFilter::All,
         )?;
 

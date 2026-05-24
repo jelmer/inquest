@@ -386,16 +386,21 @@ enum Commands {
 
     /// Run tests with output formatted for a CI provider
     ///
-    /// Detects GitHub Actions or GitLab CI from the environment and emits
-    /// log groups per failing test, inline annotations, and (on GitHub) a
-    /// markdown summary written to $GITHUB_STEP_SUMMARY.
+    /// Autodetects GitHub Actions, GitLab CI, Forgejo Actions (Codeberg),
+    /// and Woodpecker CI from the environment. GitHub and GitLab get
+    /// log groups per failing test, inline annotations, and (on GitHub)
+    /// a markdown summary written to $GITHUB_STEP_SUMMARY. Forgejo
+    /// honours $GITHUB_OUTPUT for step outputs but doesn't render
+    /// workflow commands, so log markup is skipped. Use `--junit-path`
+    /// and `--dotenv-path` for artifact-based integration on any provider.
     ///
     /// To carry test history across CI runs, restore .inquest from cache
     /// before this step and save it after, then point `-C .` at it.
     /// Example workflow snippet: cache `.inquest` keyed on `github.run_id`
     /// with `restore-keys: inquest-`, then `inq ci`.
     Ci {
-        /// CI provider format: auto (detect), github, gitlab, or plain
+        /// CI provider format: auto (detect), github, gitlab, forgejo
+        /// (also: codeberg, gitea), woodpecker, or plain
         #[arg(long, default_value = "auto")]
         format: String,
 
@@ -432,6 +437,19 @@ enum Commands {
         /// Additional arguments to pass to the test command (use after --)
         #[arg(last = true, value_name = "TESTARGS")]
         testargs: Vec<String>,
+
+        /// Write a JUnit XML report to this path after the run. GitLab picks
+        /// it up via `artifacts:reports:junit:` and shows failures inline
+        /// on the MR. Most other CI systems also consume JUnit.
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+        junit_path: Option<std::path::PathBuf>,
+
+        /// Write step outputs (passed/failed/flaky/duration/run_id) to this
+        /// path as `key=value` lines. GitLab picks it up via
+        /// `artifacts:reports:dotenv:` and exposes them as env vars in
+        /// downstream jobs.
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+        dotenv_path: Option<std::path::PathBuf>,
     },
 
     /// Run tests and load results
@@ -949,6 +967,8 @@ fn main() {
             testfilters,
             starting_with,
             testargs,
+            junit_path,
+            dotenv_path,
         } => {
             let format = match format.parse::<inquest::commands::CiFormat>() {
                 Ok(f) => f,
@@ -999,6 +1019,8 @@ fn main() {
                 max_duration,
                 test_args: testargs,
                 profile,
+                junit_path,
+                dotenv_path,
             };
             cmd.execute(&mut ui)
         }
