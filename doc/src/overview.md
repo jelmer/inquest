@@ -23,7 +23,7 @@ using the sample subunit stream included with inq
   $ inq failing
 ```
 
-Most commands in inq have comprehensive online help, and the commands
+Most commands in inq have detailed online help, and the commands
 
 ```sh
   $ inq help [command]

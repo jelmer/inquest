@@ -812,7 +812,7 @@ mod tests {
     #[test]
     fn test_invalid_subunit_stream_no_panic() {
         // Test that invalid UTF-8 or corrupted subunit data returns an error, not a panic
-        // The new subunit-rust is more robust and treats plain text as valid (it's interleaved text),
+        // The new subunit-rust is more lenient and treats plain text as valid (it's interleaved text),
         // so we need to use actually corrupted data
         let invalid_data: &[u8] = &[
             0xB2, // Start of subunit v2 signature
