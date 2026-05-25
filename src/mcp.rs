@@ -1778,6 +1778,7 @@ impl InquestMcpService {
                     stderr_capture: None,
                     result_callback: None,
                     display_prefix,
+                    nice: None,
                 };
                 let executor = crate::test_executor::TestExecutor::new(&config);
 

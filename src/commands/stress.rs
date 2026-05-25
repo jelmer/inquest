@@ -50,6 +50,9 @@ pub struct StressCommand {
     pub max_restarts: Option<usize>,
     /// Optional explicit ordering strategy for each iteration.
     pub test_order: Option<TestOrder>,
+    /// Niceness increment for spawned test processes (unix only). See
+    /// [`crate::test_executor::TestExecutorConfig::nice`].
+    pub nice: Option<i32>,
 }
 
 impl StressCommand {

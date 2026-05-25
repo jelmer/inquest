@@ -176,6 +176,8 @@ pub struct CiCommand {
     /// Retries (`--retry`) are not affected by this limit; they only re-run
     /// tests that failed initially.
     pub max_failures: Option<usize>,
+    /// Niceness increment applied to spawned test processes (unix only).
+    pub nice: Option<i32>,
 }
 
 impl CiCommand {
@@ -196,6 +198,7 @@ impl CiCommand {
             junit_path: None,
             dotenv_path: None,
             max_failures: None,
+            nice: None,
         }
     }
 }
@@ -568,6 +571,7 @@ impl CiCommand {
             stderr_capture: Some(stderr_capture.clone()),
             result_callback,
             display_prefix,
+            nice: self.nice,
         };
         let executor = TestExecutor::new(&config);
 
