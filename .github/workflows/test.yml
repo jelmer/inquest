@@ -47,6 +47,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      - name: Check (all features)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo check --all-features --all-targets
+
       - name: Clippy (with gdbm)
         if: matrix.os != 'windows-latest'
         run: cargo clippy -- -D warnings

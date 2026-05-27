@@ -24,8 +24,11 @@ use std::time::Duration;
 /// Buffer size for the channel between I/O threads and the parse thread.
 const STREAM_BUFFER_SIZE: usize = 100;
 
-/// Fixed-width portion of the progress bar (elapsed time, counters, spacing).
-const PROGRESS_FIXED_WIDTH: usize = 25;
+/// Fixed-width portion of the progress bar template, excluding the bar itself
+/// and the trailing message. Covers `[elapsed_precise ETA: Xm XXs]`, spacing,
+/// and `pos/len` counters. Sized for the worst-case ETA (`" ETA: 99h 59m"` =
+/// 13 chars) plus an 11-char counter (`"99999/99999"`).
+const PROGRESS_FIXED_WIDTH: usize = 38;
 
 /// Extra padding subtracted when computing bar width.
 const PROGRESS_PADDING: usize = 30;
@@ -2370,5 +2373,30 @@ mod helper_tests {
         let result = truncate_test_name(name, 5, 0);
         assert_eq!(result.len(), 3);
         assert_eq!(result, "ame");
+    }
+
+    /// Worst-case rendered width of the non-message portion of the progress
+    /// bar template, used to verify the layout reserves enough room for ETA
+    /// plus counters. Mirrors `[elapsed_precise ETA: 99h 59m] {bar} 99999/99999 `.
+    fn worst_case_prefix_width(bar_width: usize) -> usize {
+        // "[" + "HH:MM:SS" + " ETA: 99h 59m" + "] " + bar + " " + "99999/99999" + " "
+        1 + 8 + 13 + 2 + bar_width + 1 + 11 + 1
+    }
+
+    #[test]
+    fn test_progress_layout_fits_typical_terminal() {
+        for term_width in [100usize, 120, 160, 200] {
+            let layout = compute_progress_layout(term_width);
+            let prefix = worst_case_prefix_width(layout.bar_width);
+            assert!(
+                prefix + layout.max_msg_len <= term_width,
+                "term_width {}: prefix {} + msg {} > {} (bar_width {})",
+                term_width,
+                prefix,
+                layout.max_msg_len,
+                term_width,
+                layout.bar_width,
+            );
+        }
     }
 }
