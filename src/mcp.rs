@@ -1735,6 +1735,7 @@ impl InquestMcpService {
                     cancellation_token: Some(cancel_token),
                     max_restarts: None,
                     stderr_capture: None,
+                    result_callback: None,
                 };
                 let executor = crate::test_executor::TestExecutor::new(&config);
 
