@@ -350,6 +350,18 @@ impl RunCommand {
                 if let Some(ref cp) = common_prefix {
                     let prefixed = crate::grouping::apply_prefix(&expanded, cp);
                     if prefixed != expanded {
+                        // The bare and prefix-relative forms can match disjoint
+                        // sets of tests (e.g. selector `b` matching both a
+                        // top-level `b::` module and `<prefix>b::`). When both
+                        // match different tests the selector is ambiguous, so
+                        // warn rather than silently running the union.
+                        if starting_with_is_ambiguous(&known, &expanded, &prefixed) {
+                            ui.output(&format!(
+                                "Warning: '{}' is ambiguous; it matches both '{}' and '{}'. \
+                                 Running both - qualify the selector to disambiguate.",
+                                s, expanded, prefixed
+                            ))?;
+                        }
                         prefixes.push(prefixed);
                     }
                 }
@@ -785,6 +797,14 @@ pub(crate) fn compute_failure_counts(
     counts
 }
 
+/// True when a `-s` selector is ambiguous: both its bare form and its
+/// prefix-prepended form match a (necessarily disjoint) non-empty set of known
+/// tests. In that case the user cannot tell which group they meant.
+fn starting_with_is_ambiguous(known: &[&str], bare: &str, prefixed: &str) -> bool {
+    known.iter().any(|id| id_starts_with_segment(id, bare))
+        && known.iter().any(|id| id_starts_with_segment(id, prefixed))
+}
+
 /// True when `id` equals `prefix`, or `prefix` is a segment-aligned prefix of
 /// `id` (i.e. immediately followed by a `.` or `:` path separator). This avoids
 /// matching `foo_bar` for the selector `foo`.
@@ -872,6 +892,28 @@ test_command=echo "test1"
         assert!(id_starts_with_segment("a::b::test_x", "a::b"));
         // Python/Go `.` boundary.
         assert!(id_starts_with_segment("a.b.test_x", "a.b"));
+    }
+
+    #[test]
+    fn starting_with_ambiguous_when_both_forms_match() {
+        // Selector `b` (prefix `a::`): a top-level `b::` module exists AND
+        // `a::b::` exists, so the bare and prefixed forms each match.
+        let known = ["a::b::test_x", "b::test_y"];
+        assert!(starting_with_is_ambiguous(&known, "b", "a::b"));
+    }
+
+    #[test]
+    fn starting_with_unambiguous_when_only_prefixed_matches() {
+        // The common case: the bare form matches nothing, only the prefixed
+        // form does, so there is no ambiguity to warn about.
+        let known = ["a::b::test_x", "a::c::test_y"];
+        assert!(!starting_with_is_ambiguous(&known, "b", "a::b"));
+    }
+
+    #[test]
+    fn starting_with_unambiguous_when_only_bare_matches() {
+        let known = ["b::test_y"];
+        assert!(!starting_with_is_ambiguous(&known, "b", "a::b"));
     }
 
     #[test]
