@@ -40,13 +40,14 @@ use crate::config::TimeoutSetting;
 use crate::error::Result;
 use crate::ordering::{apply_order, OrderingContext, TestOrder};
 use crate::repository::{RunId, TestId, TestResult, TestRun, TestStatus};
-use crate::test_executor::{self, TestExecutor, TestExecutorConfig};
+use crate::test_executor::{self, CancellationToken, TestExecutor, TestExecutorConfig};
 use crate::testcommand::TestCommand;
 use crate::ui::UI;
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -168,6 +169,13 @@ pub struct CiCommand {
     /// when set, is always written in addition to this — the two are
     /// independent integration points.
     pub dotenv_path: Option<std::path::PathBuf>,
+    /// Stop the initial run after this many failures. `None` disables the
+    /// limit. With parallel workers, a few tests already in flight may still
+    /// complete after the threshold is hit, so the recorded failure count can
+    /// slightly exceed the limit — it's a stop-soon hint, not a hard cap.
+    /// Retries (`--retry`) are not affected by this limit; they only re-run
+    /// tests that failed initially.
+    pub max_failures: Option<usize>,
 }
 
 impl CiCommand {
@@ -187,6 +195,7 @@ impl CiCommand {
             profile: None,
             junit_path: None,
             dotenv_path: None,
+            max_failures: None,
         }
     }
 }
@@ -227,14 +236,27 @@ impl CiCommand {
             None
         };
         let emit_errors_now = streaming && self.retries == 0;
-        let result_callback =
-            self.build_result_callback(streamed_ids.clone(), emit_errors_now, format);
+
+        // When `--max-failures` is set, the executor needs a cancellation token
+        // it can poll between test batches; the result callback flips it on
+        // once enough failures have been observed. We always allocate the token
+        // (it's cheap) so the callback can be wired uniformly.
+        let cancel_token = CancellationToken::new();
+        let failure_counter = Arc::new(AtomicUsize::new(0));
+        let result_callback = self.build_result_callback(
+            streamed_ids.clone(),
+            emit_errors_now,
+            format,
+            failure_counter.clone(),
+            cancel_token.clone(),
+        );
 
         let total_start = std::time::Instant::now();
-        let initial_run_id = match self.run_initial(ui, order.clone(), result_callback)? {
-            RunOnceOutcome::Run(id) => id,
-            RunOnceOutcome::EarlyExit(code) => return Ok(code),
-        };
+        let initial_run_id =
+            match self.run_initial(ui, order.clone(), result_callback, cancel_token)? {
+                RunOnceOutcome::Run(id) => id,
+                RunOnceOutcome::EarlyExit(code) => return Ok(code),
+            };
 
         let initial_failures = collect_failures(self.base_path.as_deref(), &initial_run_id)?;
 
@@ -273,6 +295,11 @@ impl CiCommand {
         let already_streamed = streamed_ids
             .as_ref()
             .map(|s| s.lock().map(|g| g.clone()).unwrap_or_default());
+        // Recent-runs window for the per-test failure-history hints in the
+        // step summary. 10 is a sweet spot: long enough to distinguish a
+        // chronic flake from a one-off, short enough that the read is cheap
+        // and reviewers don't have to discount stale incidents from months ago.
+        let history = collect_test_history(self.base_path.as_deref(), &initial_run_id, 10);
         emit_ci_output(
             ui,
             &initial_run,
@@ -283,6 +310,7 @@ impl CiCommand {
             emit_errors_now,
             &initial_run_id,
             total_start.elapsed(),
+            &history,
         )?;
 
         if let Some(path) = &self.junit_path {
@@ -303,31 +331,54 @@ impl CiCommand {
 
     /// Build the per-result callback handed to the executor. Records the id
     /// of each failure it streams so the post-run code can avoid re-emitting,
-    /// and optionally writes `::group::`/`::error::` annotations immediately.
+    /// optionally writes `::group::`/`::error::` annotations immediately, and
+    /// — when `max_failures` is set — trips `cancel_token` once enough
+    /// failures have been observed so the executor stops dispatching new
+    /// tests.
     fn build_result_callback(
         &self,
         streamed_ids: Option<Arc<Mutex<HashSet<TestId>>>>,
         emit_errors_now: bool,
         format: CiFormat,
+        failure_counter: Arc<AtomicUsize>,
+        cancel_token: CancellationToken,
     ) -> Option<test_executor::ResultCallback> {
-        let streamed_ids = streamed_ids?;
+        // Without either a streaming surface or a failure cap, the callback
+        // has nothing to do.
+        if streamed_ids.is_none() && self.max_failures.is_none() {
+            return None;
+        }
+        let max_failures = self.max_failures;
         Some(Arc::new(move |result: &TestResult| {
             if !is_failure(result.status) {
                 return;
             }
 
-            let mut out = String::new();
-            out.push_str(&format_group_block(result, format));
-            if emit_errors_now {
-                out.push_str(&format_error_annotation(result));
-            }
-            // CI runners are non-TTY so progress bars are hidden; writing
-            // directly to stdout works without progress-bar interference.
-            let _ = std::io::stdout().write_all(out.as_bytes());
-            let _ = std::io::stdout().flush();
+            if let Some(ref ids) = streamed_ids {
+                let mut out = String::new();
+                out.push_str(&format_group_block(result, format));
+                if emit_errors_now {
+                    out.push_str(&format_error_annotation(result));
+                }
+                // CI runners are non-TTY so progress bars are hidden; writing
+                // directly to stdout works without progress-bar interference.
+                let _ = std::io::stdout().write_all(out.as_bytes());
+                let _ = std::io::stdout().flush();
 
-            if let Ok(mut g) = streamed_ids.lock() {
-                g.insert(result.test_id.clone());
+                if let Ok(mut g) = ids.lock() {
+                    g.insert(result.test_id.clone());
+                }
+            }
+
+            if let Some(limit) = max_failures {
+                // `fetch_add` returns the previous value, so `+ 1` is the new
+                // count. Trip once when we cross the threshold; subsequent
+                // failures from tests already in flight just re-cancel a
+                // cancelled token, which is a no-op.
+                let observed = failure_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if observed >= limit {
+                    cancel_token.cancel();
+                }
             }
         }))
     }
@@ -339,14 +390,24 @@ impl CiCommand {
         ui: &mut dyn UI,
         order: TestOrder,
         result_callback: Option<test_executor::ResultCallback>,
+        cancel_token: CancellationToken,
     ) -> Result<RunOnceOutcome> {
-        self.run_once(ui, order, result_callback, /* failing_only */ false)
+        self.run_once(
+            ui,
+            order,
+            result_callback,
+            Some(cancel_token),
+            /* failing_only */ false,
+        )
     }
 
     /// Retry run: only previously failing tests, no streaming callback (the
-    /// annotation set is decided after retries settle).
+    /// annotation set is decided after retries settle). The cancellation
+    /// token is intentionally not threaded through — `--max-failures` caps
+    /// the initial run, not retries, since retries only re-run the already
+    /// failing set.
     fn run_retry(&self, ui: &mut dyn UI, order: TestOrder) -> Result<RunOnceOutcome> {
-        self.run_once(ui, order, None, /* failing_only */ true)
+        self.run_once(ui, order, None, None, /* failing_only */ true)
     }
 
     fn run_once(
@@ -354,6 +415,7 @@ impl CiCommand {
         ui: &mut dyn UI,
         order: TestOrder,
         result_callback: Option<test_executor::ResultCallback>,
+        cancel_token: Option<CancellationToken>,
         failing_only: bool,
     ) -> Result<RunOnceOutcome> {
         let base = Path::new(self.base_path.as_deref().unwrap_or("."));
@@ -500,7 +562,7 @@ impl CiCommand {
             } else {
                 Some(self.test_args.clone())
             },
-            cancellation_token: None,
+            cancellation_token: cancel_token,
             max_restarts: None,
             stderr_capture: Some(stderr_capture.clone()),
             result_callback,
@@ -594,6 +656,63 @@ fn collect_failures(
     repo.get_failing_tests()
 }
 
+/// Per-test failure history pulled from the repository's recent runs. Used
+/// to annotate the GitHub step summary with "failed N of last M runs" hints
+/// so reviewers can tell a fresh regression apart from a long-standing flake.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct TestHistory {
+    /// Number of times this test reached a failing status in the window.
+    pub failures: usize,
+    /// Total number of runs in the window that recorded a result for this
+    /// test (whether passing or failing). `0` means we have no history for
+    /// the test; the summary suppresses the hint in that case.
+    pub runs_seen: usize,
+}
+
+/// Build per-test history from the last `window` runs *before* `current`,
+/// keyed by test id. We exclude `current` so a test that fails in the
+/// run we're summarizing doesn't double-count itself. Returns an empty
+/// map on any repository error — history is a UX nicety, not load-bearing,
+/// so failures here should never break the CI run.
+pub(crate) fn collect_test_history(
+    base_path: Option<&str>,
+    current: &RunId,
+    window: usize,
+) -> std::collections::HashMap<TestId, TestHistory> {
+    let mut out: std::collections::HashMap<TestId, TestHistory> = std::collections::HashMap::new();
+    if window == 0 {
+        return out;
+    }
+    let Ok(repo) = open_repository(base_path) else {
+        return out;
+    };
+    let Ok(run_ids) = repo.list_run_ids() else {
+        return out;
+    };
+    // `list_run_ids` is ascending; take the most recent `window` ids that
+    // aren't the current run. `iter().rev()` walks newest-first; we stop
+    // once we've collected `window` historical runs.
+    let recent: Vec<&RunId> = run_ids
+        .iter()
+        .rev()
+        .filter(|id| id.as_str() != current.as_str())
+        .take(window)
+        .collect();
+    for run_id in recent {
+        let Ok(run) = repo.get_test_run(run_id) else {
+            continue;
+        };
+        for (test_id, result) in &run.results {
+            let entry = out.entry(test_id.clone()).or_default();
+            entry.runs_seen += 1;
+            if is_failure(result.status) {
+                entry.failures += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Subset of `candidates` that the run identified by `run_id` reports as
 /// passing (so they were "recovered" by the retry).
 fn recovered_tests(
@@ -623,6 +742,7 @@ fn emit_ci_output(
     streamed_errors_already: bool,
     run_id: &RunId,
     duration: Duration,
+    history: &std::collections::HashMap<TestId, TestHistory>,
 ) -> Result<()> {
     match format {
         // Plain and Auto stay silent: the test runner already printed each
@@ -674,7 +794,7 @@ fn emit_ci_output(
             // GitHub-only: markdown summary + step outputs.
             if format == CiFormat::Github {
                 if let Some(path) = env.get("GITHUB_STEP_SUMMARY") {
-                    let summary = format_step_summary(run, flaky);
+                    let summary = format_step_summary(run, flaky, history);
                     std::fs::write(&path, summary)?;
                 }
                 write_github_output(env, run, flaky, run_id, duration)?;
@@ -984,9 +1104,29 @@ fn filter_annotations(annotations: &str, keep: &HashSet<&TestId>) -> String {
         })
 }
 
+/// Append a "(failed N of last M)" hint when there's recorded history for the
+/// test. New tests (no history) produce an empty string so we don't print a
+/// misleading "0 of 0". The hint helps reviewers tell a fresh regression
+/// (`0 of 10`) apart from a chronic flake (`8 of 10`) at a glance.
+fn format_history_hint(
+    test_id: &TestId,
+    history: &std::collections::HashMap<TestId, TestHistory>,
+) -> String {
+    match history.get(test_id) {
+        Some(h) if h.runs_seen > 0 => {
+            format!(" (failed {} of last {})", h.failures, h.runs_seen)
+        }
+        _ => String::new(),
+    }
+}
+
 /// Markdown summary written to `$GITHUB_STEP_SUMMARY`, which GitHub renders
 /// on the workflow run page.
-fn format_step_summary(run: &TestRun, flaky: &[TestId]) -> String {
+fn format_step_summary(
+    run: &TestRun,
+    flaky: &[TestId],
+    history: &std::collections::HashMap<TestId, TestHistory>,
+) -> String {
     let total = run.results.len();
     let mut passed = 0usize;
     let mut failed = 0usize;
@@ -1046,7 +1186,13 @@ fn format_step_summary(run: &TestRun, flaky: &[TestId]) -> String {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.lines().next().unwrap_or(s).to_string())
                 .unwrap_or_else(|| r.status.to_string());
-            let _ = writeln!(out, "- `{}` — {}", r.test_id.as_str(), msg);
+            let _ = writeln!(
+                out,
+                "- `{}` — {}{}",
+                r.test_id.as_str(),
+                msg,
+                format_history_hint(&r.test_id, history),
+            );
         }
         let _ = writeln!(out);
         let _ = writeln!(out, "</details>");
@@ -1063,7 +1209,12 @@ fn format_step_summary(run: &TestRun, flaky: &[TestId]) -> String {
         );
         let _ = writeln!(out);
         for t in flaky_sorted {
-            let _ = writeln!(out, "- `{}` (passed on retry)", t.as_str());
+            let _ = writeln!(
+                out,
+                "- `{}` (passed on retry){}",
+                t.as_str(),
+                format_history_hint(t, history),
+            );
         }
         let _ = writeln!(out);
         let _ = writeln!(out, "</details>");
@@ -1217,7 +1368,7 @@ mod tests {
     #[test]
     fn step_summary_counts_and_lists_failures() {
         let run = make_run();
-        let summary = format_step_summary(&run, &[]);
+        let summary = format_step_summary(&run, &[], &HashMap::new());
         // total=4, passed=1, failed=1, errored=1, skipped=1, flaky=0
         let expected = "## Test results\n\
                         \n\
@@ -1238,7 +1389,7 @@ mod tests {
     fn step_summary_separates_flakes_from_hard_failures() {
         let run = make_run();
         let flaky = vec![TestId::new("tests.b")];
-        let summary = format_step_summary(&run, &flaky);
+        let summary = format_step_summary(&run, &flaky, &HashMap::new());
         // tests.b is now flaky, so failing list shows only tests.c, and
         // there's a separate flaky-tests block at the end.
         let expected = "## Test results\n\
@@ -1457,6 +1608,7 @@ mod tests {
             /* streamed_errors_already */ true,
             &RunId::new("0"),
             Duration::ZERO,
+            &HashMap::new(),
         )
         .unwrap();
         // ui.output() trims the trailing newline before recording, so the
@@ -1496,6 +1648,7 @@ mod tests {
             false,
             &RunId::new("0"),
             Duration::ZERO,
+            &HashMap::new(),
         )
         .unwrap();
         let body = std::fs::read_to_string(temp.path()).unwrap();
@@ -1524,6 +1677,7 @@ mod tests {
             false,
             &RunId::new("forge"),
             Duration::ZERO,
+            &HashMap::new(),
         )
         .unwrap();
         assert_eq!(ui.output, Vec::<String>::new());
@@ -1558,6 +1712,7 @@ mod tests {
             false,
             &RunId::new("forge"),
             Duration::ZERO,
+            &HashMap::new(),
         )
         .unwrap();
         let summary = std::fs::read_to_string(summary_temp.path()).unwrap();
@@ -1584,6 +1739,7 @@ mod tests {
             false,
             &RunId::new("wp"),
             Duration::ZERO,
+            &HashMap::new(),
         )
         .unwrap();
         assert_eq!(ui.output, Vec::<String>::new());
@@ -1637,6 +1793,120 @@ mod tests {
     }
 
     #[test]
+    fn step_summary_annotates_failures_with_recent_history() {
+        // When the repository has past-run history for a failing test, the
+        // summary appends a "(failed N of last M)" hint so reviewers can
+        // tell a fresh regression apart from a chronic flake at a glance.
+        let run = make_run();
+        let mut history = HashMap::new();
+        history.insert(
+            TestId::new("tests.b"),
+            TestHistory {
+                failures: 7,
+                runs_seen: 10,
+            },
+        );
+        // tests.c has no history — it's a brand-new test; the hint should
+        // be omitted rather than printing a misleading "0 of 0".
+        let summary = format_step_summary(&run, &[], &history);
+        assert!(
+            summary.contains("- `tests.b` — boom (failed 7 of last 10)\n"),
+            "missing history hint for tests.b: {summary}"
+        );
+        assert!(
+            summary.contains("- `tests.c` — timeout\n"),
+            "tests.c should not have a hint: {summary}"
+        );
+    }
+
+    #[test]
+    fn step_summary_annotates_flaky_tests_with_recent_history() {
+        // The same hint applies to the flaky-tests list: a test that just
+        // started failing should look different from one that's been
+        // flaking for weeks.
+        let run = make_run();
+        let flaky = vec![TestId::new("tests.b")];
+        let mut history = HashMap::new();
+        history.insert(
+            TestId::new("tests.b"),
+            TestHistory {
+                failures: 4,
+                runs_seen: 10,
+            },
+        );
+        let summary = format_step_summary(&run, &flaky, &history);
+        assert!(
+            summary.contains("- `tests.b` (passed on retry) (failed 4 of last 10)\n"),
+            "missing flake history hint: {summary}"
+        );
+    }
+
+    #[test]
+    fn format_history_hint_omits_runs_seen_zero() {
+        // Defensive: even if a `TestHistory` entry exists with `runs_seen = 0`
+        // (no recorded results in the window), we must not print "0 of 0".
+        let id = TestId::new("tests.x");
+        let mut history = HashMap::new();
+        history.insert(id.clone(), TestHistory::default());
+        assert_eq!(format_history_hint(&id, &history), "");
+    }
+
+    #[test]
+    fn build_result_callback_cancels_token_on_max_failures() {
+        // With `max_failures = 2`, the third failure to come through the
+        // callback should find the token already cancelled because the
+        // second one tripped it. Passing tests don't count toward the limit.
+        let mut cmd = CiCommand::new(None);
+        cmd.max_failures = Some(2);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let token = CancellationToken::new();
+        // No streaming surface — we're testing the cap path on its own.
+        let cb = cmd
+            .build_result_callback(None, false, CiFormat::Plain, counter.clone(), token.clone())
+            .expect("callback should exist when max_failures is set");
+
+        cb(&TestResult::success("tests.ok"));
+        assert!(!token.is_cancelled());
+        cb(&TestResult::failure("tests.fail1", "x"));
+        assert!(!token.is_cancelled());
+        cb(&TestResult::failure("tests.fail2", "x"));
+        assert!(token.is_cancelled(), "second failure should cancel");
+        // Subsequent failures must be a no-op (re-cancelling is fine).
+        cb(&TestResult::failure("tests.fail3", "x"));
+        assert!(token.is_cancelled());
+        // Counter reflects observed failures, including post-cancel ones —
+        // we don't pretend they didn't happen.
+        assert_eq!(counter.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn build_result_callback_none_when_no_streaming_and_no_cap() {
+        // With neither a streaming surface nor a failure cap, the callback
+        // has nothing to do and we save the executor an allocation per test.
+        let cmd = CiCommand::new(None);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let token = CancellationToken::new();
+        assert!(cmd
+            .build_result_callback(None, false, CiFormat::Plain, counter, token)
+            .is_none());
+    }
+
+    #[test]
+    fn build_result_callback_cap_alone_returns_callback_without_streaming() {
+        // `--max-failures` without a streaming format (e.g. plain/forgejo)
+        // still needs the callback to count failures and trip the token.
+        let mut cmd = CiCommand::new(None);
+        cmd.max_failures = Some(1);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let token = CancellationToken::new();
+        let cb = cmd
+            .build_result_callback(None, false, CiFormat::Plain, counter, token.clone())
+            .expect("callback should exist");
+        cb(&TestResult::failure("tests.fail", "x"));
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
     fn emit_ci_output_writes_step_outputs_for_github() {
         // The GitHub branch wires `$GITHUB_OUTPUT` through, so a downstream
         // step can read passed/failed/run_id without inq needing a separate
@@ -1658,6 +1928,7 @@ mod tests {
             false,
             &RunId::new("99"),
             Duration::ZERO,
+            &HashMap::new(),
         )
         .unwrap();
         let body = std::fs::read_to_string(temp.path()).unwrap();

@@ -450,6 +450,19 @@ enum Commands {
         /// downstream jobs.
         #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
         dotenv_path: Option<std::path::PathBuf>,
+
+        /// Stop after this many failed tests so the CI job fails fast.
+        /// With parallel workers a few in-flight tests may finish after the
+        /// threshold, so the recorded count can slightly exceed N. Applies
+        /// to the initial run only; retries (`--retry`) still run the full
+        /// failing set.
+        #[arg(long, value_name = "N")]
+        max_failures: Option<usize>,
+
+        /// Stop after the first failure. Shorthand for `--max-failures=1`.
+        /// Conflicts with `--max-failures`.
+        #[arg(long, conflicts_with = "max_failures")]
+        fail_fast: bool,
     },
 
     /// Run tests and load results
@@ -969,6 +982,8 @@ fn main() {
             testargs,
             junit_path,
             dotenv_path,
+            max_failures,
+            fail_fast,
         } => {
             let format = match format.parse::<inquest::commands::CiFormat>() {
                 Ok(f) => f,
@@ -1007,6 +1022,7 @@ fn main() {
                 },
                 None => TimeoutSetting::Disabled,
             };
+            let max_failures = if fail_fast { Some(1) } else { max_failures };
             let cmd = inquest::commands::CiCommand {
                 base_path: cli.directory,
                 format,
@@ -1021,6 +1037,7 @@ fn main() {
                 profile,
                 junit_path,
                 dotenv_path,
+                max_failures,
             };
             cmd.execute(&mut ui)
         }

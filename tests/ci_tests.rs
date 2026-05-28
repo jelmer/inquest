@@ -50,6 +50,35 @@ fn ci_help_lists_format_and_retry() {
     assert!(stdout.contains("--format"), "missing --format: {stdout}");
     assert!(stdout.contains("--retry"), "missing --retry: {stdout}");
     assert!(stdout.contains("--order"), "missing --order: {stdout}");
+    assert!(
+        stdout.contains("--max-failures"),
+        "missing --max-failures: {stdout}"
+    );
+    assert!(
+        stdout.contains("--fail-fast"),
+        "missing --fail-fast: {stdout}"
+    );
+}
+
+#[test]
+fn ci_fail_fast_conflicts_with_max_failures() {
+    // The two flags are aliases for the same behavior, so clap rejects
+    // combining them — better than silently letting one win.
+    let temp = TempDir::new().unwrap();
+    let out = ProcessCommand::new(inq_bin())
+        .arg("-C")
+        .arg(temp.path())
+        .arg("ci")
+        .arg("--fail-fast")
+        .arg("--max-failures=3")
+        .output()
+        .expect("run inq ci");
+    assert!(!out.status.success(), "expected clap to reject the combo");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "expected conflict message, got: {stderr}"
+    );
 }
 
 #[test]
