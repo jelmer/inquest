@@ -38,8 +38,10 @@ impl Command for ListTestsCommand {
                 if test_ids.is_empty() {
                     ui.output("No tests found")?;
                 } else {
-                    for test_id in test_ids {
-                        ui.output(test_id.as_str())?;
+                    for line in
+                        format_test_list(&test_ids, test_cmd.config().group_regex.as_deref())
+                    {
+                        ui.output(&line)?;
                     }
                 }
                 Ok(0)
@@ -58,6 +60,29 @@ impl Command for ListTestsCommand {
     fn help(&self) -> &str {
         "List all available tests"
     }
+}
+
+/// Render the test list for display, dropping a common group prefix when one
+/// exists. When a prefix is dropped, the first line is an informational
+/// `# common prefix: <prefix>` banner so the full IDs remain recoverable.
+fn format_test_list(
+    test_ids: &[crate::repository::TestId],
+    group_regex: Option<&str>,
+) -> Vec<String> {
+    let prefix = crate::grouping::common_group_prefix(test_ids, group_regex);
+    let mut lines = Vec::with_capacity(test_ids.len() + 1);
+    match prefix {
+        Some(ref p) => {
+            lines.push(format!("# common prefix: {}", p));
+            lines.extend(
+                test_ids
+                    .iter()
+                    .map(|id| crate::grouping::strip_prefix(id.as_str(), p).to_string()),
+            );
+        }
+        None => lines.extend(test_ids.iter().map(|id| id.as_str().to_string())),
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -108,5 +133,39 @@ test_list_option=
         assert_eq!(result.unwrap(), 0);
         // The echo command should output test1, test2, test3
         assert!(!ui.output.is_empty());
+    }
+
+    #[test]
+    fn format_test_list_strips_common_prefix() {
+        use crate::repository::TestId;
+        let ids = vec![TestId::new("a::b::test_x"), TestId::new("a::b::test_y")];
+        assert_eq!(
+            format_test_list(&ids, Some(r"^(.*)::[^:]+$")),
+            vec![
+                "# common prefix: a::b::".to_string(),
+                "test_x".to_string(),
+                "test_y".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_test_list_keeps_full_ids_when_no_common_prefix() {
+        use crate::repository::TestId;
+        let ids = vec![TestId::new("a::b::test_x"), TestId::new("a::c::test_y")];
+        assert_eq!(
+            format_test_list(&ids, Some(r"^(.*)::[^:]+$")),
+            vec!["a::b::test_x".to_string(), "a::c::test_y".to_string()]
+        );
+    }
+
+    #[test]
+    fn format_test_list_no_group_regex_keeps_full_ids() {
+        use crate::repository::TestId;
+        let ids = vec![TestId::new("a::b::test_x"), TestId::new("a::b::test_y")];
+        assert_eq!(
+            format_test_list(&ids, None),
+            vec!["a::b::test_x".to_string(), "a::b::test_y".to_string()]
+        );
     }
 }

@@ -492,6 +492,7 @@ impl CiCommand {
         }
 
         let stderr_capture = Arc::new(Mutex::new(Vec::new()));
+        let display_prefix = test_executor::display_prefix_for(test_ids.as_deref(), &test_cmd);
         let config = TestExecutorConfig {
             base_path: self.base_path.clone(),
             all_output: false,
@@ -504,6 +505,7 @@ impl CiCommand {
             max_restarts: None,
             stderr_capture: Some(stderr_capture.clone()),
             result_callback,
+            display_prefix,
         };
         let executor = TestExecutor::new(&config);
 
