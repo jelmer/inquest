@@ -136,6 +136,7 @@ impl RunCommand {
     fn executor_config(
         &self,
         stderr_capture: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
+        display_prefix: Option<String>,
     ) -> TestExecutorConfig {
         TestExecutorConfig {
             base_path: self.base_path.clone(),
@@ -145,6 +146,7 @@ impl RunCommand {
             max_restarts: self.max_restarts,
             stderr_capture,
             result_callback: None,
+            display_prefix,
         }
     }
 }
@@ -303,12 +305,21 @@ impl RunCommand {
                 test_cmd.list_tests()?
             };
 
+            let prefix = crate::grouping::common_group_prefix(
+                &all_test_ids,
+                test_cmd.config().group_regex.as_deref(),
+            );
+
             let filtered_ids: Vec<_> = all_test_ids
                 .into_iter()
                 .filter(|test_id| {
+                    let full = test_id.as_str();
+                    let stripped = prefix
+                        .as_deref()
+                        .map(|p| crate::grouping::strip_prefix(full, p));
                     compiled_filters
                         .iter()
-                        .any(|re| re.is_match(test_id.as_str()))
+                        .any(|re| re.is_match(full) || stripped.is_some_and(|s| re.is_match(s)))
                 })
                 .collect();
 
@@ -323,11 +334,36 @@ impl RunCommand {
             };
 
             let known: Vec<&str> = all_test_ids.iter().map(|id| id.as_str()).collect();
+            let common_prefix = crate::grouping::common_group_prefix(
+                &all_test_ids,
+                test_cmd.config().group_regex.as_deref(),
+            );
             let mut prefixes: Vec<String> = Vec::with_capacity(starting_with.len());
             for s in starting_with {
                 let expanded = crate::abbreviation::expand_abbreviation(s, &known)?;
                 if expanded != *s {
                     ui.output(&format!("Expanded '{}' to '{}'", s, expanded))?;
+                }
+                // Also accept the selector with the common group prefix
+                // prepended, so users can leave it off. The filter below is a
+                // disjunction, so the extra candidate never excludes a match.
+                if let Some(ref cp) = common_prefix {
+                    let prefixed = crate::grouping::apply_prefix(&expanded, cp);
+                    if prefixed != expanded {
+                        // The bare and prefix-relative forms can match disjoint
+                        // sets of tests (e.g. selector `b` matching both a
+                        // top-level `b::` module and `<prefix>b::`). When both
+                        // match different tests the selector is ambiguous, so
+                        // warn rather than silently running the union.
+                        if starting_with_is_ambiguous(&known, &expanded, &prefixed) {
+                            ui.output(&format!(
+                                "Warning: '{}' is ambiguous; it matches both '{}' and '{}'. \
+                                 Running both - qualify the selector to disambiguate.",
+                                s, expanded, prefixed
+                            ))?;
+                        }
+                        prefixes.push(prefixed);
+                    }
                 }
                 prefixes.push(expanded);
             }
@@ -336,11 +372,7 @@ impl RunCommand {
                 .into_iter()
                 .filter(|test_id| {
                     let id = test_id.as_str();
-                    prefixes.iter().any(|p| {
-                        id == p
-                            || id.starts_with(p)
-                                && id.as_bytes().get(p.len()).copied() == Some(b'.')
-                    })
+                    prefixes.iter().any(|p| id_starts_with_segment(id, p))
                 })
                 .collect();
 
@@ -406,7 +438,8 @@ impl RunCommand {
             .stderr_capture
             .clone()
             .unwrap_or_else(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
-        let config = self.executor_config(Some(stderr_capture.clone()));
+        let display_prefix = test_executor::display_prefix_for(test_ids.as_deref(), &test_cmd);
+        let config = self.executor_config(Some(stderr_capture.clone()), display_prefix);
         let executor = TestExecutor::new(&config);
 
         if self.subunit {
@@ -764,6 +797,30 @@ pub(crate) fn compute_failure_counts(
     counts
 }
 
+/// True when a `-s` selector is ambiguous: both its bare form and its
+/// prefix-prepended form match a (necessarily disjoint) non-empty set of known
+/// tests. In that case the user cannot tell which group they meant.
+fn starting_with_is_ambiguous(known: &[&str], bare: &str, prefixed: &str) -> bool {
+    known.iter().any(|id| id_starts_with_segment(id, bare))
+        && known.iter().any(|id| id_starts_with_segment(id, prefixed))
+}
+
+/// True when `id` equals `prefix`, or `prefix` is a segment-aligned prefix of
+/// `id` (i.e. immediately followed by a `.` or `:` path separator). This avoids
+/// matching `foo_bar` for the selector `foo`.
+fn id_starts_with_segment(id: &str, prefix: &str) -> bool {
+    if id == prefix {
+        return true;
+    }
+    if !id.starts_with(prefix) {
+        return false;
+    }
+    matches!(
+        id.as_bytes().get(prefix.len()).copied(),
+        Some(b'.') | Some(b':')
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,6 +882,45 @@ test_command=echo "test1"
     fn test_run_command_name() {
         let cmd = RunCommand::new(None);
         assert_eq!(cmd.name(), "run");
+    }
+
+    #[test]
+    fn id_starts_with_segment_exact_and_boundaries() {
+        // Exact match.
+        assert!(id_starts_with_segment("a::b", "a::b"));
+        // Rust `::` boundary.
+        assert!(id_starts_with_segment("a::b::test_x", "a::b"));
+        // Python/Go `.` boundary.
+        assert!(id_starts_with_segment("a.b.test_x", "a.b"));
+    }
+
+    #[test]
+    fn starting_with_ambiguous_when_both_forms_match() {
+        // Selector `b` (prefix `a::`): a top-level `b::` module exists AND
+        // `a::b::` exists, so the bare and prefixed forms each match.
+        let known = ["a::b::test_x", "b::test_y"];
+        assert!(starting_with_is_ambiguous(&known, "b", "a::b"));
+    }
+
+    #[test]
+    fn starting_with_unambiguous_when_only_prefixed_matches() {
+        // The common case: the bare form matches nothing, only the prefixed
+        // form does, so there is no ambiguity to warn about.
+        let known = ["a::b::test_x", "a::c::test_y"];
+        assert!(!starting_with_is_ambiguous(&known, "b", "a::b"));
+    }
+
+    #[test]
+    fn starting_with_unambiguous_when_only_bare_matches() {
+        let known = ["b::test_y"];
+        assert!(!starting_with_is_ambiguous(&known, "b", "a::b"));
+    }
+
+    #[test]
+    fn id_starts_with_segment_rejects_mid_segment() {
+        // Must not match a longer segment that merely starts with the prefix.
+        assert!(!id_starts_with_segment("foo_bar::test_x", "foo"));
+        assert!(!id_starts_with_segment("foobar", "foo"));
     }
 
     #[test]

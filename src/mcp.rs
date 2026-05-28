@@ -182,9 +182,11 @@ pub struct FailureSummaryParam {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct TestLookupParam {
     /// Exact test ID to fetch. Matched string-equal against stored IDs — no
-    /// globs, no regex, no prefix matching. If you need pattern matching,
-    /// use inq_log with `test_patterns` (glob) or inq_run with `test_filters`
-    /// (regex).
+    /// globs, no regex. As a convenience, if the exact lookup misses and the
+    /// run's tests share a common group prefix, the prefix is prepended and the
+    /// lookup retried, so a prefix-less short ID also resolves. If you need
+    /// pattern matching, use inq_log with `test_patterns` (glob) or inq_run with
+    /// `test_filters` (regex).
     pub test_id: String,
     /// Run ID to query (defaults to latest; supports negative indices like -1, -2).
     pub run_id: Option<String>,
@@ -859,6 +861,10 @@ struct ListTestsResponse {
     total: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     truncated: Option<usize>,
+    /// Common prefix dropped from every entry in `tests`. Prepend it to a
+    /// listed ID to recover the full test ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    common_prefix: Option<String>,
     tests: Vec<String>,
 }
 
@@ -1498,16 +1504,36 @@ impl InquestMcpService {
         let test_run = repo.get_test_run(&run_id).map_err(to_mcp_err)?;
 
         let test_id = crate::repository::TestId::new(&params.0.test_id);
-        let result = test_run.results.get(&test_id).ok_or_else(|| {
-            ErrorData::invalid_params(
-                format!(
-                    "Test '{}' not found in run '{}'",
-                    params.0.test_id,
-                    run_id.as_str()
-                ),
-                None,
-            )
-        })?;
+        let result = match test_run.results.get(&test_id) {
+            Some(r) => r,
+            None => {
+                // Fall back to prepending the common group prefix so a
+                // prefix-less short ID resolves.
+                let group_regex = TestCommand::from_directory(&self.directory)
+                    .ok()
+                    .and_then(|tc| tc.config().group_regex.clone());
+                let keys: Vec<crate::repository::TestId> =
+                    test_run.results.keys().cloned().collect();
+                crate::grouping::common_group_prefix(&keys, group_regex.as_deref())
+                    .map(|p| {
+                        crate::repository::TestId::new(crate::grouping::apply_prefix(
+                            &params.0.test_id,
+                            &p,
+                        ))
+                    })
+                    .and_then(|full| test_run.results.get(&full))
+                    .ok_or_else(|| {
+                        ErrorData::invalid_params(
+                            format!(
+                                "Test '{}' not found in run '{}'",
+                                params.0.test_id,
+                                run_id.as_str()
+                            ),
+                            None,
+                        )
+                    })?
+            }
+        };
 
         let max_detail_lines = params.0.max_detail_lines.unwrap_or(60);
 
@@ -1695,10 +1721,22 @@ impl InquestMcpService {
                         ErrorData::internal_error(format!("Failed to list tests: {}", e), None)
                     })?
                 };
+                let prefix = crate::grouping::common_group_prefix(
+                    &all_ids,
+                    test_cmd.config().group_regex.as_deref(),
+                );
                 test_ids = Some(
                     all_ids
                         .into_iter()
-                        .filter(|id| compiled.iter().any(|re| re.is_match(id.as_str())))
+                        .filter(|id| {
+                            let full = id.as_str();
+                            let stripped = prefix
+                                .as_deref()
+                                .map(|p| crate::grouping::strip_prefix(full, p));
+                            compiled.iter().any(|re| {
+                                re.is_match(full) || stripped.is_some_and(|s| re.is_match(s))
+                            })
+                        })
                         .collect(),
                 );
             }
@@ -1726,6 +1764,9 @@ impl InquestMcpService {
             let run_id_for_cleanup = run_id_for_response.clone();
             drop(repo);
 
+            let display_prefix =
+                crate::test_executor::display_prefix_for(test_ids.as_deref(), &test_cmd);
+
             tokio::task::spawn_blocking(move || {
                 let mut ui = NullUI;
                 let config = crate::test_executor::TestExecutorConfig {
@@ -1736,6 +1777,7 @@ impl InquestMcpService {
                     max_restarts: None,
                     stderr_capture: None,
                     result_callback: None,
+                    display_prefix,
                 };
                 let executor = crate::test_executor::TestExecutor::new(&config);
 
@@ -2159,13 +2201,21 @@ impl InquestMcpService {
             .map_err(|e| ErrorData::internal_error(format!("Failed to list tests: {}", e), None))?;
 
         let total = test_ids.len();
+        // Compute the prefix from the full list so it is stable across pages.
+        let common_prefix = crate::grouping::common_group_prefix(
+            &test_ids,
+            test_cmd.config().group_regex.as_deref(),
+        );
         let offset = params.0.offset.unwrap_or(0);
         let limit = params.0.limit.unwrap_or(100);
         let tests: Vec<String> = test_ids
             .iter()
             .skip(offset)
             .take(limit)
-            .map(|id| id.as_str().to_string())
+            .map(|id| match common_prefix {
+                Some(ref p) => crate::grouping::strip_prefix(id.as_str(), p).to_string(),
+                None => id.as_str().to_string(),
+            })
             .collect();
         let returned = tests.len();
         let truncated = total.saturating_sub(offset + returned);
@@ -2174,6 +2224,7 @@ impl InquestMcpService {
             count: returned,
             total,
             truncated: (truncated > 0).then_some(truncated),
+            common_prefix,
             tests,
         })
     }
@@ -3415,6 +3466,39 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_inq_test_resolves_short_id() {
+        let factory = InquestRepositoryFactory;
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join(".testr.conf"),
+            "[DEFAULT]\ntest_command=true\ngroup_regex=^(.*)::[^:]+$\n",
+        )
+        .unwrap();
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        let mut run = TestRun::new(RunId::new("0"));
+        run.timestamp = chrono::DateTime::from_timestamp(1000000000, 0).unwrap();
+        run.add_result(TestResult::failure("pkg::mod::test_x", "boom"));
+        run.add_result(TestResult::failure("pkg::mod::test_y", "boom"));
+        repo.insert_test_run(run).unwrap();
+        drop(repo);
+
+        let service = InquestMcpService::new(temp.path().to_path_buf());
+        // A prefix-less short ID resolves to the full ID via the common prefix.
+        let result = service
+            .inq_test(Parameters(TestLookupParam {
+                test_id: "test_x".to_string(),
+                run_id: None,
+                max_detail_lines: None,
+            }))
+            .await
+            .unwrap();
+        let json = parse_result(&result);
+        assert_eq!(json["test_id"], "pkg::mod::test_x");
+        assert_eq!(json["status"], "failure");
     }
 
     #[tokio::test]

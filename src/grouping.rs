@@ -64,6 +64,69 @@ pub fn group_tests(
     Ok(groups)
 }
 
+/// Compute the common, separator-aligned prefix shared by all tests, derived
+/// from the grouping config. Returns the prefix *including* its trailing
+/// separator (e.g. `"mycrate::foo::"` or `"package.module."`), or `None` if
+/// there is no single droppable prefix.
+///
+/// The prefix is only returned when the tests fall into exactly one group whose
+/// name is a strict, separator-aligned prefix of every test ID. This makes the
+/// result safe to strip from display and to re-prepend to user input.
+pub fn common_group_prefix(tests: &[TestId], group_regex: Option<&str>) -> Option<String> {
+    let regex = group_regex?;
+    if tests.len() < 2 {
+        return None;
+    }
+
+    let groups = group_tests(tests, regex).ok()?;
+    if groups.len() != 1 {
+        return None;
+    }
+    let group_name = groups.into_keys().next()?;
+    if group_name.is_empty() {
+        return None;
+    }
+
+    let separator = detect_separator(tests, &group_name)?;
+    let prefix = format!("{group_name}{separator}");
+
+    // Every test must be the prefix followed by a non-empty remainder.
+    if tests
+        .iter()
+        .all(|t| t.as_str().len() > prefix.len() && t.as_str().starts_with(&prefix))
+    {
+        Some(prefix)
+    } else {
+        None
+    }
+}
+
+/// Infer the path separator that follows `group_name` in every test ID. Returns
+/// `"::"` (Rust) or `"."` (Python/Go) when uniform, else `None`.
+fn detect_separator(tests: &[TestId], group_name: &str) -> Option<&'static str> {
+    ["::", "."].into_iter().find(|sep| {
+        tests.iter().all(|t| {
+            t.as_str()
+                .strip_prefix(group_name)
+                .is_some_and(|rest| rest.starts_with(sep))
+        })
+    })
+}
+
+/// Return `id` with `prefix` removed if it starts with it, otherwise `id`.
+pub fn strip_prefix<'a>(id: &'a str, prefix: &str) -> &'a str {
+    id.strip_prefix(prefix).unwrap_or(id)
+}
+
+/// Return `prefix + input` unless `input` already starts with `prefix`.
+pub fn apply_prefix(input: &str, prefix: &str) -> String {
+    if input.starts_with(prefix) {
+        input.to_string()
+    } else {
+        format!("{prefix}{input}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +229,87 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups.get("package").unwrap().len(), 2);
         assert_eq!(groups.get("other").unwrap().len(), 1);
+    }
+
+    const RUST_REGEX: &str = r"^(.*)::[^:]+$";
+    const PY_REGEX: &str = r"^(.*)\.[^.]+$";
+
+    #[test]
+    fn common_prefix_rust_double_colon() {
+        let tests = vec![
+            TestId::new("a::b::test_x"),
+            TestId::new("a::b::test_y"),
+            TestId::new("a::b::test_z"),
+        ];
+        assert_eq!(
+            common_group_prefix(&tests, Some(RUST_REGEX)),
+            Some("a::b::".to_string())
+        );
+    }
+
+    #[test]
+    fn common_prefix_python_dot() {
+        let tests = vec![TestId::new("pkg.mod.test_a"), TestId::new("pkg.mod.test_b")];
+        assert_eq!(
+            common_group_prefix(&tests, Some(PY_REGEX)),
+            Some("pkg.mod.".to_string())
+        );
+    }
+
+    #[test]
+    fn common_prefix_multiple_groups_none() {
+        let tests = vec![TestId::new("a::b::test_x"), TestId::new("a::c::test_y")];
+        assert_eq!(common_group_prefix(&tests, Some(RUST_REGEX)), None);
+    }
+
+    #[test]
+    fn common_prefix_single_test_none() {
+        let tests = vec![TestId::new("a::b::test_x")];
+        assert_eq!(common_group_prefix(&tests, Some(RUST_REGEX)), None);
+    }
+
+    #[test]
+    fn common_prefix_zero_tests_none() {
+        let tests: Vec<TestId> = vec![];
+        assert_eq!(common_group_prefix(&tests, Some(RUST_REGEX)), None);
+    }
+
+    #[test]
+    fn common_prefix_no_regex_none() {
+        let tests = vec![TestId::new("a::b::test_x"), TestId::new("a::b::test_y")];
+        assert_eq!(common_group_prefix(&tests, None), None);
+    }
+
+    #[test]
+    fn common_prefix_bad_regex_none() {
+        let tests = vec![TestId::new("a::b::test_x"), TestId::new("a::b::test_y")];
+        assert_eq!(common_group_prefix(&tests, Some(r"^(unclosed")), None);
+    }
+
+    #[test]
+    fn common_prefix_separator_mismatch_none() {
+        // One group name, but the separator after it differs between IDs, so no
+        // uniform separator can be detected.
+        let tests = vec![TestId::new("a::b::test_x"), TestId::new("a::b.test_y")];
+        assert_eq!(common_group_prefix(&tests, Some(r"^(a::b).*$")), None);
+    }
+
+    #[test]
+    fn common_prefix_group_name_not_literal_prefix_none() {
+        // A regex whose captured group is not a literal prefix of the IDs.
+        let tests = vec![TestId::new("a::b::test_x"), TestId::new("a::b::test_y")];
+        assert_eq!(common_group_prefix(&tests, Some(r"^.*::(test_\w+)$")), None);
+    }
+
+    #[test]
+    fn strip_prefix_removes_when_present() {
+        assert_eq!(strip_prefix("a::b::test_x", "a::b::"), "test_x");
+        assert_eq!(strip_prefix("other::test_x", "a::b::"), "other::test_x");
+    }
+
+    #[test]
+    fn apply_prefix_prepends_when_absent() {
+        assert_eq!(apply_prefix("test_x", "a::b::"), "a::b::test_x");
+        assert_eq!(apply_prefix("a::b::test_x", "a::b::"), "a::b::test_x");
     }
 }

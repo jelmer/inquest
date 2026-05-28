@@ -1296,6 +1296,7 @@ fn test_serial_run_with_cancellation() {
         max_restarts: None,
         stderr_capture: None,
         result_callback: None,
+        display_prefix: None,
     };
     let executor = TestExecutor::new(&exec_config);
 
@@ -1364,6 +1365,7 @@ fn test_isolated_run_with_cancellation() {
         max_restarts: None,
         stderr_capture: None,
         result_callback: None,
+        display_prefix: None,
     };
     let executor = TestExecutor::new(&exec_config);
 
@@ -1422,6 +1424,7 @@ fn test_isolated_run_does_not_deadlock_on_large_stderr() {
         max_restarts: None,
         stderr_capture: Some(stderr_capture.clone()),
         result_callback: None,
+        display_prefix: None,
     };
     let executor = TestExecutor::new(&exec_config);
 

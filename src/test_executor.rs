@@ -175,6 +175,9 @@ pub struct TestExecutorConfig {
     /// appear in the workflow log the moment they happen rather than after the
     /// whole run finishes. `None` skips the per-result hook entirely.
     pub result_callback: Option<ResultCallback>,
+    /// Common test-ID prefix to drop from the progress display. `None` shows
+    /// full IDs.
+    pub display_prefix: Option<String>,
 }
 
 /// Per-result callback fired by the executor as each test completes. Shared
@@ -466,6 +469,7 @@ impl<'a> TestExecutor<'a> {
                 .clone()
                 .unwrap_or_else(|| EtaState::new(Duration::ZERO));
             let result_callback_for_thread = self.config.result_callback.clone();
+            let display_prefix_for_thread = self.config.display_prefix.clone();
 
             let parse_thread = std::thread::spawn(move || {
                 let progress_bar_for_bytes = progress_bar_clone.clone();
@@ -475,6 +479,7 @@ impl<'a> TestExecutor<'a> {
                     false,
                     eta_model_for_thread,
                     eta_state_for_thread,
+                    display_prefix_for_thread,
                 );
 
                 subunit_stream::parse_stream_with_progress(
@@ -968,6 +973,7 @@ impl<'a> TestExecutor<'a> {
 
                 let output_filter_clone = output_filter;
                 let result_callback_for_worker = self.config.result_callback.clone();
+                let display_prefix_for_worker = self.config.display_prefix.clone();
                 let parse_thread = std::thread::spawn(move || {
                     let worker_bar_for_bytes = worker_bar_clone.clone();
                     let mut tracker = BarProgress::new(
@@ -976,6 +982,7 @@ impl<'a> TestExecutor<'a> {
                         true,
                         eta_model_for_worker,
                         worker_eta_state_for_thread,
+                        display_prefix_for_worker,
                     );
 
                     subunit_stream::parse_stream_with_progress(
@@ -1520,6 +1527,21 @@ fn update_progress_bar_style(
     progress_bar.set_style(attach_eta_key(style, eta_state));
 }
 
+/// Compute the common group prefix to drop from the progress display for a run.
+///
+/// `test_ids` are the resolved IDs about to run. When `None` (a pure
+/// discovery-order run with no filtering), the prefix is left unset so we don't
+/// trigger a separate, possibly expensive, listing pass just for display — the
+/// progress bar shows full IDs instead. Returns `None` when no single common
+/// prefix exists.
+pub fn display_prefix_for(
+    test_ids: Option<&[TestId]>,
+    test_cmd: &crate::testcommand::TestCommand,
+) -> Option<String> {
+    let group_regex = test_cmd.config().group_regex.as_deref();
+    crate::grouping::common_group_prefix(test_ids?, group_regex)
+}
+
 /// Computed progress bar layout dimensions for a terminal.
 struct ProgressLayout {
     bar_width: usize,
@@ -1642,6 +1664,7 @@ struct BarProgress {
     short_fail_label: bool,
     eta_model: EtaModel,
     eta_state: Arc<EtaState>,
+    display_prefix: Option<String>,
 }
 
 impl BarProgress {
@@ -1651,6 +1674,7 @@ impl BarProgress {
         short_fail_label: bool,
         eta_model: EtaModel,
         eta_state: Arc<EtaState>,
+        display_prefix: Option<String>,
     ) -> Self {
         BarProgress {
             failures: 0,
@@ -1659,6 +1683,7 @@ impl BarProgress {
             short_fail_label,
             eta_model,
             eta_state,
+            display_prefix,
         }
     }
 
@@ -1712,7 +1737,12 @@ impl BarProgress {
         } else {
             0
         };
-        let short_name = truncate_test_name(test_id, self.max_msg_len, extra_len);
+        let display = self
+            .display_prefix
+            .as_deref()
+            .map(|p| crate::grouping::strip_prefix(test_id, p))
+            .unwrap_or(test_id);
+        let short_name = truncate_test_name(display, self.max_msg_len, extra_len);
 
         let indicator = status.indicator();
         progress_bar.set_message(format!("{} {}{}", indicator, short_name, fail_msg));
