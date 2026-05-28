@@ -1847,7 +1847,7 @@ fn collect_worker_results(
         wt.bar.finish_with_message("done");
 
         let worker_tag = format!("worker-{}", wt.worker_id);
-        for (_, result) in worker_run.results.iter_mut() {
+        for result in worker_run.results.values_mut() {
             if !result.tags.contains(&worker_tag) {
                 result.tags.push(worker_tag.clone());
             }
