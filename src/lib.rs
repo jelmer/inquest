@@ -80,6 +80,7 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub mod eta;
+pub mod git_notes;
 pub mod grouping;
 #[cfg(feature = "mcp")]
 pub mod mcp;

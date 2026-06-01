@@ -382,11 +382,9 @@ pub fn warn_slow_tests(
 
 /// Persist a completed test run to the repository and display summary.
 ///
-/// Persist a completed test run to the repository and display summary.
-///
-/// Returns `(exit_code, run_id)`. The `run_id` is returned because `output`
-/// is consumed, saving the caller from cloning it beforehand.
-#[allow(clippy::too_many_arguments)]
+/// Returns `(exit_code, run_id, totals)`. `run_id` is returned because
+/// `output` is consumed, and `totals` is returned so the caller can pass
+/// them on to [`mirror_run_to_git`] without recomputing.
 pub fn persist_and_display_run(
     ui: &mut dyn UI,
     repo: &mut dyn Repository,
@@ -396,7 +394,7 @@ pub fn persist_and_display_run(
     filter_tags: &[String],
     profile: Option<String>,
     eta_debug: bool,
-) -> Result<(i32, RunId)> {
+) -> Result<(i32, RunId, crate::git_notes::RunTotals)> {
     let exit_code = output.exit_code();
     let crate::test_executor::RunOutput {
         run_id,
@@ -430,6 +428,7 @@ pub fn persist_and_display_run(
         predicted_duration,
     )?;
 
+    let totals = crate::git_notes::RunTotals::from_run(&combined_run);
     display_test_summary(ui, &run_id, &combined_run, filter_tags)?;
     if eta_debug {
         if let Some(predicted) = predicted_duration {
@@ -438,7 +437,33 @@ pub fn persist_and_display_run(
     }
     warn_slow_tests(ui, &combined_run, historical_times)?;
 
-    Ok((exit_code, run_id))
+    Ok((exit_code, run_id, totals))
+}
+
+/// Mirror a freshly-persisted run into the inquest git side ref.
+///
+/// Reads run metadata, captured stderr, and timestamp back from `repo` so
+/// the mirror sees exactly what was just persisted. Errors are returned to
+/// the caller, who is expected to log-and-swallow — mirroring failure must
+/// never fail a run.
+pub fn mirror_run_to_git(
+    repo: &dyn Repository,
+    run_id: &RunId,
+    totals: crate::git_notes::RunTotals,
+) -> Result<()> {
+    let metadata = repo.get_run_metadata(run_id)?;
+    let started_at = repo.get_run_started_at(run_id)?;
+    let timestamp = started_at.map(|t| t.to_rfc3339());
+    let stderr = repo.get_run_stderr(run_id)?;
+    crate::git_notes::mirror_run(
+        repo,
+        run_id,
+        &metadata,
+        totals,
+        timestamp.as_deref(),
+        stderr.as_deref(),
+        crate::git_notes::DEFAULT_MIRROR_REF,
+    )
 }
 
 #[cfg(test)]
@@ -932,7 +957,7 @@ mod tests {
 
         let mut ui = crate::ui::test_ui::TestUI::new();
         let historical = std::collections::HashMap::new();
-        let (exit_code, run_id) = persist_and_display_run(
+        let (exit_code, run_id, _totals) = persist_and_display_run(
             &mut ui,
             repo.as_mut(),
             output,
@@ -1024,7 +1049,7 @@ mod tests {
 
         let mut ui = crate::ui::test_ui::TestUI::new();
         let historical = std::collections::HashMap::new();
-        let (exit_code, run_id) = persist_and_display_run(
+        let (exit_code, run_id, _totals) = persist_and_display_run(
             &mut ui,
             repo.as_mut(),
             output,
