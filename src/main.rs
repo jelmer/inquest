@@ -611,6 +611,21 @@ fn parse_nice(s: &str) -> std::result::Result<i32, String> {
 }
 
 fn main() {
+    // Clap's parsing and help rendering for this large command tree are
+    // recursive enough to overflow Windows' default 1 MiB main-thread stack.
+    // Run everything on a worker thread with a generous stack so the limit
+    // doesn't depend on the platform default.
+    let child = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn main worker thread");
+    match child.join() {
+        Ok(()) => {}
+        Err(e) => std::panic::resume_unwind(e),
+    }
+}
+
+fn run() {
     // Initialize tracing with stderr output, respecting RUST_LOG env var
     tracing_subscriber::fmt()
         .with_env_filter(
