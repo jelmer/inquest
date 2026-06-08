@@ -382,6 +382,12 @@ enum Commands {
         /// Additional arguments to pass to the test command (use after --)
         #[arg(last = true, value_name = "TESTARGS")]
         testargs: Vec<String>,
+
+        /// Lower the priority of spawned test processes by this nice increment
+        /// (unix only; see nice(1)). Range -20..=19. Pass `--nice` without a
+        /// value to use 10.
+        #[arg(long, value_name = "N", value_parser = parse_nice, num_args = 0..=1, default_missing_value = "10")]
+        nice: Option<i32>,
     },
 
     /// Run tests with output formatted for a CI provider
@@ -463,6 +469,12 @@ enum Commands {
         /// Conflicts with `--max-failures`.
         #[arg(long, conflicts_with = "max_failures")]
         fail_fast: bool,
+
+        /// Lower the priority of spawned test processes by this nice increment
+        /// (unix only; see nice(1)). Range -20..=19. Pass `--nice` without a
+        /// value to use 10.
+        #[arg(long, value_name = "N", value_parser = parse_nice, num_args = 0..=1, default_missing_value = "10")]
+        nice: Option<i32>,
     },
 
     /// Run tests and load results
@@ -554,6 +566,13 @@ enum Commands {
         /// Additional arguments to pass to the test command (use after --)
         #[arg(last = true, value_name = "TESTARGS")]
         testargs: Vec<String>,
+
+        /// Lower the priority of spawned test processes by this nice increment
+        /// (unix only; see nice(1)). Range -20..=19. Pass `--nice` without a
+        /// value to use 10. Positive values yield CPU to interactive work;
+        /// negative values raise priority and require privileges.
+        #[arg(long, value_name = "N", value_parser = parse_nice, num_args = 0..=1, default_missing_value = "10")]
+        nice: Option<i32>,
     },
 }
 
@@ -577,7 +596,36 @@ impl UI for CliUI {
     }
 }
 
+/// Parse a `--nice` argument. Accepts the POSIX range -20..=19.
+fn parse_nice(s: &str) -> std::result::Result<i32, String> {
+    let n: i32 = s
+        .parse()
+        .map_err(|_| format!("invalid nice value '{}': expected an integer", s))?;
+    if !(-20..=19).contains(&n) {
+        return Err(format!(
+            "nice value {} is outside the POSIX range -20..=19",
+            n
+        ));
+    }
+    Ok(n)
+}
+
 fn main() {
+    // Clap's parsing and help rendering for this large command tree are
+    // recursive enough to overflow Windows' default 1 MiB main-thread stack.
+    // Run everything on a worker thread with a generous stack so the limit
+    // doesn't depend on the platform default.
+    let child = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn main worker thread");
+    match child.join() {
+        Ok(()) => {}
+        Err(e) => std::panic::resume_unwind(e),
+    }
+}
+
+fn run() {
     // Initialize tracing with stderr output, respecting RUST_LOG env var
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -640,6 +688,7 @@ fn main() {
         // keeps Discovery as its default.
         order: Some("auto".to_string()),
         testargs: Vec::new(),
+        nice: None,
     });
 
     let result = match command {
@@ -892,6 +941,7 @@ fn main() {
             max_restarts,
             order,
             testargs,
+            nice,
         } => {
             let test_timeout = match test_timeout {
                 Some(s) => match TimeoutSetting::parse(&s) {
@@ -961,6 +1011,7 @@ fn main() {
                 no_output_timeout,
                 max_restarts,
                 test_order,
+                nice,
             };
             cmd.execute(&mut ui)
         }
@@ -984,6 +1035,7 @@ fn main() {
             dotenv_path,
             max_failures,
             fail_fast,
+            nice,
         } => {
             let format = match format.parse::<inquest::commands::CiFormat>() {
                 Ok(f) => f,
@@ -1038,6 +1090,7 @@ fn main() {
                 junit_path,
                 dotenv_path,
                 max_failures,
+                nice,
             };
             cmd.execute(&mut ui)
         }
@@ -1062,6 +1115,7 @@ fn main() {
             filter_tags,
             starting_with,
             testargs,
+            nice,
         } => {
             // Parse timeout settings: CLI flags override config file values.
             // Config file values are resolved later in RunCommand::execute() if these are Disabled/None.
@@ -1151,6 +1205,7 @@ fn main() {
                 profile,
                 implicit_run,
                 eta_debug: cli.eta_debug,
+                nice,
             };
             cmd.execute(&mut ui)
         }
@@ -1167,5 +1222,30 @@ fn main() {
             }
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_nice;
+
+    #[test]
+    fn parse_nice_accepts_in_range() {
+        assert_eq!(parse_nice("0").unwrap(), 0);
+        assert_eq!(parse_nice("-20").unwrap(), -20);
+        assert_eq!(parse_nice("19").unwrap(), 19);
+        assert_eq!(parse_nice("5").unwrap(), 5);
+    }
+
+    #[test]
+    fn parse_nice_rejects_out_of_range() {
+        assert!(parse_nice("20").is_err());
+        assert!(parse_nice("-21").is_err());
+    }
+
+    #[test]
+    fn parse_nice_rejects_garbage() {
+        assert!(parse_nice("foo").is_err());
+        assert!(parse_nice("").is_err());
     }
 }

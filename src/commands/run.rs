@@ -112,6 +112,9 @@ pub struct RunCommand {
     /// predicted-vs-actual comparison (after the run). Wired from the
     /// global `--eta-debug` CLI flag.
     pub eta_debug: bool,
+    /// Niceness increment for spawned test processes (unix only). See
+    /// [`crate::test_executor::TestExecutorConfig::nice`].
+    pub nice: Option<i32>,
 }
 
 impl RunCommand {
@@ -147,6 +150,7 @@ impl RunCommand {
             stderr_capture,
             result_callback: None,
             display_prefix,
+            nice: self.nice,
         }
     }
 }

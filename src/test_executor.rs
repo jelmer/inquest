@@ -178,6 +178,12 @@ pub struct TestExecutorConfig {
     /// Common test-ID prefix to drop from the progress display. `None` shows
     /// full IDs.
     pub display_prefix: Option<String>,
+    /// Niceness increment applied to each spawned test process via
+    /// `setpriority(2)` after fork. Positive values lower priority so workers
+    /// yield CPU to interactive tasks; negative values require privileges and
+    /// are surfaced as a warning if the kernel refuses them. `None` leaves
+    /// niceness unchanged. Unix-only; ignored on other platforms.
+    pub nice: Option<i32>,
 }
 
 /// Per-result callback fired by the executor as each test completes. Shared
@@ -211,6 +217,12 @@ pub struct TestExecutor<'a> {
 impl<'a> TestExecutor<'a> {
     /// Create a new executor with the given configuration.
     pub fn new(config: &'a TestExecutorConfig) -> Self {
+        #[cfg(not(unix))]
+        if config.nice.is_some() {
+            tracing::warn!(
+                "ignoring --nice: process priority adjustment is only supported on unix"
+            );
+        }
         Self { config }
     }
 
@@ -241,6 +253,7 @@ impl<'a> TestExecutor<'a> {
         let mut child = spawn_in_process_group(
             &cmd_str,
             Path::new(self.config.base_path.as_deref().unwrap_or(".")),
+            self.config.nice,
         )
         .map_err(|e| {
             crate::error::Error::CommandExecution(format!("Failed to execute test command: {}", e))
@@ -430,6 +443,7 @@ impl<'a> TestExecutor<'a> {
             let mut child = spawn_in_process_group(
                 &cmd_str,
                 Path::new(self.config.base_path.as_deref().unwrap_or(".")),
+                self.config.nice,
             )
             .map_err(|e| {
                 progress_bar.finish_and_clear();
@@ -903,6 +917,7 @@ impl<'a> TestExecutor<'a> {
                 let mut child = spawn_in_process_group(
                     &cmd_str,
                     Path::new(self.config.base_path.as_deref().unwrap_or(".")),
+                    self.config.nice,
                 )
                 .map_err(|e| {
                     crate::error::Error::CommandExecution(format!(
@@ -1183,6 +1198,7 @@ impl<'a> TestExecutor<'a> {
             let mut child = spawn_in_process_group(
                 &cmd_str,
                 Path::new(self.config.base_path.as_deref().unwrap_or(".")),
+                self.config.nice,
             )
             .map_err(|e| {
                 crate::error::Error::CommandExecution(format!(
@@ -1435,9 +1451,18 @@ fn update_watchdog(
 }
 
 /// Spawn a shell command in its own process group so the entire tree can be killed on timeout.
+///
+/// `nice` is an optional niceness *increment* applied to the spawned child via
+/// `setpriority(2)` after fork. Positive values lower the child's priority
+/// (yielding CPU to interactive work); negative values raise it and require
+/// privileges. Failures from `setpriority` are silently ignored — the child
+/// still runs, just at the default priority — because aborting a whole test
+/// run for a missed nice adjustment would be worse than the lost throttling.
+/// Ignored on non-unix platforms.
 fn spawn_in_process_group(
     cmd_str: &str,
     working_dir: &Path,
+    nice: Option<i32>,
 ) -> std::io::Result<std::process::Child> {
     use std::process::{Command, Stdio};
     let mut cmd = Command::new("sh");
@@ -1451,6 +1476,23 @@ fn spawn_in_process_group(
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
+        if let Some(nice_value) = nice {
+            // Safety: pre_exec runs in the forked child before exec. setpriority
+            // is async-signal-safe and touches only the child's own scheduling
+            // priority, so it is safe to call here. We deliberately discard
+            // failures (e.g. EPERM for negative values without privilege) so
+            // the test run proceeds at default priority instead of aborting.
+            unsafe {
+                cmd.pre_exec(move || {
+                    libc::setpriority(libc::PRIO_PROCESS, 0, nice_value);
+                    Ok(())
+                });
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = nice;
     }
     cmd.spawn()
 }
@@ -1805,7 +1847,7 @@ fn collect_worker_results(
         wt.bar.finish_with_message("done");
 
         let worker_tag = format!("worker-{}", wt.worker_id);
-        for (_, result) in worker_run.results.iter_mut() {
+        for result in worker_run.results.values_mut() {
             if !result.tags.contains(&worker_tag) {
                 result.tags.push(worker_tag.clone());
             }
@@ -2428,5 +2470,49 @@ mod helper_tests {
                 layout.bar_width,
             );
         }
+    }
+
+    /// Spawn a child with `nice = +5` and verify the child reports that
+    /// niceness via `getpriority(2)`. Skipped on platforms where libc isn't
+    /// available; positive nice increments never require privileges, so this
+    /// works for ordinary CI users.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_in_process_group_applies_nice() {
+        use std::io::Read;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let want = 5;
+        let mut child = spawn_in_process_group(
+            // Use a Rust snippet via /usr/bin/env? Simpler: rely on shell + `nice` parsing
+            // via `ps`. POSIX `ps -o nice= -p $$` prints the current nice value.
+            "ps -o nice= -p $$",
+            tmp.path(),
+            Some(want),
+        )
+        .expect("spawn");
+        let mut out = String::new();
+        child.stdout.as_mut().unwrap().read_to_string(&mut out).ok();
+        let _ = child.wait();
+        let got: i32 = out
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("ps output not an integer: {:?}", out));
+        assert_eq!(got, want, "child niceness");
+    }
+
+    /// Sanity check: without `nice` the child keeps the parent's priority.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_in_process_group_default_nice_unchanged() {
+        use std::io::Read;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let parent_nice = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        let mut child =
+            spawn_in_process_group("ps -o nice= -p $$", tmp.path(), None).expect("spawn");
+        let mut out = String::new();
+        child.stdout.as_mut().unwrap().read_to_string(&mut out).ok();
+        let _ = child.wait();
+        let got: i32 = out.trim().parse().unwrap();
+        assert_eq!(got, parent_nice);
     }
 }
