@@ -511,10 +511,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(code, 1);
-        let out = ui.output.join("\n");
-        assert!(out.contains("Flaky tests: 1"), "got: {}", out);
-        assert!(out.contains("flap"), "got: {}", out);
-        assert!(out.contains("0..2"), "got: {}", out);
+        assert_eq!(
+            ui.output,
+            vec![
+                "\nStress summary (3 iteration(s), runs 0..2):".to_string(),
+                "  Flaky tests: 1".to_string(),
+                "  fail/runs  flake%  test".to_string(),
+                "     1/3    100.0%  flap".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -531,9 +536,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(code, 0);
-        let out = ui.output.join("\n");
-        assert!(out.contains("No flaky tests observed"), "got: {}", out);
-        assert!(out.contains("consistently broken test"), "got: {}", out);
+        assert_eq!(
+            ui.output,
+            vec![
+                "\nStress summary (2 iteration(s), runs 0..1):".to_string(),
+                "  No flaky tests observed, but at least one iteration had failing tests \
+                 (likely a consistently broken test rather than flakiness)."
+                    .to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -550,9 +561,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(code, 0);
-        let out = ui.output.join("\n");
-        assert!(out.contains("No flaky tests observed."), "got: {}", out);
-        assert!(!out.contains("consistently broken test"), "got: {}", out);
+        assert_eq!(
+            ui.output,
+            vec![
+                "\nStress summary (2 iteration(s), runs 0..1):".to_string(),
+                "  No flaky tests observed.".to_string(),
+            ]
+        );
     }
 
     fn insert_run_with_messages(
@@ -663,9 +678,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(code, 1);
-        let out = ui.output.join("\n");
-        assert!(out.contains("[2x] connection refused"), "got: {}", out);
-        assert!(out.contains("[1x] timeout after 5s"), "got: {}", out);
+        assert_eq!(
+            ui.output,
+            vec![
+                "\nStress summary (4 iteration(s), runs 0..3):".to_string(),
+                "  Flaky tests: 1".to_string(),
+                "  fail/runs  flake%  test".to_string(),
+                "     3/4     66.7%  flap".to_string(),
+                "      [2x] connection refused".to_string(),
+                "      [1x] timeout after 5s".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -696,11 +719,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(code, 1);
-        let out = ui.output.join("\n");
-        assert!(
-            out.contains("and 2 other distinct message(s)"),
-            "got: {}",
-            out
+        assert_eq!(
+            *ui.output.last().unwrap(),
+            "      ... and 2 other distinct message(s)".to_string()
         );
     }
 
