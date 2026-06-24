@@ -26,6 +26,8 @@ const MAX_MESSAGE_LEN: usize = 200;
 /// Maximum number of lines of full traceback/details printed per distinct
 /// failure mode in the analysis section.
 const MAX_DETAILS_LINES: usize = 30;
+/// Maximum number of co-running sibling tests surfaced per flaky test.
+const MAX_SIBLINGS_PER_TEST: usize = 5;
 
 /// One distinct failure mode for a flaky test.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +43,21 @@ pub struct FailureMode {
     pub details: Option<String>,
 }
 
+/// A candidate sibling test that ran in the same worker process as a
+/// flaky test's failures, ranked by how disproportionately it shows up
+/// alongside failures vs passes of the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiblingCandidate {
+    /// The co-running test's identifier.
+    pub test_id: TestId,
+    /// Worker processes where this sibling ran alongside a failing
+    /// instance of the target test.
+    pub co_failures: u32,
+    /// Worker processes where this sibling ran alongside a passing
+    /// instance of the target test.
+    pub co_passes: u32,
+}
+
 /// Per-flaky-test analysis collected from the stress window.
 #[derive(Debug, Clone, Default)]
 pub struct FailureAnalysis {
@@ -53,6 +70,12 @@ pub struct FailureAnalysis {
     /// Pass/fail counts stratified by the concurrency level of each
     /// iteration the test appeared in.
     pub concurrency: ConcurrencyBreakdown,
+    /// Other tests that ran in the same worker process as a failing
+    /// instance of this test. Sorted by how strongly they correlate with
+    /// the failure (co-failures minus chance-adjusted co-passes), highest
+    /// first. Empty when no per-worker data was available (e.g. all
+    /// iterations were serial, or sub-runs weren't recorded).
+    pub siblings: Vec<SiblingCandidate>,
 }
 
 /// Per-flaky-test failure analysis keyed by test ID. Tests that weren't
@@ -329,6 +352,24 @@ impl StressCommand {
                     render_details_block(ui, details, MAX_DETAILS_LINES)?;
                 }
             }
+            if !analysis.siblings.is_empty() {
+                ui.output(
+                    "    co-running tests (ran in the same worker process \
+                     as a failing instance):",
+                )?;
+                for sibling in analysis.siblings.iter().take(MAX_SIBLINGS_PER_TEST) {
+                    ui.output(&format!(
+                        "      [fail:{} pass:{}] {}",
+                        sibling.co_failures, sibling.co_passes, sibling.test_id,
+                    ))?;
+                }
+                if analysis.siblings.len() > MAX_SIBLINGS_PER_TEST {
+                    ui.output(&format!(
+                        "      ... and {} more co-running test(s)",
+                        analysis.siblings.len() - MAX_SIBLINGS_PER_TEST
+                    ))?;
+                }
+            }
         }
         Ok(1)
     }
@@ -490,8 +531,8 @@ pub(crate) fn summarise_run_ids(
 
     // Restrict the analyses to tests that ended up in the summary, and
     // sort each entry's modes most-frequent-first for predictable output.
-    let flaky_ids: std::collections::HashSet<&TestId> =
-        summary.iter().map(|f| &f.test_id).collect();
+    let flaky_ids: std::collections::HashSet<TestId> =
+        summary.iter().map(|f| f.test_id.clone()).collect();
     analyses.retain(|id, _| flaky_ids.contains(id));
     for analysis in analyses.values_mut() {
         analysis.modes.sort_by(|a, b| {
@@ -501,7 +542,127 @@ pub(crate) fn summarise_run_ids(
         });
     }
 
+    collect_siblings(repo, run_ids, &flaky_ids, &mut analyses)?;
+
     Ok((summary, analyses))
+}
+
+/// Read each iteration's per-worker sub-run files and tally, for every
+/// flaky test, which other tests ran in the same worker process as a
+/// failing instance vs a passing instance. The resulting ranking surfaces
+/// candidate cross-test interference: a sibling that consistently appears
+/// alongside the failure but not alongside the passes is suspicious.
+fn collect_siblings(
+    repo: &dyn Repository,
+    run_ids: &[RunId],
+    flaky_ids: &std::collections::HashSet<TestId>,
+    analyses: &mut HashMap<TestId, FailureAnalysis>,
+) -> Result<()> {
+    // (target, sibling) → (co_failures, co_passes).
+    let mut counts: HashMap<(TestId, TestId), (u32, u32)> = HashMap::new();
+
+    for run_id in run_ids {
+        let sub_ids = repo.list_sub_run_ids(run_id).unwrap_or_default();
+        if sub_ids.is_empty() {
+            continue;
+        }
+        for sub_id in &sub_ids {
+            let sub_run = match repo.get_test_run(sub_id) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        "skipping sub-run {} while collecting siblings: {}",
+                        sub_id,
+                        e
+                    );
+                    continue;
+                }
+            };
+            // Within this worker, partition flaky tests by outcome and
+            // collect every other test as a candidate sibling.
+            let mut failing_targets: Vec<&TestId> = Vec::new();
+            let mut passing_targets: Vec<&TestId> = Vec::new();
+            for (test_id, result) in &sub_run.results {
+                if !flaky_ids.contains(test_id) {
+                    continue;
+                }
+                if result.status.is_failure() {
+                    failing_targets.push(test_id);
+                } else {
+                    passing_targets.push(test_id);
+                }
+            }
+            if failing_targets.is_empty() && passing_targets.is_empty() {
+                continue;
+            }
+            for sibling_id in sub_run.results.keys() {
+                for target in &failing_targets {
+                    if sibling_id == *target {
+                        continue;
+                    }
+                    let entry = counts
+                        .entry(((*target).clone(), sibling_id.clone()))
+                        .or_insert((0, 0));
+                    entry.0 += 1;
+                }
+                for target in &passing_targets {
+                    if sibling_id == *target {
+                        continue;
+                    }
+                    let entry = counts
+                        .entry(((*target).clone(), sibling_id.clone()))
+                        .or_insert((0, 0));
+                    entry.1 += 1;
+                }
+            }
+        }
+    }
+
+    // Group by target, score, and store.
+    let mut by_target: HashMap<TestId, Vec<SiblingCandidate>> = HashMap::new();
+    for ((target, sibling), (co_failures, co_passes)) in counts {
+        by_target.entry(target).or_default().push(SiblingCandidate {
+            test_id: sibling,
+            co_failures,
+            co_passes,
+        });
+    }
+    for (target, mut siblings) in by_target {
+        let Some(analysis) = analyses.get_mut(&target) else {
+            continue;
+        };
+        let target_failures = analysis.failing_iterations.len() as u32;
+        siblings.retain(|s| {
+            // Only surface siblings that ran with the target in at least
+            // one *failing* worker. Pure-pass co-occurrence is not an
+            // interference signal.
+            s.co_failures > 0
+        });
+        siblings.sort_by(|a, b| {
+            sibling_score(b, target_failures)
+                .partial_cmp(&sibling_score(a, target_failures))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.test_id.as_str().cmp(b.test_id.as_str()))
+        });
+        analysis.siblings = siblings;
+    }
+
+    Ok(())
+}
+
+/// Rank a sibling test by how disproportionately it co-occurs with the
+/// target's failures vs its passes.
+///
+/// The score is `co_failures - co_passes * baseline_pass_rate`, where
+/// `baseline_pass_rate = co_failures / max(1, target_failures)` — i.e. we
+/// expect a sibling that's uncorrelated to appear in a similar fraction
+/// of passing workers as it does in failing ones, and discount its score
+/// accordingly. Siblings that perfectly track the failure get the highest
+/// score; siblings that appear everywhere get a near-zero score.
+fn sibling_score(s: &SiblingCandidate, target_failures: u32) -> f64 {
+    let total_failures = target_failures.max(1) as f64;
+    let fail_rate = s.co_failures as f64 / total_failures;
+    s.co_failures as f64 - s.co_passes as f64 * fail_rate
 }
 
 /// Render a run-id list as a compact comma-separated string, with `..` when
@@ -885,6 +1046,120 @@ mod tests {
     }
 
     #[test]
+    fn sibling_score_prioritises_consistent_co_failure() {
+        let pure_signal = SiblingCandidate {
+            test_id: TestId::new("s"),
+            co_failures: 3,
+            co_passes: 0,
+        };
+        let mixed = SiblingCandidate {
+            test_id: TestId::new("s"),
+            co_failures: 3,
+            co_passes: 3,
+        };
+        let target_failures = 3;
+        let pure = sibling_score(&pure_signal, target_failures);
+        let mix = sibling_score(&mixed, target_failures);
+        assert_eq!(pure, 3.0);
+        // mixed: 3 - 3 * (3/3) = 0
+        assert_eq!(mix, 0.0);
+        assert!(pure > mix);
+    }
+
+    /// Write a parent run + per-worker sub-runs that simulate one stress
+    /// iteration. Returns the parent run ID. The aggregate at the parent
+    /// holds the union of all worker results (matching what
+    /// `persist_and_display_run` does in production).
+    fn insert_parallel_iteration(
+        repo: &mut dyn Repository,
+        run_id: &str,
+        workers: &[&[(&str, TestStatus)]],
+    ) -> RunId {
+        let mut aggregate = TestRun::new(RunId::new(run_id));
+        aggregate.timestamp = chrono::Utc::now();
+        for worker_results in workers {
+            for (test_id, status) in *worker_results {
+                aggregate.add_result(TestResult {
+                    test_id: TestId::new(*test_id),
+                    status: *status,
+                    duration: None,
+                    message: None,
+                    details: None,
+                    tags: vec![],
+                });
+            }
+        }
+        let parent_id = repo.insert_test_run(aggregate).unwrap();
+        for (idx, worker_results) in workers.iter().enumerate() {
+            let suffix = crate::repository::worker_suffix(idx);
+            let (_, mut writer) = repo.begin_sub_run_raw(&parent_id, &suffix).unwrap();
+            let mut worker_run = TestRun::new(RunId::new(format!("{}{}", parent_id, suffix)));
+            worker_run.timestamp = chrono::Utc::now();
+            for (test_id, status) in *worker_results {
+                worker_run.add_result(TestResult {
+                    test_id: TestId::new(*test_id),
+                    status: *status,
+                    duration: None,
+                    message: None,
+                    details: None,
+                    tags: vec![],
+                });
+            }
+            crate::subunit_stream::write_stream(&worker_run, &mut writer).unwrap();
+        }
+        parent_id
+    }
+
+    #[test]
+    fn summarise_run_ids_collects_same_worker_siblings() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::{Failure, Success};
+        // Iteration 1: target T fails in worker 0 alongside `bad_sibling`;
+        //              worker 1 runs `innocent` and passes.
+        // Iteration 2: T passes in worker 0 (alongside `innocent`);
+        //              `bad_sibling` runs in worker 1 without T.
+        // Iteration 3: T fails again in worker 0 alongside `bad_sibling`.
+        // → `bad_sibling`: 2 co-failures, 0 co-passes (strong signal).
+        // → `innocent`:    0 co-failures, 1 co-pass     (filtered out).
+        let r0 = insert_parallel_iteration(
+            repo.as_mut(),
+            "0",
+            &[
+                &[("T", Failure), ("bad_sibling", Success)],
+                &[("innocent", Success)],
+            ],
+        );
+        let r1 = insert_parallel_iteration(
+            repo.as_mut(),
+            "1",
+            &[
+                &[("T", Success), ("innocent", Success)],
+                &[("bad_sibling", Success)],
+            ],
+        );
+        let r2 = insert_parallel_iteration(
+            repo.as_mut(),
+            "2",
+            &[
+                &[("T", Failure), ("bad_sibling", Success)],
+                &[("innocent", Success)],
+            ],
+        );
+
+        let (_summary, analyses) = summarise_run_ids(repo.as_ref(), &[r0, r1, r2]).unwrap();
+        let analysis = analyses.get(&TestId::new("T")).expect("T analysis");
+        let sibling_pairs: Vec<(&str, u32, u32)> = analysis
+            .siblings
+            .iter()
+            .map(|s| (s.test_id.as_str(), s.co_failures, s.co_passes))
+            .collect();
+        assert_eq!(sibling_pairs, vec![("bad_sibling", 2, 0)]);
+    }
+
+    #[test]
     fn summarise_run_ids_records_concurrency_per_iteration() {
         let temp = TempDir::new().unwrap();
         let factory = InquestRepositoryFactory;
@@ -938,6 +1213,7 @@ mod tests {
                 })
                 .collect(),
             concurrency: ConcurrencyBreakdown::default(),
+            siblings: Vec::new(),
         }
     }
 
@@ -994,6 +1270,93 @@ mod tests {
                 "    failure mode 1 of 2 (2x): connection refused".to_string(),
                 "    failure mode 2 of 2 (1x): timeout after 5s".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn report_lists_co_running_siblings_when_present() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 3,
+            failures: 1,
+            transitions: 2,
+            flakiness_score: 1.0,
+            failure_rate: 1.0 / 3.0,
+        }];
+        let mut analysis = analysis_with(vec![("boom", 1)], vec![2]);
+        analysis.siblings = vec![
+            SiblingCandidate {
+                test_id: TestId::new("hot_sibling"),
+                co_failures: 3,
+                co_passes: 0,
+            },
+            SiblingCandidate {
+                test_id: TestId::new("lukewarm"),
+                co_failures: 1,
+                co_passes: 0,
+            },
+        ];
+        let mut analyses = HashMap::new();
+        analyses.insert(TestId::new("flap"), analysis);
+
+        cmd.report(
+            &mut ui,
+            &[RunId::new("0"), RunId::new("1"), RunId::new("2")],
+            flaky,
+            analyses,
+            true,
+        )
+        .unwrap();
+        let sibling_block_start = ui
+            .output
+            .iter()
+            .position(|l| l.starts_with("    co-running tests"))
+            .expect("sibling header missing");
+        assert_eq!(
+            &ui.output[sibling_block_start..],
+            &[
+                "    co-running tests (ran in the same worker process as a failing instance):"
+                    .to_string(),
+                "      [fail:3 pass:0] hot_sibling".to_string(),
+                "      [fail:1 pass:0] lukewarm".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn report_omits_sibling_block_with_no_data() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 2,
+            failures: 1,
+            transitions: 1,
+            flakiness_score: 1.0,
+            failure_rate: 0.5,
+        }];
+        let mut analyses = HashMap::new();
+        analyses.insert(
+            TestId::new("flap"),
+            analysis_with(vec![("boom", 1)], vec![1]),
+        );
+
+        cmd.report(
+            &mut ui,
+            &[RunId::new("0"), RunId::new("1")],
+            flaky,
+            analyses,
+            true,
+        )
+        .unwrap();
+        assert!(
+            ui.output
+                .iter()
+                .all(|l| !l.starts_with("    co-running tests")),
+            "got: {:?}",
+            ui.output
         );
     }
 
@@ -1140,6 +1503,7 @@ mod tests {
                     ),
                 }],
                 concurrency: ConcurrencyBreakdown::default(),
+                siblings: Vec::new(),
             },
         );
 
@@ -1203,6 +1567,7 @@ mod tests {
                     details: Some(traceback),
                 }],
                 concurrency: ConcurrencyBreakdown::default(),
+                siblings: Vec::new(),
             },
         );
 
@@ -1250,6 +1615,7 @@ mod tests {
                     .collect(),
                 modes,
                 concurrency: ConcurrencyBreakdown::default(),
+                siblings: Vec::new(),
             },
         );
 

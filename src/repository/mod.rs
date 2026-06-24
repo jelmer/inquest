@@ -93,6 +93,16 @@ pub trait Repository {
         Ok(Box::new(std::io::sink()))
     }
 
+    /// List sub-run IDs belonging to a parent run, in lexicographic order
+    /// (matching the worker-suffix order: `<parent>a`, `<parent>b`, ...).
+    ///
+    /// Used to read each worker's slice for co-occurrence analysis. The
+    /// default implementation returns an empty list for backends that
+    /// don't expose sub-runs.
+    fn list_sub_run_ids(&self, _parent: &RunId) -> Result<Vec<RunId>> {
+        Ok(Vec::new())
+    }
+
     /// Insert a test run (convenience method for tests - prefer begin_test_run_raw in production)
     ///
     /// This is a convenience wrapper around begin_test_run_raw() for test code.

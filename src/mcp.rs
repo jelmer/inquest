@@ -397,6 +397,15 @@ fn build_stress_response(
                     })
                     .collect();
                 let concurrency_verdict = analysis.concurrency.verdict();
+                let siblings = analysis
+                    .siblings
+                    .into_iter()
+                    .map(|sib| StressSibling {
+                        test_id: sib.test_id.as_str().to_string(),
+                        co_failures: sib.co_failures,
+                        co_passes: sib.co_passes,
+                    })
+                    .collect();
                 StressFlakyTest {
                     test_id: s.test_id.as_str().to_string(),
                     runs: s.runs,
@@ -413,6 +422,7 @@ fn build_stress_response(
                     failure_messages,
                     concurrency: analysis.concurrency,
                     concurrency_verdict,
+                    siblings,
                 }
             })
             .collect(),
@@ -776,6 +786,22 @@ struct StressFlakyTest {
     /// data on either side.
     #[serde(skip_serializing_if = "Option::is_none")]
     concurrency_verdict: Option<String>,
+    /// Other tests that ran in the same worker process as a failing
+    /// instance of this test, ranked by correlation strength.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    siblings: Vec<StressSibling>,
+}
+
+#[derive(Serialize)]
+struct StressSibling {
+    /// The co-running test's identifier.
+    test_id: String,
+    /// Worker processes where this sibling ran alongside a failing
+    /// instance of the target test.
+    co_failures: u32,
+    /// Worker processes where this sibling ran alongside a passing
+    /// instance of the target test.
+    co_passes: u32,
 }
 
 #[derive(Serialize)]
