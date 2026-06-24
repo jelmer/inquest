@@ -1180,6 +1180,36 @@ fi
     let failing = repo.get_failing_tests().unwrap();
     assert_eq!(failing.len(), 1);
     assert_eq!(failing[0].as_str(), "test_b");
+
+    // Regression for the parallel-run aggregation bug: previously each
+    // worker burned its own integer run ID and the outer run_id pointed
+    // at one worker's slice. After the fix there is exactly one top-level
+    // run, and its TestRun contains *all* worker results (here: test_a +
+    // test_b).
+    let run_ids = repo.list_run_ids().unwrap();
+    assert_eq!(
+        run_ids.len(),
+        1,
+        "expected one top-level run, got {:?}",
+        run_ids
+    );
+    let outer = repo.get_test_run(&run_ids[0]).unwrap();
+    assert_eq!(outer.total_tests(), 2);
+    let test_ids: std::collections::HashSet<String> = outer
+        .results
+        .keys()
+        .map(|t| t.as_str().to_string())
+        .collect();
+    assert!(
+        test_ids.contains("test_a"),
+        "outer run missing test_a: {:?}",
+        test_ids
+    );
+    assert!(
+        test_ids.contains("test_b"),
+        "outer run missing test_b: {:?}",
+        test_ids
+    );
 }
 
 #[test]

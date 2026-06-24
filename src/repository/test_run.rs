@@ -79,6 +79,24 @@ impl RunId {
     }
 }
 
+/// Convert a 0-based worker index into a short alphabetic suffix used for
+/// sub-run filenames: 0 -> "a", 25 -> "z", 26 -> "aa", 27 -> "ab", and so
+/// on. Keeps per-worker filenames compact and clearly distinct from numeric
+/// top-level run IDs.
+pub fn worker_suffix(index: usize) -> String {
+    let mut n = index;
+    let mut letters: Vec<u8> = Vec::new();
+    loop {
+        letters.push(b'a' + (n % 26) as u8);
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    letters.reverse();
+    String::from_utf8(letters).expect("a-z is valid ASCII")
+}
+
 impl fmt::Display for RunId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -573,6 +591,27 @@ pub fn estimate_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_worker_suffix_alphabetic_progression() {
+        assert_eq!(worker_suffix(0), "a");
+        assert_eq!(worker_suffix(1), "b");
+        assert_eq!(worker_suffix(25), "z");
+        assert_eq!(worker_suffix(26), "aa");
+        assert_eq!(worker_suffix(27), "ab");
+        assert_eq!(worker_suffix(51), "az");
+        assert_eq!(worker_suffix(52), "ba");
+        assert_eq!(worker_suffix(701), "zz");
+        assert_eq!(worker_suffix(702), "aaa");
+    }
+
+    #[test]
+    fn test_worker_suffix_is_unique_per_index() {
+        // The whole point is that workers get distinct filenames; assert it
+        // holds across a realistic worker-count range.
+        let suffixes: std::collections::HashSet<String> = (0..512).map(worker_suffix).collect();
+        assert_eq!(suffixes.len(), 512);
+    }
 
     #[test]
     fn test_test_id_equality() {

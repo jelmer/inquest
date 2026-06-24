@@ -453,6 +453,28 @@ impl Repository for InquestRepository {
         ))
     }
 
+    fn begin_sub_run_raw(
+        &mut self,
+        parent: &RunId,
+        suffix: &str,
+    ) -> Result<(RunId, Box<dyn std::io::Write + Send>)> {
+        // Sub-runs share the parent's numeric ID with a string suffix
+        // (e.g. "15a", "15b") so they sort together in the runs/ directory
+        // and don't collide with future top-level numeric IDs. They are not
+        // tracked in the `runs` table — only the parent is — so they don't
+        // pollute counts, list_run_ids, or flakiness analyses.
+        let sub_id = RunId::new(format!("{}{}", parent.as_str(), suffix));
+        let path = self.run_file_path(&sub_id);
+        let file = File::create(&path)?;
+        Ok((sub_id, Box::new(file)))
+    }
+
+    fn overwrite_test_run_raw(&mut self, run_id: &RunId) -> Result<Box<dyn std::io::Write + Send>> {
+        let path = self.run_file_path(run_id);
+        let file = File::create(&path)?;
+        Ok(Box::new(file))
+    }
+
     fn get_latest_run(&self) -> Result<TestRun> {
         let run_id: i64 = self
             .conn
@@ -1148,6 +1170,7 @@ fn rebuild_flakiness_for_test(conn: &rusqlite::Connection, test_id: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repository::worker_suffix;
     use tempfile::TempDir;
 
     #[test]
@@ -1218,6 +1241,87 @@ mod tests {
         // Verify file was created
         let run_path = temp.path().join(REPO_DIR).join("runs").join("0");
         assert!(run_path.exists());
+    }
+
+    #[test]
+    fn test_begin_sub_run_raw_does_not_allocate_top_level_id() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        // Pre-allocate the parent run so the sub-runs have something to
+        // hang off of.
+        let parent_run = TestRun::new(RunId::new("0"));
+        let (parent_id, mut parent_writer) = repo.begin_test_run_raw().unwrap();
+        subunit_stream::write_stream(&parent_run, &mut parent_writer).unwrap();
+        drop(parent_writer);
+
+        // Open several worker sub-runs. None of them should bump the
+        // top-level next-run-id counter or appear in list_run_ids.
+        for i in 0..4 {
+            let (sub_id, mut w) = repo
+                .begin_sub_run_raw(&parent_id, &worker_suffix(i))
+                .unwrap();
+            assert_eq!(
+                sub_id.as_str(),
+                format!("{}{}", parent_id.as_str(), worker_suffix(i))
+            );
+            subunit_stream::write_stream(&parent_run, &mut w).unwrap();
+            drop(w);
+        }
+
+        assert_eq!(repo.get_next_run_id().unwrap(), RunId::new("1"));
+        assert_eq!(repo.list_run_ids().unwrap(), vec![parent_id.clone()]);
+
+        // Sub-run files exist alongside the parent on disk.
+        let runs_dir = temp.path().join(REPO_DIR).join("runs");
+        for i in 0..4 {
+            let path = runs_dir.join(format!("{}{}", parent_id.as_str(), worker_suffix(i)));
+            assert!(path.exists(), "missing sub-run file: {:?}", path);
+        }
+    }
+
+    #[test]
+    fn test_overwrite_test_run_raw_replaces_stream() {
+        use crate::repository::{TestResult, TestStatus};
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        // Initial empty run.
+        let initial = TestRun::new(RunId::new("0"));
+        let (run_id, mut w) = repo.begin_test_run_raw().unwrap();
+        subunit_stream::write_stream(&initial, &mut w).unwrap();
+        drop(w);
+        assert_eq!(repo.get_test_run(&run_id).unwrap().total_tests(), 0);
+
+        // Overwrite with an aggregate that has two results.
+        let mut aggregate = TestRun::new(run_id.clone());
+        aggregate.timestamp = chrono::Utc::now();
+        aggregate.add_result(TestResult {
+            test_id: TestId::new("test_a"),
+            status: TestStatus::Success,
+            duration: None,
+            message: None,
+            details: None,
+            tags: vec![],
+        });
+        aggregate.add_result(TestResult {
+            test_id: TestId::new("test_b"),
+            status: TestStatus::Failure,
+            duration: None,
+            message: Some("boom".to_string()),
+            details: None,
+            tags: vec![],
+        });
+        let mut writer = repo.overwrite_test_run_raw(&run_id).unwrap();
+        subunit_stream::write_stream(&aggregate, &mut writer).unwrap();
+        drop(writer);
+
+        let reread = repo.get_test_run(&run_id).unwrap();
+        assert_eq!(reread.total_tests(), 2);
+        assert!(reread.results.contains_key(&TestId::new("test_a")));
+        assert!(reread.results.contains_key(&TestId::new("test_b")));
     }
 
     #[test]

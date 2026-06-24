@@ -416,6 +416,19 @@ pub fn persist_and_display_run(
         combined_run.add_result(result);
     }
 
+    // For parallel runs the on-disk file at `run_id` is empty (each worker
+    // wrote its slice to a sibling sub-run file like `<run_id>a`,
+    // `<run_id>b`, ...). Write the aggregate back to the outer file so
+    // `inq log -r <run_id>`, `inq stress`, and other readers see every
+    // worker's results, not just one slice.
+    if concurrency > 1 {
+        use std::io::Write;
+        let mut writer = repo.overwrite_test_run_raw(&run_id)?;
+        crate::subunit_stream::write_stream(&combined_run, &mut *writer)?;
+        writer.flush()?;
+        drop(writer);
+    }
+
     update_repository_failing_tests(repo, &combined_run, partial)?;
     update_test_times_from_run(repo, &combined_run)?;
     store_run_metadata(

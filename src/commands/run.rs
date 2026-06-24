@@ -608,8 +608,13 @@ impl RunCommand {
                 ui.output(&format!("\n=== Iteration {} ===", iteration))?;
 
                 let output = if concurrency > 1 {
-                    let run_id = repo.get_next_run_id()?;
+                    let (run_id, outer_writer) = repo.begin_test_run_raw()?;
+                    // The outer writer's file gets overwritten with the
+                    // aggregate at persist time; we don't write to it here.
+                    drop(outer_writer);
                     self.publish_run_id(&run_id);
+                    let worker_counter = std::sync::atomic::AtomicUsize::new(0);
+                    let run_id_for_workers = run_id.clone();
                     executor.run_parallel(
                         ui,
                         &test_cmd,
@@ -621,7 +626,13 @@ impl RunCommand {
                         run_id,
                         &historical_times,
                         calibration_factor,
-                        || repo.begin_test_run_raw().map(|(_, w)| w),
+                        || {
+                            let idx =
+                                worker_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let suffix = crate::repository::worker_suffix(idx);
+                            repo.begin_sub_run_raw(&run_id_for_workers, &suffix)
+                                .map(|(_, w)| w)
+                        },
                     )?
                 } else {
                     let (run_id, writer) = repo.begin_test_run_raw()?;
@@ -658,8 +669,11 @@ impl RunCommand {
                 iteration += 1;
             }
         } else if concurrency > 1 {
-            let run_id = repo.get_next_run_id()?;
+            let (run_id, outer_writer) = repo.begin_test_run_raw()?;
+            drop(outer_writer);
             self.publish_run_id(&run_id);
+            let worker_counter = std::sync::atomic::AtomicUsize::new(0);
+            let run_id_for_workers = run_id.clone();
             let output = executor.run_parallel(
                 ui,
                 &test_cmd,
@@ -671,7 +685,12 @@ impl RunCommand {
                 run_id,
                 &historical_times,
                 calibration_factor,
-                || repo.begin_test_run_raw().map(|(_, w)| w),
+                || {
+                    let idx = worker_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let suffix = crate::repository::worker_suffix(idx);
+                    repo.begin_sub_run_raw(&run_id_for_workers, &suffix)
+                        .map(|(_, w)| w)
+                },
             )?;
             self.persist(
                 ui,
