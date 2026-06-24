@@ -16,6 +16,16 @@ use crate::ui::UI;
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// Maximum number of distinct failure messages to display per flaky test.
+const MAX_MESSAGES_PER_TEST: usize = 3;
+/// Maximum displayed length of any single failure message (longer messages
+/// are truncated with an ellipsis).
+const MAX_MESSAGE_LEN: usize = 200;
+
+/// Per-flaky-test list of `(failure message, occurrence count)`, sorted
+/// most-frequent-first. Tests that weren't flaky are omitted from the map.
+pub type FailureMessageCounts = HashMap<TestId, Vec<(String, u32)>>;
+
 /// Default number of iterations when `--iterations` is not given.
 pub const DEFAULT_ITERATIONS: usize = 10;
 
@@ -124,7 +134,7 @@ impl Command for StressCommand {
             }
 
             if self.stop_on_flaky && run_ids.len() >= 2 {
-                let summary =
+                let (summary, messages) =
                     summarise_run_ids(&*open_repository(self.base_path.as_deref())?, &run_ids)?;
                 if !summary.is_empty() {
                     ui.output(&format!(
@@ -132,15 +142,15 @@ impl Command for StressCommand {
                         summary.len(),
                         iteration
                     ))?;
-                    return self.report(ui, &run_ids, summary, any_failure);
+                    return self.report(ui, &run_ids, summary, messages, any_failure);
                 }
             }
         }
 
         let repo = open_repository(self.base_path.as_deref())?;
-        let summary = summarise_run_ids(&*repo, &run_ids)?;
+        let (summary, messages) = summarise_run_ids(&*repo, &run_ids)?;
         drop(repo);
-        self.report(ui, &run_ids, summary, any_failure)
+        self.report(ui, &run_ids, summary, messages, any_failure)
     }
 
     fn name(&self) -> &str {
@@ -166,6 +176,7 @@ impl StressCommand {
         ui: &mut dyn UI,
         run_ids: &[RunId],
         flaky: Vec<TestFlakiness>,
+        messages: FailureMessageCounts,
         any_failure: bool,
     ) -> Result<i32> {
         ui.output(&format!(
@@ -196,9 +207,58 @@ impl StressCommand {
                 entry.flakiness_score * 100.0,
                 entry.test_id,
             ))?;
+            if let Some(msgs) = messages.get(&entry.test_id) {
+                let shown = msgs.iter().take(MAX_MESSAGES_PER_TEST);
+                for (msg, count) in shown {
+                    ui.output(&format!(
+                        "      [{}x] {}",
+                        count,
+                        truncate_message(msg, MAX_MESSAGE_LEN)
+                    ))?;
+                }
+                if msgs.len() > MAX_MESSAGES_PER_TEST {
+                    ui.output(&format!(
+                        "      ... and {} other distinct message(s)",
+                        msgs.len() - MAX_MESSAGES_PER_TEST
+                    ))?;
+                }
+            }
         }
         Ok(1)
     }
+}
+
+/// Pick a short, comparable summary for a single failure. Prefers an explicit
+/// `message`, falling back to the last non-empty line of `details` (which for
+/// most test runners is the actual assertion or exception line at the tail of
+/// the traceback), and finally a placeholder.
+fn failure_summary(message: Option<&str>, details: Option<&str>) -> String {
+    if let Some(m) = message.map(str::trim).filter(|s| !s.is_empty()) {
+        return m.to_string();
+    }
+    if let Some(d) = details {
+        if let Some(line) = d.lines().rev().map(str::trim).find(|s| !s.is_empty()) {
+            return line.to_string();
+        }
+    }
+    "(no message)".to_string()
+}
+
+/// Truncate a single-line preview of a failure message. Newlines are
+/// collapsed to spaces so the table stays readable; the full message remains
+/// available via `inq log <run-id>`.
+fn truncate_message(msg: &str, max_len: usize) -> String {
+    let collapsed: String = msg
+        .split('\n')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    if collapsed.chars().count() <= max_len {
+        return collapsed;
+    }
+    let truncated: String = collapsed.chars().take(max_len).collect();
+    format!("{}...", truncated)
 }
 
 /// Collect per-test pass/fail histories from a specific set of run IDs and
@@ -208,18 +268,30 @@ impl StressCommand {
 /// the output (that's what [`summarise_flakiness`] enforces via its
 /// `failures == 0` filter — we additionally want to drop tests that *always*
 /// failed, so we require at least one success).
+///
+/// Returns the flakiness summary alongside a per-flaky-test list of distinct
+/// failure messages with the number of iterations each occurred in, sorted
+/// most-frequent-first. Tests that aren't flaky are omitted from the map.
 pub(crate) fn summarise_run_ids(
     repo: &dyn Repository,
     run_ids: &[RunId],
-) -> Result<Vec<TestFlakiness>> {
+) -> Result<(Vec<TestFlakiness>, FailureMessageCounts)> {
     let mut history: HashMap<TestId, Vec<bool>> = HashMap::new();
+    let mut messages: HashMap<TestId, Vec<(String, u32)>> = HashMap::new();
     for run_id in run_ids {
         let run = repo.get_test_run(run_id)?;
         for (test_id, result) in &run.results {
-            history
-                .entry(test_id.clone())
-                .or_default()
-                .push(result.status.is_failure());
+            let is_failure = result.status.is_failure();
+            history.entry(test_id.clone()).or_default().push(is_failure);
+            if is_failure {
+                let msg = failure_summary(result.message.as_deref(), result.details.as_deref());
+                let entries = messages.entry(test_id.clone()).or_default();
+                if let Some(slot) = entries.iter_mut().find(|(m, _)| m == &msg) {
+                    slot.1 += 1;
+                } else {
+                    entries.push((msg, 1));
+                }
+            }
         }
     }
 
@@ -231,7 +303,18 @@ pub(crate) fn summarise_run_ids(
     // min_runs = 1 here because the caller already controls how many
     // iterations to run; we want every test that appeared in our stress
     // window to be eligible.
-    Ok(summarise_flakiness(history, 1))
+    let summary = summarise_flakiness(history, 1);
+
+    // Restrict the message map to tests that ended up in the summary, and
+    // sort each entry's messages most-frequent-first for predictable output.
+    let flaky_ids: std::collections::HashSet<&TestId> =
+        summary.iter().map(|f| &f.test_id).collect();
+    messages.retain(|id, _| flaky_ids.contains(id));
+    for entries in messages.values_mut() {
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    }
+
+    Ok((summary, messages))
 }
 
 /// Render a run-id list as a compact comma-separated string, with `..` when
@@ -332,7 +415,7 @@ mod tests {
             &[("flap", Success), ("broken", Failure), ("stable", Success)],
         );
 
-        let summary = summarise_run_ids(repo.as_ref(), &[r0, r1, r2]).unwrap();
+        let (summary, _messages) = summarise_run_ids(repo.as_ref(), &[r0, r1, r2]).unwrap();
         assert_eq!(summary.len(), 1);
         assert_eq!(summary[0].test_id.as_str(), "flap");
         assert_eq!(summary[0].runs, 3);
@@ -353,8 +436,9 @@ mod tests {
         let r2 = insert_run(repo.as_mut(), "2", &[("t", Success)]);
 
         // Inside the stress window t always passed, so it is not flaky.
-        let summary = summarise_run_ids(repo.as_ref(), &[r1, r2]).unwrap();
+        let (summary, messages) = summarise_run_ids(repo.as_ref(), &[r1, r2]).unwrap();
         assert!(summary.is_empty());
+        assert!(messages.is_empty());
     }
 
     #[test]
@@ -398,6 +482,7 @@ mod tests {
                 &mut ui,
                 &[RunId::new("0"), RunId::new("1"), RunId::new("2")],
                 flaky,
+                HashMap::new(),
                 true,
             )
             .unwrap();
@@ -413,7 +498,13 @@ mod tests {
         let cmd = StressCommand::new(None);
         let mut ui = TestUI::new();
         let code = cmd
-            .report(&mut ui, &[RunId::new("0"), RunId::new("1")], vec![], true)
+            .report(
+                &mut ui,
+                &[RunId::new("0"), RunId::new("1")],
+                vec![],
+                HashMap::new(),
+                true,
+            )
             .unwrap();
         assert_eq!(code, 0);
         let out = ui.output.join("\n");
@@ -426,11 +517,188 @@ mod tests {
         let cmd = StressCommand::new(None);
         let mut ui = TestUI::new();
         let code = cmd
-            .report(&mut ui, &[RunId::new("0"), RunId::new("1")], vec![], false)
+            .report(
+                &mut ui,
+                &[RunId::new("0"), RunId::new("1")],
+                vec![],
+                HashMap::new(),
+                false,
+            )
             .unwrap();
         assert_eq!(code, 0);
         let out = ui.output.join("\n");
         assert!(out.contains("No flaky tests observed."), "got: {}", out);
         assert!(!out.contains("consistently broken test"), "got: {}", out);
+    }
+
+    fn insert_run_with_messages(
+        repo: &mut dyn Repository,
+        run_id: &str,
+        results: &[(&str, TestStatus, Option<&str>)],
+    ) -> RunId {
+        let mut run = TestRun::new(RunId::new(run_id));
+        run.timestamp = chrono::Utc::now();
+        for (test_id, status, message) in results {
+            let owned = message.map(|m| m.to_string());
+            run.add_result(TestResult {
+                test_id: TestId::new(*test_id),
+                status: *status,
+                duration: None,
+                message: owned.clone(),
+                details: owned,
+                tags: vec![],
+            });
+        }
+        repo.insert_test_run(run).unwrap()
+    }
+
+    #[test]
+    fn summarise_run_ids_collects_failure_messages_for_flaky_tests() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::{Failure, Success};
+        let r0 = insert_run_with_messages(
+            repo.as_mut(),
+            "0",
+            &[("flap", Failure, Some("connection refused"))],
+        );
+        let r1 = insert_run_with_messages(repo.as_mut(), "1", &[("flap", Success, None)]);
+        let r2 = insert_run_with_messages(
+            repo.as_mut(),
+            "2",
+            &[("flap", Failure, Some("connection refused"))],
+        );
+        let r3 = insert_run_with_messages(
+            repo.as_mut(),
+            "3",
+            &[("flap", Failure, Some("timeout after 5s"))],
+        );
+
+        let (summary, messages) = summarise_run_ids(repo.as_ref(), &[r0, r1, r2, r3]).unwrap();
+        assert_eq!(summary.len(), 1);
+        let entries = messages.get(&TestId::new("flap")).expect("flap messages");
+        assert_eq!(
+            entries,
+            &vec![
+                ("connection refused".to_string(), 2),
+                ("timeout after 5s".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn summarise_run_ids_uses_placeholder_for_missing_message() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::{Failure, Success};
+        let r0 = insert_run_with_messages(repo.as_mut(), "0", &[("flap", Failure, None)]);
+        let r1 = insert_run_with_messages(repo.as_mut(), "1", &[("flap", Success, None)]);
+
+        let (_summary, messages) = summarise_run_ids(repo.as_ref(), &[r0, r1]).unwrap();
+        let entries = messages.get(&TestId::new("flap")).expect("flap messages");
+        assert_eq!(entries, &vec![("(no message)".to_string(), 1)]);
+    }
+
+    #[test]
+    fn report_renders_failure_messages_with_counts() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 4,
+            failures: 3,
+            transitions: 2,
+            flakiness_score: 2.0 / 3.0,
+            failure_rate: 0.75,
+        }];
+        let mut messages = HashMap::new();
+        messages.insert(
+            TestId::new("flap"),
+            vec![
+                ("connection refused".to_string(), 2),
+                ("timeout after 5s".to_string(), 1),
+            ],
+        );
+
+        let code = cmd
+            .report(
+                &mut ui,
+                &[
+                    RunId::new("0"),
+                    RunId::new("1"),
+                    RunId::new("2"),
+                    RunId::new("3"),
+                ],
+                flaky,
+                messages,
+                true,
+            )
+            .unwrap();
+        assert_eq!(code, 1);
+        let out = ui.output.join("\n");
+        assert!(out.contains("[2x] connection refused"), "got: {}", out);
+        assert!(out.contains("[1x] timeout after 5s"), "got: {}", out);
+    }
+
+    #[test]
+    fn report_caps_messages_per_test() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 5,
+            failures: 5,
+            transitions: 0,
+            flakiness_score: 0.0,
+            failure_rate: 1.0,
+        }];
+        let mut messages = HashMap::new();
+        let entries: Vec<(String, u32)> = (0..MAX_MESSAGES_PER_TEST + 2)
+            .map(|i| (format!("msg-{}", i), 1))
+            .collect();
+        messages.insert(TestId::new("flap"), entries);
+
+        let code = cmd
+            .report(
+                &mut ui,
+                &[RunId::new("0"), RunId::new("1")],
+                flaky,
+                messages,
+                true,
+            )
+            .unwrap();
+        assert_eq!(code, 1);
+        let out = ui.output.join("\n");
+        assert!(
+            out.contains("and 2 other distinct message(s)"),
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn failure_summary_prefers_message_then_details_tail() {
+        assert_eq!(failure_summary(Some("boom"), Some("ignored")), "boom");
+        assert_eq!(
+            failure_summary(Some("  "), Some("first\nlast line")),
+            "last line"
+        );
+        assert_eq!(failure_summary(None, Some("only\n   \n  ")), "only");
+        assert_eq!(failure_summary(None, None), "(no message)");
+    }
+
+    #[test]
+    fn truncate_message_collapses_newlines_and_caps_length() {
+        let short = truncate_message("hello\n\nworld", 80);
+        assert_eq!(short, "hello / world");
+
+        let long = "x".repeat(MAX_MESSAGE_LEN + 50);
+        let cut = truncate_message(&long, MAX_MESSAGE_LEN);
+        assert!(cut.ends_with("..."));
+        assert_eq!(cut.chars().count(), MAX_MESSAGE_LEN + 3);
     }
 }
