@@ -393,7 +393,18 @@ fn build_stress_response(
                     .map(|mode| StressFailureMessage {
                         message: mode.message,
                         count: mode.count,
+                        varies: mode.varies,
                         details: mode.details,
+                    })
+                    .collect();
+                let concurrency_verdict = analysis.concurrency.verdict();
+                let siblings = analysis
+                    .siblings
+                    .into_iter()
+                    .map(|sib| StressSibling {
+                        test_id: sib.test_id.as_str().to_string(),
+                        co_failures: sib.co_failures,
+                        co_passes: sib.co_passes,
                     })
                     .collect();
                 StressFlakyTest {
@@ -410,6 +421,9 @@ fn build_stress_response(
                         .map(|r| r.as_str().to_string())
                         .collect(),
                     failure_messages,
+                    concurrency: analysis.concurrency,
+                    concurrency_verdict,
+                    siblings,
                 }
             })
             .collect(),
@@ -716,6 +730,13 @@ struct FlakyTest {
     transitions: u32,
     flakiness_score: f64,
     failure_rate: f64,
+    /// Pass/fail counts stratified by the concurrency level of each run
+    /// the test appeared in.
+    concurrency: crate::repository::ConcurrencyBreakdown,
+    /// Human-readable verdict summarising whether the test looks
+    /// concurrency-related, or `None` when there isn't enough data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    concurrency_verdict: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -758,15 +779,45 @@ struct StressFlakyTest {
     /// traceback. Sorted most-frequent-first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     failure_messages: Vec<StressFailureMessage>,
+    /// Pass/fail counts stratified by the concurrency level of each run the
+    /// test appeared in.
+    concurrency: crate::repository::ConcurrencyBreakdown,
+    /// Human-readable verdict summarising what `concurrency` shows
+    /// ("likely concurrency-related", etc.), or `None` when there's no
+    /// data on either side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    concurrency_verdict: Option<String>,
+    /// Other tests that ran in the same worker process as a failing
+    /// instance of this test, ranked by correlation strength.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    siblings: Vec<StressSibling>,
+}
+
+#[derive(Serialize)]
+struct StressSibling {
+    /// The co-running test's identifier.
+    test_id: String,
+    /// Worker processes where this sibling ran alongside a failing
+    /// instance of the target test.
+    co_failures: u32,
+    /// Worker processes where this sibling ran alongside a passing
+    /// instance of the target test.
+    co_passes: u32,
 }
 
 #[derive(Serialize)]
 struct StressFailureMessage {
-    /// The failure message (or the last non-empty line of the traceback if
-    /// no explicit message was recorded).
+    /// Representative failure message shown to the reader. Other failures
+    /// in this group may have differed in volatile segments (line numbers,
+    /// hex addresses, ...) that the grouper treats as noise; see `varies`.
     message: String,
-    /// Number of iterations in which this exact message appeared.
+    /// Number of iterations in which this group appeared.
     count: u32,
+    /// True when at least one other failure in this group had a different
+    /// original message that only collapsed because the volatile segments
+    /// were stripped.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    varies: bool,
     /// Representative full traceback / details from a failure grouped under
     /// this message, if any of those failures recorded details.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1380,7 +1431,9 @@ impl InquestMcpService {
         let min_runs = params.0.min_runs.unwrap_or(5);
         let count = params.0.count.unwrap_or(10);
 
-        let stats = repo.get_flakiness(min_runs).map_err(to_mcp_err)?;
+        let stats = repo
+            .get_flakiness_with_concurrency(min_runs)
+            .map_err(to_mcp_err)?;
         let total_candidates = stats.len();
         let returned = count.min(total_candidates);
         let truncated = total_candidates.saturating_sub(returned);
@@ -1388,13 +1441,18 @@ impl InquestMcpService {
         let tests: Vec<FlakyTest> = stats
             .into_iter()
             .take(returned)
-            .map(|s| FlakyTest {
-                test_id: s.test_id.as_str().to_string(),
-                runs: s.runs,
-                failures: s.failures,
-                transitions: s.transitions,
-                flakiness_score: s.flakiness_score,
-                failure_rate: s.failure_rate,
+            .map(|(s, concurrency)| {
+                let concurrency_verdict = concurrency.verdict();
+                FlakyTest {
+                    test_id: s.test_id.as_str().to_string(),
+                    runs: s.runs,
+                    failures: s.failures,
+                    transitions: s.transitions,
+                    flakiness_score: s.flakiness_score,
+                    failure_rate: s.failure_rate,
+                    concurrency,
+                    concurrency_verdict,
+                }
             })
             .collect();
 

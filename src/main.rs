@@ -389,6 +389,17 @@ enum Commands {
         /// value to use 10.
         #[arg(long, value_name = "N", value_parser = parse_nice, num_args = 0..=1, default_missing_value = "10")]
         nice: Option<i32>,
+
+        /// After the initial pass, re-run suspect tests (plus their top
+        /// co-running siblings) this many more times to tighten the
+        /// failure-rate estimate. Default 30 iterations; pass 0 to skip
+        /// the confirmation phase, or `--no-confirm` for the same effect.
+        #[arg(long, value_name = "N", default_value_t = inquest::commands::stress::DEFAULT_CONFIRM_ITERATIONS)]
+        confirm: usize,
+
+        /// Skip the post-hoc confirmation phase entirely.
+        #[arg(long, conflicts_with = "confirm")]
+        no_confirm: bool,
     },
 
     /// Run tests with output formatted for a CI provider
@@ -943,6 +954,8 @@ fn run() {
             order,
             testargs,
             nice,
+            confirm,
+            no_confirm,
         } => {
             let test_timeout = match test_timeout {
                 Some(s) => match TimeoutSetting::parse(&s) {
@@ -1013,6 +1026,7 @@ fn run() {
                 max_restarts,
                 test_order,
                 nice,
+                confirm_iterations: if no_confirm { Some(0) } else { Some(confirm) },
             };
             cmd.execute(&mut ui)
         }

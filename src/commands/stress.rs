@@ -11,7 +11,9 @@ use crate::commands::Command;
 use crate::config::TimeoutSetting;
 use crate::error::Result;
 use crate::ordering::TestOrder;
-use crate::repository::{summarise_flakiness, Repository, RunId, TestFlakiness, TestId};
+use crate::repository::{
+    summarise_flakiness, ConcurrencyBreakdown, Repository, RunId, TestFlakiness, TestId,
+};
 use crate::ui::UI;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -24,19 +26,43 @@ const MAX_MESSAGE_LEN: usize = 200;
 /// Maximum number of lines of full traceback/details printed per distinct
 /// failure mode in the analysis section.
 const MAX_DETAILS_LINES: usize = 30;
+/// Maximum number of co-running sibling tests surfaced per flaky test.
+const MAX_SIBLINGS_PER_TEST: usize = 5;
 
 /// One distinct failure mode for a flaky test.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailureMode {
-    /// Single-line summary used to group failures (from `failure_summary`).
+    /// Representative single-line summary shown to the user. The first
+    /// original message we saw in this group; other failures may have
+    /// differed in the parts `normalise_for_grouping` ignores (hex
+    /// addresses, ports, line numbers, ...).
     pub message: String,
-    /// Number of iterations in which this exact message appeared.
+    /// Whether failures grouped under this entry had more than one
+    /// distinct original `message` — i.e. they only collapsed because
+    /// `normalise_for_grouping` treated their differences as noise.
+    pub varies: bool,
+    /// Number of iterations in which this group appeared.
     pub count: u32,
     /// Full `details` (typically a traceback) from a representative failure,
     /// if any of the failures grouped under this message had details. We
     /// keep one representative rather than all, on the assumption that
     /// identically-summarised failures share a stack.
     pub details: Option<String>,
+}
+
+/// A candidate sibling test that ran in the same worker process as a
+/// flaky test's failures, ranked by how disproportionately it shows up
+/// alongside failures vs passes of the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiblingCandidate {
+    /// The co-running test's identifier.
+    pub test_id: TestId,
+    /// Worker processes where this sibling ran alongside a failing
+    /// instance of the target test.
+    pub co_failures: u32,
+    /// Worker processes where this sibling ran alongside a passing
+    /// instance of the target test.
+    pub co_passes: u32,
 }
 
 /// Per-flaky-test analysis collected from the stress window.
@@ -48,6 +74,15 @@ pub struct FailureAnalysis {
     pub failing_run_ids: Vec<RunId>,
     /// Distinct failure modes, sorted most-frequent-first.
     pub modes: Vec<FailureMode>,
+    /// Pass/fail counts stratified by the concurrency level of each
+    /// iteration the test appeared in.
+    pub concurrency: ConcurrencyBreakdown,
+    /// Other tests that ran in the same worker process as a failing
+    /// instance of this test. Sorted by how strongly they correlate with
+    /// the failure (co-failures minus chance-adjusted co-passes), highest
+    /// first. Empty when no per-worker data was available (e.g. all
+    /// iterations were serial, or sub-runs weren't recorded).
+    pub siblings: Vec<SiblingCandidate>,
 }
 
 /// Per-flaky-test failure analysis keyed by test ID. Tests that weren't
@@ -56,6 +91,16 @@ pub type FailureAnalyses = HashMap<TestId, FailureAnalysis>;
 
 /// Default number of iterations when `--iterations` is not given.
 pub const DEFAULT_ITERATIONS: usize = 10;
+
+/// Default number of confirmation iterations when the second-pass phase
+/// is enabled. Chosen to tighten a 10-iteration starting estimate to a
+/// failure-rate uncertainty of roughly ±5–10 percentage points.
+pub const DEFAULT_CONFIRM_ITERATIONS: usize = 30;
+
+/// Default number of co-running sibling tests to drag along into the
+/// confirmation phase per suspect, so cross-test interference is
+/// preserved rather than masked by re-running suspects in isolation.
+const DEFAULT_CONFIRM_SIBLINGS_PER_SUSPECT: usize = 3;
 
 /// Command to run the test suite repeatedly and report flaky tests.
 #[derive(Default)]
@@ -91,6 +136,12 @@ pub struct StressCommand {
     /// Niceness increment for spawned test processes (unix only). See
     /// [`crate::test_executor::TestExecutorConfig::nice`].
     pub nice: Option<i32>,
+    /// Number of additional iterations to run after the initial pass,
+    /// restricted to the suspects (and their top co-running siblings).
+    /// `None` falls back to [`DEFAULT_CONFIRM_ITERATIONS`]; `Some(0)`
+    /// disables the confirmation phase entirely (the `--no-confirm`
+    /// CLI flag).
+    pub confirm_iterations: Option<usize>,
 }
 
 impl StressCommand {
@@ -103,10 +154,15 @@ impl StressCommand {
         }
     }
 
-    fn build_iteration(&self, concurrency: Option<usize>) -> crate::commands::RunCommand {
+    fn build_iteration(
+        &self,
+        concurrency: Option<usize>,
+        test_ids_override: Option<Vec<TestId>>,
+    ) -> crate::commands::RunCommand {
         crate::commands::RunCommand {
             base_path: self.base_path.clone(),
             load_list: self.load_list.clone(),
+            test_ids_override,
             concurrency,
             isolated: self.isolated,
             test_filters: self.test_filters.clone(),
@@ -165,7 +221,7 @@ impl Command for StressCommand {
                 iteration, self.iterations
             ))?;
 
-            let run_cmd = self.build_iteration(iteration_concurrency);
+            let run_cmd = self.build_iteration(iteration_concurrency, None);
             let output = run_cmd.execute_returning_run_id(ui)?;
 
             if let Some(run_id) = output.run_id {
@@ -195,6 +251,48 @@ impl Command for StressCommand {
                         iteration
                     ))?;
                     return self.report(ui, &run_ids, summary, messages, any_failure);
+                }
+            }
+        }
+
+        // Phase 1 done. Compute suspects + their top siblings and re-run
+        // that focused set so the final failure-rate numbers reflect tens
+        // of observations rather than the noisy initial pass.
+        let confirm_iterations = self
+            .confirm_iterations
+            .unwrap_or(DEFAULT_CONFIRM_ITERATIONS);
+        if confirm_iterations > 0 {
+            let confirm_set = {
+                let repo = open_repository(self.base_path.as_deref())?;
+                let (_summary, analyses) = summarise_run_ids(&*repo, &run_ids)?;
+                build_confirm_set(&analyses, DEFAULT_CONFIRM_SIBLINGS_PER_SUSPECT)
+            };
+            if !confirm_set.is_empty() {
+                ui.output(&format!(
+                    "\n=== Confirmation phase: {} suspect(s)+sibling(s) x {} iterations ===",
+                    confirm_set.len(),
+                    confirm_iterations,
+                ))?;
+                for iteration in 1..=confirm_iterations {
+                    ui.output(&format!(
+                        "\n--- Confirm iteration {}/{} ---",
+                        iteration, confirm_iterations
+                    ))?;
+                    let run_cmd =
+                        self.build_iteration(iteration_concurrency, Some(confirm_set.clone()));
+                    let output = run_cmd.execute_returning_run_id(ui)?;
+                    if let Some(run_id) = output.run_id {
+                        run_ids.push(run_id);
+                    } else {
+                        ui.output(
+                            "\nConfirmation phase aborted: no test run was recorded. \
+                             Reporting from initial pass only.",
+                        )?;
+                        break;
+                    }
+                    if output.exit_code != 0 {
+                        any_failure = true;
+                    }
                 }
             }
         }
@@ -309,16 +407,39 @@ impl StressCommand {
                 "    failing run id(s): {}",
                 format_run_id_list(&analysis.failing_run_ids)
             ))?;
+            if let Some(verdict) = analysis.concurrency.verdict() {
+                ui.output(&format!("    concurrency: {}", verdict))?;
+            }
             for (i, mode) in analysis.modes.iter().enumerate() {
+                let varies_tag = if mode.varies { " (varies)" } else { "" };
                 ui.output(&format!(
-                    "    failure mode {} of {} ({}x): {}",
+                    "    failure mode {} of {} ({}x{}): {}",
                     i + 1,
                     analysis.modes.len(),
                     mode.count,
+                    varies_tag,
                     truncate_message(&mode.message, MAX_MESSAGE_LEN),
                 ))?;
                 if let Some(details) = &mode.details {
                     render_details_block(ui, details, MAX_DETAILS_LINES)?;
+                }
+            }
+            if !analysis.siblings.is_empty() {
+                ui.output(
+                    "    co-running tests (ran in the same worker process \
+                     as a failing instance):",
+                )?;
+                for sibling in analysis.siblings.iter().take(MAX_SIBLINGS_PER_TEST) {
+                    ui.output(&format!(
+                        "      [fail:{} pass:{}] {}",
+                        sibling.co_failures, sibling.co_passes, sibling.test_id,
+                    ))?;
+                }
+                if analysis.siblings.len() > MAX_SIBLINGS_PER_TEST {
+                    ui.output(&format!(
+                        "      ... and {} more co-running test(s)",
+                        analysis.siblings.len() - MAX_SIBLINGS_PER_TEST
+                    ))?;
                 }
             }
         }
@@ -393,6 +514,163 @@ fn failure_summary(message: Option<&str>, details: Option<&str>) -> String {
     "(no message)".to_string()
 }
 
+/// Return a fingerprint of a failure summary used purely for grouping
+/// near-duplicates. Strips parts of the message that vary between
+/// otherwise-identical failures: hex pointers, long hex hashes, large
+/// integers (line numbers, PIDs, ports, ms counts), ISO-8601 timestamps
+/// and UUIDs. Two failures that differ only in those positions collapse
+/// into one [`FailureMode`].
+///
+/// The original message is kept untouched for display; this function's
+/// output is never shown to the user, only compared.
+fn normalise_for_grouping(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut chars = message.chars().peekable();
+    while let Some(c) = chars.next() {
+        // Hex pointer: `0x` followed by hex digits.
+        if c == '0' && chars.peek() == Some(&'x') {
+            chars.next();
+            let mut had_hex = false;
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_hexdigit() {
+                    chars.next();
+                    had_hex = true;
+                } else {
+                    break;
+                }
+            }
+            if had_hex {
+                out.push_str("0x?");
+                continue;
+            }
+            out.push_str("0x");
+            continue;
+        }
+        // UUID or hex hash: gobble [0-9a-fA-F-]+, then decide whether the
+        // run was hex-shaped (UUID, or 8+ chars with at least one a-f) or
+        // just a plain decimal number that happened to be all 0-9.
+        if c.is_ascii_hexdigit() {
+            let mut buf = String::new();
+            buf.push(c);
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_hexdigit() || next == '-' {
+                    buf.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if looks_like_uuid(&buf) {
+                out.push('?');
+                continue;
+            }
+            let has_hex_letter = buf.chars().any(|c| matches!(c, 'a'..='f' | 'A'..='F'));
+            // 8+ hex chars (with at least one a-f) → treat as a hash like a
+            // commit SHA or hex digest.
+            if buf.len() >= 8 && !buf.contains('-') && has_hex_letter {
+                out.push('?');
+                continue;
+            }
+            // Pure decimal run — re-route through the decimal logic so
+            // 4+-digit numbers still collapse. Pre-set `digits` to `buf`
+            // and fall through.
+            if !buf.contains('-') && !has_hex_letter {
+                let digits = buf;
+                emit_decimal_run(&digits, &mut chars, &mut out);
+                continue;
+            }
+            out.push_str(&buf);
+            continue;
+        }
+        // Decimal integer of 4+ digits (line numbers, PIDs, ports, ms, ...).
+        if c.is_ascii_digit() {
+            let mut digits = String::new();
+            digits.push(c);
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_digit() {
+                    digits.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            emit_decimal_run(&digits, &mut chars, &mut out);
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Emit a normalised form of a decimal run already extracted from the
+/// input. Handles the optional `.NNN(s|ms|µs|ns)` duration suffix and
+/// collapses 4+ digit integers to `?`. Used by both the dedicated decimal
+/// branch and the hex branch's fall-through for runs that turned out to
+/// be pure 0-9.
+fn emit_decimal_run(
+    digits: &str,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    out: &mut String,
+) {
+    let mut suffix = String::new();
+    if chars.peek() == Some(&'.') {
+        let mut lookahead = chars.clone();
+        lookahead.next();
+        let mut decimals = String::new();
+        while let Some(&next) = lookahead.peek() {
+            if next.is_ascii_digit() {
+                decimals.push(next);
+                lookahead.next();
+            } else {
+                break;
+            }
+        }
+        if !decimals.is_empty() {
+            suffix.push('.');
+            suffix.push_str(&decimals);
+            chars.next();
+            for _ in 0..decimals.len() {
+                chars.next();
+            }
+        }
+    }
+    let is_duration = matches!(
+        chars.peek(),
+        Some(&'s') | Some(&'m') | Some(&'µ') | Some(&'n')
+    ) && !suffix.is_empty();
+    if is_duration {
+        while let Some(&next) = chars.peek() {
+            if matches!(next, 's' | 'm' | 'µ' | 'n') {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        out.push_str("?dur");
+        return;
+    }
+    if digits.len() >= 4 {
+        out.push('?');
+        return;
+    }
+    out.push_str(digits);
+    out.push_str(&suffix);
+}
+
+/// Cheap UUID shape check: 8-4-4-4-12 hex characters separated by dashes
+/// (case-insensitive). Used by [`normalise_for_grouping`].
+fn looks_like_uuid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    let expected = [8usize, 4, 4, 4, 12];
+    if parts.len() != expected.len() {
+        return false;
+    }
+    parts
+        .iter()
+        .zip(expected.iter())
+        .all(|(part, &len)| part.len() == len && part.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 /// Truncate a single-line preview of a failure message. Newlines are
 /// collapsed to spaces so the table stays readable; the full message remains
 /// available via `inq log <run-id>`.
@@ -430,28 +708,44 @@ pub(crate) fn summarise_run_ids(
     for (iter_index, run_id) in run_ids.iter().enumerate() {
         let iteration = (iter_index + 1) as u32;
         let run = repo.get_test_run(run_id)?;
+        // The streaming subunit parser doesn't populate `concurrency` on the
+        // in-memory run, so go through the repository's metadata table.
+        let concurrency = repo
+            .get_run_metadata(run_id)
+            .ok()
+            .and_then(|m| m.concurrency);
         for (test_id, result) in &run.results {
             let is_failure = result.status.is_failure();
             history.entry(test_id.clone()).or_default().push(is_failure);
+            let entry = analyses.entry(test_id.clone()).or_default();
+            entry.concurrency.record(concurrency, is_failure);
             if is_failure {
                 let msg = failure_summary(result.message.as_deref(), result.details.as_deref());
+                let key = normalise_for_grouping(&msg);
                 let details = result
                     .details
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_string);
-                let entry = analyses.entry(test_id.clone()).or_default();
                 entry.failing_iterations.push(iteration);
                 entry.failing_run_ids.push(run_id.clone());
-                if let Some(slot) = entry.modes.iter_mut().find(|m| m.message == msg) {
+                if let Some(slot) = entry
+                    .modes
+                    .iter_mut()
+                    .find(|m| normalise_for_grouping(&m.message) == key)
+                {
                     slot.count += 1;
+                    if slot.message != msg {
+                        slot.varies = true;
+                    }
                     if slot.details.is_none() {
                         slot.details = details;
                     }
                 } else {
                     entry.modes.push(FailureMode {
                         message: msg,
+                        varies: false,
                         count: 1,
                         details,
                     });
@@ -475,8 +769,8 @@ pub(crate) fn summarise_run_ids(
 
     // Restrict the analyses to tests that ended up in the summary, and
     // sort each entry's modes most-frequent-first for predictable output.
-    let flaky_ids: std::collections::HashSet<&TestId> =
-        summary.iter().map(|f| &f.test_id).collect();
+    let flaky_ids: std::collections::HashSet<TestId> =
+        summary.iter().map(|f| f.test_id.clone()).collect();
     analyses.retain(|id, _| flaky_ids.contains(id));
     for analysis in analyses.values_mut() {
         analysis.modes.sort_by(|a, b| {
@@ -486,7 +780,147 @@ pub(crate) fn summarise_run_ids(
         });
     }
 
+    collect_siblings(repo, run_ids, &flaky_ids, &mut analyses)?;
+
     Ok((summary, analyses))
+}
+
+/// Read each iteration's per-worker sub-run files and tally, for every
+/// flaky test, which other tests ran in the same worker process as a
+/// failing instance vs a passing instance. The resulting ranking surfaces
+/// candidate cross-test interference: a sibling that consistently appears
+/// alongside the failure but not alongside the passes is suspicious.
+fn collect_siblings(
+    repo: &dyn Repository,
+    run_ids: &[RunId],
+    flaky_ids: &std::collections::HashSet<TestId>,
+    analyses: &mut HashMap<TestId, FailureAnalysis>,
+) -> Result<()> {
+    // (target, sibling) → (co_failures, co_passes).
+    let mut counts: HashMap<(TestId, TestId), (u32, u32)> = HashMap::new();
+
+    for run_id in run_ids {
+        let sub_ids = repo.list_sub_run_ids(run_id).unwrap_or_default();
+        if sub_ids.is_empty() {
+            continue;
+        }
+        for sub_id in &sub_ids {
+            let sub_run = match repo.get_test_run(sub_id) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        "skipping sub-run {} while collecting siblings: {}",
+                        sub_id,
+                        e
+                    );
+                    continue;
+                }
+            };
+            // Within this worker, partition flaky tests by outcome and
+            // collect every other test as a candidate sibling.
+            let mut failing_targets: Vec<&TestId> = Vec::new();
+            let mut passing_targets: Vec<&TestId> = Vec::new();
+            for (test_id, result) in &sub_run.results {
+                if !flaky_ids.contains(test_id) {
+                    continue;
+                }
+                if result.status.is_failure() {
+                    failing_targets.push(test_id);
+                } else {
+                    passing_targets.push(test_id);
+                }
+            }
+            if failing_targets.is_empty() && passing_targets.is_empty() {
+                continue;
+            }
+            for sibling_id in sub_run.results.keys() {
+                for target in &failing_targets {
+                    if sibling_id == *target {
+                        continue;
+                    }
+                    let entry = counts
+                        .entry(((*target).clone(), sibling_id.clone()))
+                        .or_insert((0, 0));
+                    entry.0 += 1;
+                }
+                for target in &passing_targets {
+                    if sibling_id == *target {
+                        continue;
+                    }
+                    let entry = counts
+                        .entry(((*target).clone(), sibling_id.clone()))
+                        .or_insert((0, 0));
+                    entry.1 += 1;
+                }
+            }
+        }
+    }
+
+    // Group by target, score, and store.
+    let mut by_target: HashMap<TestId, Vec<SiblingCandidate>> = HashMap::new();
+    for ((target, sibling), (co_failures, co_passes)) in counts {
+        by_target.entry(target).or_default().push(SiblingCandidate {
+            test_id: sibling,
+            co_failures,
+            co_passes,
+        });
+    }
+    for (target, mut siblings) in by_target {
+        let Some(analysis) = analyses.get_mut(&target) else {
+            continue;
+        };
+        let target_failures = analysis.failing_iterations.len() as u32;
+        siblings.retain(|s| {
+            // Only surface siblings that ran with the target in at least
+            // one *failing* worker. Pure-pass co-occurrence is not an
+            // interference signal.
+            s.co_failures > 0
+        });
+        siblings.sort_by(|a, b| {
+            sibling_score(b, target_failures)
+                .partial_cmp(&sibling_score(a, target_failures))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.test_id.as_str().cmp(b.test_id.as_str()))
+        });
+        analysis.siblings = siblings;
+    }
+
+    Ok(())
+}
+
+/// Rank a sibling test by how disproportionately it co-occurs with the
+/// target's failures vs its passes.
+///
+/// The score is `co_failures - co_passes * baseline_pass_rate`, where
+/// `baseline_pass_rate = co_failures / max(1, target_failures)` — i.e. we
+/// expect a sibling that's uncorrelated to appear in a similar fraction
+/// of passing workers as it does in failing ones, and discount its score
+/// accordingly. Siblings that perfectly track the failure get the highest
+/// score; siblings that appear everywhere get a near-zero score.
+fn sibling_score(s: &SiblingCandidate, target_failures: u32) -> f64 {
+    let total_failures = target_failures.max(1) as f64;
+    let fail_rate = s.co_failures as f64 / total_failures;
+    s.co_failures as f64 - s.co_passes as f64 * fail_rate
+}
+
+/// Compute the set of test IDs the confirmation phase should re-run.
+///
+/// Includes every flaky test (the "suspect") and up to
+/// `max_siblings_per_suspect` of its top-ranked co-running siblings so
+/// concurrency-driven interference is preserved when the focused phase
+/// runs. The list is deduplicated and sorted for deterministic output.
+pub(crate) fn build_confirm_set(
+    analyses: &FailureAnalyses,
+    max_siblings_per_suspect: usize,
+) -> Vec<TestId> {
+    let mut set: std::collections::BTreeSet<TestId> = std::collections::BTreeSet::new();
+    for (suspect, analysis) in analyses {
+        set.insert(suspect.clone());
+        for sibling in analysis.siblings.iter().take(max_siblings_per_suspect) {
+            set.insert(sibling.test_id.clone());
+        }
+    }
+    set.into_iter().collect()
 }
 
 /// Render a run-id list as a compact comma-separated string, with `..` when
@@ -869,6 +1303,309 @@ mod tests {
         assert_eq!(analysis.modes[0].message, "(no message)");
     }
 
+    #[test]
+    fn normalise_for_grouping_strips_volatile_segments() {
+        // Identical assertion at different line numbers should collapse.
+        assert_eq!(
+            normalise_for_grouping("AssertionError at line 1234"),
+            normalise_for_grouping("AssertionError at line 5678"),
+        );
+        // Hex pointers in object reprs.
+        assert_eq!(
+            normalise_for_grouping("<Conn object at 0x7f8a3c4b0010>"),
+            normalise_for_grouping("<Conn object at 0xdeadbeef>"),
+        );
+        // UUIDs and long hex hashes.
+        assert_eq!(
+            normalise_for_grouping("job 550e8400-e29b-41d4-a716-446655440000 failed"),
+            normalise_for_grouping("job 6ba7b810-9dad-11d1-80b4-00c04fd430c8 failed"),
+        );
+        assert_eq!(
+            normalise_for_grouping("commit a1b2c3d4e5 not found"),
+            normalise_for_grouping("commit 9876543210 not found"),
+        );
+        // Durations.
+        assert_eq!(
+            normalise_for_grouping("timed out after 12.345s"),
+            normalise_for_grouping("timed out after 30.001s"),
+        );
+        // Short numbers (1-3 digits) should *not* be stripped — they
+        // could be meaningful (HTTP status codes, small counts).
+        assert_ne!(
+            normalise_for_grouping("got status 200"),
+            normalise_for_grouping("got status 500"),
+        );
+    }
+
+    #[test]
+    fn normalise_for_grouping_preserves_message_text() {
+        // Sanity: distinct error types stay distinct.
+        assert_ne!(
+            normalise_for_grouping("ConnectionRefused"),
+            normalise_for_grouping("TimeoutError"),
+        );
+    }
+
+    #[test]
+    fn summarise_run_ids_groups_near_duplicate_messages() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::{Failure, Success};
+        // Two failures that differ only in the line number, plus a pass —
+        // should collapse into one mode flagged as `varies`.
+        let r0 = insert_run_with_messages(
+            repo.as_mut(),
+            "0",
+            &[("flap", Failure, Some("AssertionError at line 1234"))],
+        );
+        let r1 = insert_run_with_messages(repo.as_mut(), "1", &[("flap", Success, None)]);
+        let r2 = insert_run_with_messages(
+            repo.as_mut(),
+            "2",
+            &[("flap", Failure, Some("AssertionError at line 5678"))],
+        );
+
+        let (_summary, analyses) = summarise_run_ids(repo.as_ref(), &[r0, r1, r2]).unwrap();
+        let analysis = analyses.get(&TestId::new("flap")).expect("flap analysis");
+        assert_eq!(analysis.modes.len(), 1);
+        assert_eq!(analysis.modes[0].count, 2);
+        assert!(analysis.modes[0].varies, "expected varies=true");
+        // The displayed message is the first one we saw.
+        assert_eq!(analysis.modes[0].message, "AssertionError at line 1234");
+    }
+
+    #[test]
+    fn build_confirm_set_includes_suspect_and_top_siblings() {
+        let mut analyses = FailureAnalyses::new();
+        let mut a = analysis_with(vec![("boom", 1)], vec![1]);
+        a.siblings = vec![
+            SiblingCandidate {
+                test_id: TestId::new("hot"),
+                co_failures: 3,
+                co_passes: 0,
+            },
+            SiblingCandidate {
+                test_id: TestId::new("warm"),
+                co_failures: 2,
+                co_passes: 0,
+            },
+            SiblingCandidate {
+                test_id: TestId::new("cool"),
+                co_failures: 1,
+                co_passes: 0,
+            },
+            SiblingCandidate {
+                test_id: TestId::new("ignored_extra"),
+                co_failures: 1,
+                co_passes: 0,
+            },
+        ];
+        analyses.insert(TestId::new("suspect"), a);
+
+        let set = build_confirm_set(&analyses, 3);
+        // Suspect + top-3 siblings, sorted, no extras.
+        assert_eq!(
+            set,
+            vec![
+                TestId::new("cool"),
+                TestId::new("hot"),
+                TestId::new("suspect"),
+                TestId::new("warm"),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_confirm_set_dedupes_across_suspects() {
+        // Two suspects whose top siblings overlap should produce a single
+        // entry for the shared sibling, not two.
+        let mut analyses = FailureAnalyses::new();
+        let mut a = analysis_with(vec![("boom", 1)], vec![1]);
+        a.siblings = vec![SiblingCandidate {
+            test_id: TestId::new("shared"),
+            co_failures: 1,
+            co_passes: 0,
+        }];
+        let mut b = analysis_with(vec![("boom", 1)], vec![1]);
+        b.siblings = vec![SiblingCandidate {
+            test_id: TestId::new("shared"),
+            co_failures: 1,
+            co_passes: 0,
+        }];
+        analyses.insert(TestId::new("s1"), a);
+        analyses.insert(TestId::new("s2"), b);
+
+        let set = build_confirm_set(&analyses, 3);
+        assert_eq!(
+            set,
+            vec![TestId::new("s1"), TestId::new("s2"), TestId::new("shared"),]
+        );
+    }
+
+    #[test]
+    fn build_confirm_set_with_no_siblings_returns_only_suspects() {
+        let mut analyses = FailureAnalyses::new();
+        analyses.insert(
+            TestId::new("loner"),
+            analysis_with(vec![("boom", 1)], vec![1]),
+        );
+        assert_eq!(build_confirm_set(&analyses, 3), vec![TestId::new("loner")]);
+    }
+
+    #[test]
+    fn sibling_score_prioritises_consistent_co_failure() {
+        let pure_signal = SiblingCandidate {
+            test_id: TestId::new("s"),
+            co_failures: 3,
+            co_passes: 0,
+        };
+        let mixed = SiblingCandidate {
+            test_id: TestId::new("s"),
+            co_failures: 3,
+            co_passes: 3,
+        };
+        let target_failures = 3;
+        let pure = sibling_score(&pure_signal, target_failures);
+        let mix = sibling_score(&mixed, target_failures);
+        assert_eq!(pure, 3.0);
+        // mixed: 3 - 3 * (3/3) = 0
+        assert_eq!(mix, 0.0);
+        assert!(pure > mix);
+    }
+
+    /// Write a parent run + per-worker sub-runs that simulate one stress
+    /// iteration. Returns the parent run ID. The aggregate at the parent
+    /// holds the union of all worker results (matching what
+    /// `persist_and_display_run` does in production).
+    fn insert_parallel_iteration(
+        repo: &mut dyn Repository,
+        run_id: &str,
+        workers: &[&[(&str, TestStatus)]],
+    ) -> RunId {
+        let mut aggregate = TestRun::new(RunId::new(run_id));
+        aggregate.timestamp = chrono::Utc::now();
+        for worker_results in workers {
+            for (test_id, status) in *worker_results {
+                aggregate.add_result(TestResult {
+                    test_id: TestId::new(*test_id),
+                    status: *status,
+                    duration: None,
+                    message: None,
+                    details: None,
+                    tags: vec![],
+                });
+            }
+        }
+        let parent_id = repo.insert_test_run(aggregate).unwrap();
+        for (idx, worker_results) in workers.iter().enumerate() {
+            let suffix = crate::repository::worker_suffix(idx);
+            let (_, mut writer) = repo.begin_sub_run_raw(&parent_id, &suffix).unwrap();
+            let mut worker_run = TestRun::new(RunId::new(format!("{}{}", parent_id, suffix)));
+            worker_run.timestamp = chrono::Utc::now();
+            for (test_id, status) in *worker_results {
+                worker_run.add_result(TestResult {
+                    test_id: TestId::new(*test_id),
+                    status: *status,
+                    duration: None,
+                    message: None,
+                    details: None,
+                    tags: vec![],
+                });
+            }
+            crate::subunit_stream::write_stream(&worker_run, &mut writer).unwrap();
+        }
+        parent_id
+    }
+
+    #[test]
+    fn summarise_run_ids_collects_same_worker_siblings() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::{Failure, Success};
+        // Iteration 1: target T fails in worker 0 alongside `bad_sibling`;
+        //              worker 1 runs `innocent` and passes.
+        // Iteration 2: T passes in worker 0 (alongside `innocent`);
+        //              `bad_sibling` runs in worker 1 without T.
+        // Iteration 3: T fails again in worker 0 alongside `bad_sibling`.
+        // → `bad_sibling`: 2 co-failures, 0 co-passes (strong signal).
+        // → `innocent`:    0 co-failures, 1 co-pass     (filtered out).
+        let r0 = insert_parallel_iteration(
+            repo.as_mut(),
+            "0",
+            &[
+                &[("T", Failure), ("bad_sibling", Success)],
+                &[("innocent", Success)],
+            ],
+        );
+        let r1 = insert_parallel_iteration(
+            repo.as_mut(),
+            "1",
+            &[
+                &[("T", Success), ("innocent", Success)],
+                &[("bad_sibling", Success)],
+            ],
+        );
+        let r2 = insert_parallel_iteration(
+            repo.as_mut(),
+            "2",
+            &[
+                &[("T", Failure), ("bad_sibling", Success)],
+                &[("innocent", Success)],
+            ],
+        );
+
+        let (_summary, analyses) = summarise_run_ids(repo.as_ref(), &[r0, r1, r2]).unwrap();
+        let analysis = analyses.get(&TestId::new("T")).expect("T analysis");
+        let sibling_pairs: Vec<(&str, u32, u32)> = analysis
+            .siblings
+            .iter()
+            .map(|s| (s.test_id.as_str(), s.co_failures, s.co_passes))
+            .collect();
+        assert_eq!(sibling_pairs, vec![("bad_sibling", 2, 0)]);
+    }
+
+    #[test]
+    fn summarise_run_ids_records_concurrency_per_iteration() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::{Failure, Success};
+        let r0 = insert_run_with_messages(repo.as_mut(), "0", &[("flap", Success, None)]);
+        let r1 = insert_run_with_messages(repo.as_mut(), "1", &[("flap", Failure, Some("race"))]);
+        let r2 = insert_run_with_messages(repo.as_mut(), "2", &[("flap", Success, None)]);
+        let r3 = insert_run_with_messages(repo.as_mut(), "3", &[("flap", Failure, Some("race"))]);
+
+        // r0 + r2 ran serially, r1 + r3 ran with -j 8.
+        for (id, concurrency) in [(&r0, 1), (&r2, 1), (&r1, 8), (&r3, 8)] {
+            let metadata = crate::repository::RunMetadata {
+                concurrency: Some(concurrency),
+                ..Default::default()
+            };
+            repo.set_run_metadata(id, metadata).unwrap();
+        }
+
+        let (summary, analyses) = summarise_run_ids(repo.as_ref(), &[r0, r1, r2, r3]).unwrap();
+        assert_eq!(summary.len(), 1);
+        let analysis = analyses.get(&TestId::new("flap")).expect("flap analysis");
+        assert_eq!(
+            analysis.concurrency,
+            ConcurrencyBreakdown {
+                serial_failures: 0,
+                serial_runs: 2,
+                parallel_failures: 2,
+                parallel_runs: 2,
+                max_parallel_concurrency: Some(8),
+                unknown_failures: 0,
+                unknown_runs: 0,
+            }
+        );
+    }
+
     fn analysis_with(modes: Vec<(&str, u32)>, failing_iters: Vec<u32>) -> FailureAnalysis {
         FailureAnalysis {
             failing_iterations: failing_iters.clone(),
@@ -880,10 +1617,13 @@ mod tests {
                 .into_iter()
                 .map(|(m, c)| FailureMode {
                     message: m.to_string(),
+                    varies: false,
                     count: c,
                     details: None,
                 })
                 .collect(),
+            concurrency: ConcurrencyBreakdown::default(),
+            siblings: Vec::new(),
         }
     }
 
@@ -940,6 +1680,202 @@ mod tests {
                 "    failure mode 1 of 2 (2x): connection refused".to_string(),
                 "    failure mode 2 of 2 (1x): timeout after 5s".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn report_marks_modes_that_collapsed_near_duplicates_as_varies() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 3,
+            failures: 2,
+            transitions: 2,
+            flakiness_score: 1.0,
+            failure_rate: 2.0 / 3.0,
+        }];
+        let mut analysis = analysis_with(vec![("AssertionError at line 1234", 2)], vec![1, 3]);
+        analysis.modes[0].varies = true;
+        let mut analyses = HashMap::new();
+        analyses.insert(TestId::new("flap"), analysis);
+
+        cmd.report(
+            &mut ui,
+            &[RunId::new("0"), RunId::new("1"), RunId::new("2")],
+            flaky,
+            analyses,
+            true,
+        )
+        .unwrap();
+        let mode_line = ui
+            .output
+            .iter()
+            .find(|l| l.starts_with("    failure mode "))
+            .expect("failure mode line missing");
+        assert_eq!(
+            mode_line,
+            "    failure mode 1 of 1 (2x (varies)): AssertionError at line 1234"
+        );
+    }
+
+    #[test]
+    fn report_lists_co_running_siblings_when_present() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 3,
+            failures: 1,
+            transitions: 2,
+            flakiness_score: 1.0,
+            failure_rate: 1.0 / 3.0,
+        }];
+        let mut analysis = analysis_with(vec![("boom", 1)], vec![2]);
+        analysis.siblings = vec![
+            SiblingCandidate {
+                test_id: TestId::new("hot_sibling"),
+                co_failures: 3,
+                co_passes: 0,
+            },
+            SiblingCandidate {
+                test_id: TestId::new("lukewarm"),
+                co_failures: 1,
+                co_passes: 0,
+            },
+        ];
+        let mut analyses = HashMap::new();
+        analyses.insert(TestId::new("flap"), analysis);
+
+        cmd.report(
+            &mut ui,
+            &[RunId::new("0"), RunId::new("1"), RunId::new("2")],
+            flaky,
+            analyses,
+            true,
+        )
+        .unwrap();
+        let sibling_block_start = ui
+            .output
+            .iter()
+            .position(|l| l.starts_with("    co-running tests"))
+            .expect("sibling header missing");
+        assert_eq!(
+            &ui.output[sibling_block_start..],
+            &[
+                "    co-running tests (ran in the same worker process as a failing instance):"
+                    .to_string(),
+                "      [fail:3 pass:0] hot_sibling".to_string(),
+                "      [fail:1 pass:0] lukewarm".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn report_omits_sibling_block_with_no_data() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 2,
+            failures: 1,
+            transitions: 1,
+            flakiness_score: 1.0,
+            failure_rate: 0.5,
+        }];
+        let mut analyses = HashMap::new();
+        analyses.insert(
+            TestId::new("flap"),
+            analysis_with(vec![("boom", 1)], vec![1]),
+        );
+
+        cmd.report(
+            &mut ui,
+            &[RunId::new("0"), RunId::new("1")],
+            flaky,
+            analyses,
+            true,
+        )
+        .unwrap();
+        assert!(
+            ui.output
+                .iter()
+                .all(|l| !l.starts_with("    co-running tests")),
+            "got: {:?}",
+            ui.output
+        );
+    }
+
+    #[test]
+    fn report_includes_concurrency_verdict_when_available() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 4,
+            failures: 2,
+            transitions: 2,
+            flakiness_score: 2.0 / 3.0,
+            failure_rate: 0.5,
+        }];
+        let mut analysis = analysis_with(vec![("race", 2)], vec![3, 4]);
+        analysis.concurrency.record(Some(1), false);
+        analysis.concurrency.record(Some(1), false);
+        analysis.concurrency.record(Some(8), true);
+        analysis.concurrency.record(Some(8), true);
+        let mut analyses = HashMap::new();
+        analyses.insert(TestId::new("flap"), analysis);
+
+        cmd.report(
+            &mut ui,
+            &[
+                RunId::new("0"),
+                RunId::new("1"),
+                RunId::new("2"),
+                RunId::new("3"),
+            ],
+            flaky,
+            analyses,
+            true,
+        )
+        .unwrap();
+        let concurrency_lines: Vec<&String> = ui
+            .output
+            .iter()
+            .filter(|l| l.starts_with("    concurrency:"))
+            .collect();
+        assert_eq!(
+            concurrency_lines,
+            vec![
+                &"    concurrency: fails 2/2 in parallel (max -j 8), 0/2 serially — likely concurrency-related".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn report_omits_concurrency_line_with_no_observations() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 1,
+            failures: 1,
+            transitions: 0,
+            flakiness_score: 0.0,
+            failure_rate: 1.0,
+        }];
+        let mut analyses = HashMap::new();
+        analyses.insert(
+            TestId::new("flap"),
+            analysis_with(vec![("boom", 1)], vec![1]),
+        );
+
+        cmd.report(&mut ui, &[RunId::new("0")], flaky, analyses, true)
+            .unwrap();
+        assert!(
+            ui.output.iter().all(|l| !l.starts_with("    concurrency:")),
+            "got: {:?}",
+            ui.output
         );
     }
 
@@ -1006,12 +1942,15 @@ mod tests {
                 failing_run_ids: vec![RunId::new("1")],
                 modes: vec![FailureMode {
                     message: "AssertionError: 1 != 2".to_string(),
+                    varies: false,
                     count: 1,
                     details: Some(
                         "Traceback (most recent call last):\n  File \"x.py\", line 1\n    assert 1 == 2\nAssertionError: 1 != 2"
                             .to_string(),
                     ),
                 }],
+                concurrency: ConcurrencyBreakdown::default(),
+                siblings: Vec::new(),
             },
         );
 
@@ -1071,9 +2010,12 @@ mod tests {
                 failing_run_ids: vec![RunId::new("0")],
                 modes: vec![FailureMode {
                     message: "boom".to_string(),
+                    varies: false,
                     count: 1,
                     details: Some(traceback),
                 }],
+                concurrency: ConcurrencyBreakdown::default(),
+                siblings: Vec::new(),
             },
         );
 
@@ -1108,6 +2050,7 @@ mod tests {
         let modes: Vec<FailureMode> = (0..MAX_MESSAGES_PER_TEST + 2)
             .map(|i| FailureMode {
                 message: format!("msg-{}", i),
+                varies: false,
                 count: 1,
                 details: None,
             })
@@ -1120,6 +2063,8 @@ mod tests {
                     .map(|i| RunId::new(i.to_string()))
                     .collect(),
                 modes,
+                concurrency: ConcurrencyBreakdown::default(),
+                siblings: Vec::new(),
             },
         );
 

@@ -30,7 +30,7 @@ impl FlakyCommand {
 impl Command for FlakyCommand {
     fn execute(&self, ui: &mut dyn UI) -> Result<i32> {
         let repo = open_repository(self.base_path.as_deref())?;
-        let stats = repo.get_flakiness(self.min_runs)?;
+        let stats = repo.get_flakiness_with_concurrency(self.min_runs)?;
 
         if stats.is_empty() {
             ui.output(&format!(
@@ -48,7 +48,7 @@ impl Command for FlakyCommand {
             stats.len()
         ))?;
         ui.output("  flake%  fail%  transitions  runs  test")?;
-        for entry in stats.iter().take(display_count) {
+        for (entry, concurrency) in stats.iter().take(display_count) {
             ui.output(&format!(
                 "  {:5.1}%  {:5.1}%  {:>11}  {:>4}  {}",
                 entry.flakiness_score * 100.0,
@@ -57,6 +57,9 @@ impl Command for FlakyCommand {
                 entry.runs,
                 entry.test_id,
             ))?;
+            if let Some(verdict) = concurrency.verdict() {
+                ui.output(&format!("           {}", verdict))?;
+            }
         }
 
         Ok(0)
@@ -248,8 +251,56 @@ mod tests {
         let mut ui = TestUI::new();
         let cmd = FlakyCommand::new(Some(temp.path().to_string_lossy().to_string()), 10, 5);
         assert_eq!(cmd.execute(&mut ui).unwrap(), 0);
-        assert!(ui.output[0].contains("Flakiest"));
-        assert!(ui.output[1].contains("flake%"));
-        assert!(ui.output[2].contains("flap"));
+        assert_eq!(
+            ui.output,
+            vec![
+                "Flakiest 1 test(s) (min 5 runs, 1 candidate(s)):".to_string(),
+                "  flake%  fail%  transitions  runs  test".to_string(),
+                "  100.0%   40.0%            4     5  flap".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn cli_shows_concurrency_verdict_when_data_supports_it() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::{Failure, Success};
+        // Same flap pattern as above, but tag two of the runs as parallel
+        // (concurrency 8) and three as serial. The verdict should call out
+        // the asymmetry, not just print the table row.
+        build_history(
+            repo.as_mut(),
+            &[("flap", &[Success, Failure, Success, Failure, Success])],
+        );
+        let run_ids = repo.list_run_ids().unwrap();
+        for (idx, run_id) in run_ids.iter().enumerate() {
+            // Tag every other run as parallel; failures fall on odd indices.
+            let concurrency = if idx % 2 == 1 { 8 } else { 1 };
+            repo.set_run_metadata(
+                run_id,
+                crate::repository::RunMetadata {
+                    concurrency: Some(concurrency),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        let mut ui = TestUI::new();
+        let cmd = FlakyCommand::new(Some(temp.path().to_string_lossy().to_string()), 10, 5);
+        assert_eq!(cmd.execute(&mut ui).unwrap(), 0);
+        assert_eq!(
+            ui.output,
+            vec![
+                "Flakiest 1 test(s) (min 5 runs, 1 candidate(s)):".to_string(),
+                "  flake%  fail%  transitions  runs  test".to_string(),
+                "  100.0%   40.0%            4     5  flap".to_string(),
+                "           fails 2/2 in parallel (max -j 8), 0/3 serially — likely concurrency-related"
+                    .to_string(),
+            ]
+        );
     }
 }

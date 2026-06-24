@@ -475,6 +475,37 @@ impl Repository for InquestRepository {
         Ok(Box::new(file))
     }
 
+    fn list_sub_run_ids(&self, parent: &RunId) -> Result<Vec<RunId>> {
+        // Sub-run files share the parent's name with a lowercase-letter
+        // suffix (`<parent>a`, `<parent>b`, ...). Filter the runs/
+        // directory to those, ignoring lock/stderr siblings and any other
+        // entry that doesn't match the shape we wrote.
+        let prefix = parent.as_str();
+        let dir = self.runs_path();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut sub_ids: Vec<RunId> = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let name = match entry.file_name().into_string() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let Some(suffix) = name.strip_prefix(prefix) else {
+                continue;
+            };
+            if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_lowercase()) {
+                continue;
+            }
+            sub_ids.push(RunId::new(name));
+        }
+        sub_ids.sort();
+        Ok(sub_ids)
+    }
+
     fn get_latest_run(&self) -> Result<TestRun> {
         let run_id: i64 = self
             .conn
@@ -978,6 +1009,64 @@ impl Repository for InquestRepository {
                 .then_with(|| a.test_id.as_str().cmp(b.test_id.as_str()))
         });
         Ok(out)
+    }
+
+    fn get_flakiness_with_concurrency(
+        &self,
+        min_runs: usize,
+    ) -> Result<
+        Vec<(
+            crate::repository::TestFlakiness,
+            crate::repository::ConcurrencyBreakdown,
+        )>,
+    > {
+        let flaky = self.get_flakiness(min_runs)?;
+        if flaky.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // One SQL pass joining test_results with run metadata, restricted to
+        // the (small) set of flaky test IDs. Returns
+        // (test_id, run_concurrency, status) so we can drive the breakdown
+        // counters in Rust.
+        let placeholders = std::iter::repeat_n("?", flaky.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT tr.test_id, r.concurrency, tr.status \
+             FROM test_results tr \
+             JOIN runs r ON r.id = tr.run_id \
+             WHERE tr.test_id IN ({})",
+            placeholders
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let ids: Vec<&str> = flaky.iter().map(|f| f.test_id.as_str()).collect();
+        let params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let mut breakdowns: HashMap<String, crate::repository::ConcurrencyBreakdown> =
+            HashMap::new();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            let test_id: String = row.get(0)?;
+            let concurrency: Option<i64> = row.get(1)?;
+            let status_str: String = row.get(2)?;
+            Ok((test_id, concurrency, status_str))
+        })?;
+        for row in rows {
+            let (test_id, concurrency, status_str) = row?;
+            let is_failure = str_to_status(&status_str).is_failure();
+            breakdowns
+                .entry(test_id)
+                .or_default()
+                .record(concurrency.map(|c| c as u32), is_failure);
+        }
+
+        Ok(flaky
+            .into_iter()
+            .map(|f| {
+                let breakdown = breakdowns.remove(f.test_id.as_str()).unwrap_or_default();
+                (f, breakdown)
+            })
+            .collect())
     }
 }
 
@@ -1968,6 +2057,107 @@ mod tests {
         let stats = repo.get_flakiness(2).unwrap();
         // Both runs are now success; no failures means flakiness omits it.
         assert!(stats.is_empty());
+    }
+
+    #[test]
+    fn test_list_sub_run_ids_returns_letter_suffixed_siblings_in_order() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        // Parent run 7, with three workers written under it.
+        let mut parent_run = TestRun::new(RunId::new("7"));
+        parent_run.timestamp = chrono::Utc::now();
+        let (parent_id, mut parent_writer) = repo.begin_test_run_raw().unwrap();
+        subunit_stream::write_stream(&parent_run, &mut parent_writer).unwrap();
+        drop(parent_writer);
+        assert_eq!(parent_id.as_str(), "0");
+        // Pretend "7" was the parent for shape-of-files; we use 0 because
+        // begin_test_run_raw assigned it. Just write sub-runs under 0.
+        for suffix in ["a", "b", "c"] {
+            let (_sub_id, mut w) = repo.begin_sub_run_raw(&parent_id, suffix).unwrap();
+            subunit_stream::write_stream(&parent_run, &mut w).unwrap();
+        }
+
+        // Decoys: a stderr file, a lock file, and a sub-run for a *different*
+        // parent (here "9a"). None should appear in the listing for "0".
+        std::fs::write(temp.path().join(".inquest/runs/0.stderr.gz"), b"x").unwrap();
+        std::fs::write(temp.path().join(".inquest/runs/0.lock"), b"1").unwrap();
+        std::fs::write(temp.path().join(".inquest/runs/9a"), b"x").unwrap();
+
+        let sub_ids = repo.list_sub_run_ids(&parent_id).unwrap();
+        assert_eq!(
+            sub_ids,
+            vec![RunId::new("0a"), RunId::new("0b"), RunId::new("0c")]
+        );
+    }
+
+    #[test]
+    fn test_get_flakiness_with_concurrency_stratifies_results() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        // Three runs that all see "flaky": passes serially, fails twice in
+        // parallel. Should rank as flaky and the breakdown should split
+        // accordingly.
+        let mut serial_pass = TestRun::new(RunId::new("0"));
+        serial_pass.timestamp = chrono::Utc::now();
+        serial_pass.add_result(TestResult::success("flaky"));
+        let r0 = repo.insert_test_run(serial_pass).unwrap();
+        repo.set_run_metadata(
+            &r0,
+            RunMetadata {
+                concurrency: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mut parallel_fail = TestRun::new(RunId::new("1"));
+        parallel_fail.timestamp = chrono::Utc::now();
+        parallel_fail.add_result(TestResult::failure("flaky", "race"));
+        let r1 = repo.insert_test_run(parallel_fail).unwrap();
+        repo.set_run_metadata(
+            &r1,
+            RunMetadata {
+                concurrency: Some(8),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mut parallel_fail2 = TestRun::new(RunId::new("2"));
+        parallel_fail2.timestamp = chrono::Utc::now();
+        parallel_fail2.add_result(TestResult::failure("flaky", "race"));
+        let r2 = repo.insert_test_run(parallel_fail2).unwrap();
+        repo.set_run_metadata(
+            &r2,
+            RunMetadata {
+                concurrency: Some(8),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let pairs = repo.get_flakiness_with_concurrency(2).unwrap();
+        assert_eq!(pairs.len(), 1);
+        let (flaky, breakdown) = &pairs[0];
+        assert_eq!(flaky.test_id.as_str(), "flaky");
+        assert_eq!(flaky.failures, 2);
+        assert_eq!(flaky.runs, 3);
+        assert_eq!(
+            *breakdown,
+            crate::repository::ConcurrencyBreakdown {
+                serial_failures: 0,
+                serial_runs: 1,
+                parallel_failures: 2,
+                parallel_runs: 2,
+                max_parallel_concurrency: Some(8),
+                unknown_failures: 0,
+                unknown_runs: 0,
+            }
+        );
     }
 
     #[test]

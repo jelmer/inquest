@@ -312,6 +312,131 @@ impl fmt::Display for StreamInterruption {
     }
 }
 
+/// Pass/fail counts for a test stratified by the concurrency level of the
+/// runs it appeared in.
+///
+/// Lets `inq stress` and `inq flaky` tell the user whether a failure looks
+/// concurrency-related ("fails 8/8 with -j ≥ 4, 0/5 serially") or
+/// independent of parallelism. Runs without recorded concurrency metadata
+/// (older runs, runs loaded from external streams) are counted in
+/// `unknown_*` so they don't silently inflate either bucket.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ConcurrencyBreakdown {
+    /// Number of runs where the test failed under serial execution
+    /// (concurrency == 1).
+    pub serial_failures: u32,
+    /// Total serial runs in which the test appeared.
+    pub serial_runs: u32,
+    /// Number of runs where the test failed under parallel execution
+    /// (concurrency >= 2).
+    pub parallel_failures: u32,
+    /// Total parallel runs in which the test appeared.
+    pub parallel_runs: u32,
+    /// Largest concurrency value observed across the parallel runs (None if
+    /// no parallel runs).
+    pub max_parallel_concurrency: Option<u32>,
+    /// Failures in runs whose concurrency metadata is missing.
+    pub unknown_failures: u32,
+    /// Total runs in which the test appeared with no concurrency metadata.
+    pub unknown_runs: u32,
+}
+
+impl ConcurrencyBreakdown {
+    /// Record one observation: the run's `concurrency` (if known) and
+    /// whether the test failed in that run.
+    pub fn record(&mut self, concurrency: Option<u32>, failed: bool) {
+        match concurrency {
+            None => {
+                self.unknown_runs += 1;
+                if failed {
+                    self.unknown_failures += 1;
+                }
+            }
+            Some(1) => {
+                self.serial_runs += 1;
+                if failed {
+                    self.serial_failures += 1;
+                }
+            }
+            Some(c) => {
+                self.parallel_runs += 1;
+                if failed {
+                    self.parallel_failures += 1;
+                }
+                self.max_parallel_concurrency = Some(
+                    self.max_parallel_concurrency
+                        .map_or(c, |existing| existing.max(c)),
+                );
+            }
+        }
+    }
+
+    /// Single-line, human-readable verdict, or `None` when there isn't
+    /// enough data on both sides to draw a conclusion.
+    pub fn verdict(&self) -> Option<String> {
+        let serial_total = self.serial_runs;
+        let parallel_total = self.parallel_runs;
+        // Need at least one observation on each side to compare. A test
+        // that only ran in parallel (the common case for stress) still
+        // gets a "parallel-only" verdict so the user knows we couldn't
+        // rule out concurrency as the cause.
+        if serial_total == 0 && parallel_total == 0 {
+            return None;
+        }
+        let serial_rate = if serial_total > 0 {
+            self.serial_failures as f64 / serial_total as f64
+        } else {
+            0.0
+        };
+        let parallel_rate = if parallel_total > 0 {
+            self.parallel_failures as f64 / parallel_total as f64
+        } else {
+            0.0
+        };
+        if serial_total == 0 {
+            return Some(format!(
+                "only observed under parallel execution ({}/{} fail; max -j {})",
+                self.parallel_failures,
+                parallel_total,
+                self.max_parallel_concurrency.unwrap_or(0)
+            ));
+        }
+        if parallel_total == 0 {
+            return Some(format!(
+                "only observed under serial execution ({}/{} fail)",
+                self.serial_failures, serial_total
+            ));
+        }
+        // Both buckets populated — call out a strong asymmetry.
+        if self.serial_failures == 0 && self.parallel_failures > 0 {
+            return Some(format!(
+                "fails {}/{} in parallel (max -j {}), {}/{} serially — likely concurrency-related",
+                self.parallel_failures,
+                parallel_total,
+                self.max_parallel_concurrency.unwrap_or(0),
+                self.serial_failures,
+                serial_total,
+            ));
+        }
+        if self.parallel_failures == 0 && self.serial_failures > 0 {
+            return Some(format!(
+                "fails {}/{} serially, {}/{} in parallel — likely not concurrency-related",
+                self.serial_failures, serial_total, self.parallel_failures, parallel_total,
+            ));
+        }
+        Some(format!(
+            "fails {}/{} serially ({:.0}%) vs {}/{} in parallel ({:.0}%, max -j {})",
+            self.serial_failures,
+            serial_total,
+            serial_rate * 100.0,
+            self.parallel_failures,
+            parallel_total,
+            parallel_rate * 100.0,
+            self.max_parallel_concurrency.unwrap_or(0),
+        ))
+    }
+}
+
 /// Per-test flakiness statistics aggregated across the run history.
 ///
 /// "Flakiness" here means a test that produces inconsistent results without
@@ -591,6 +716,99 @@ pub fn estimate_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_concurrency_breakdown_buckets_observations_by_concurrency() {
+        let mut b = ConcurrencyBreakdown::default();
+        b.record(Some(1), true);
+        b.record(Some(1), false);
+        b.record(Some(4), true);
+        b.record(Some(8), true);
+        b.record(Some(8), false);
+        b.record(None, true);
+
+        assert_eq!(
+            b,
+            ConcurrencyBreakdown {
+                serial_failures: 1,
+                serial_runs: 2,
+                parallel_failures: 2,
+                parallel_runs: 3,
+                max_parallel_concurrency: Some(8),
+                unknown_failures: 1,
+                unknown_runs: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn test_concurrency_breakdown_verdict_no_data() {
+        assert_eq!(ConcurrencyBreakdown::default().verdict(), None);
+    }
+
+    #[test]
+    fn test_concurrency_breakdown_verdict_parallel_only() {
+        let mut b = ConcurrencyBreakdown::default();
+        b.record(Some(4), true);
+        b.record(Some(4), true);
+        b.record(Some(4), false);
+        assert_eq!(
+            b.verdict().as_deref(),
+            Some("only observed under parallel execution (2/3 fail; max -j 4)")
+        );
+    }
+
+    #[test]
+    fn test_concurrency_breakdown_verdict_serial_only() {
+        let mut b = ConcurrencyBreakdown::default();
+        b.record(Some(1), true);
+        b.record(Some(1), false);
+        assert_eq!(
+            b.verdict().as_deref(),
+            Some("only observed under serial execution (1/2 fail)")
+        );
+    }
+
+    #[test]
+    fn test_concurrency_breakdown_verdict_concurrency_related() {
+        let mut b = ConcurrencyBreakdown::default();
+        b.record(Some(1), false);
+        b.record(Some(1), false);
+        b.record(Some(8), true);
+        b.record(Some(8), true);
+        assert_eq!(
+            b.verdict().as_deref(),
+            Some("fails 2/2 in parallel (max -j 8), 0/2 serially — likely concurrency-related")
+        );
+    }
+
+    #[test]
+    fn test_concurrency_breakdown_verdict_not_concurrency_related() {
+        let mut b = ConcurrencyBreakdown::default();
+        b.record(Some(1), true);
+        b.record(Some(1), true);
+        b.record(Some(8), false);
+        b.record(Some(8), false);
+        assert_eq!(
+            b.verdict().as_deref(),
+            Some("fails 2/2 serially, 0/2 in parallel — likely not concurrency-related")
+        );
+    }
+
+    #[test]
+    fn test_concurrency_breakdown_verdict_both_buckets_fail() {
+        let mut b = ConcurrencyBreakdown::default();
+        b.record(Some(1), true);
+        b.record(Some(1), false);
+        b.record(Some(4), true);
+        b.record(Some(4), true);
+        b.record(Some(4), false);
+        b.record(Some(4), false);
+        assert_eq!(
+            b.verdict().as_deref(),
+            Some("fails 1/2 serially (50%) vs 2/4 in parallel (50%, max -j 4)")
+        );
+    }
 
     #[test]
     fn test_worker_suffix_alphabetic_progression() {
