@@ -361,7 +361,7 @@ fn take_limited<T>(mut items: Vec<T>, limit: usize) -> (Vec<T>, usize) {
 
 type StressSummary = (
     Vec<crate::repository::TestFlakiness>,
-    crate::commands::stress::FailureMessageCounts,
+    crate::commands::stress::FailureAnalyses,
 );
 
 fn stress_summarise(
@@ -374,7 +374,7 @@ fn stress_summarise(
 fn build_stress_response(
     run_ids: Vec<crate::repository::RunId>,
     flaky: Vec<crate::repository::TestFlakiness>,
-    mut messages: crate::commands::stress::FailureMessageCounts,
+    mut analyses: crate::commands::stress::FailureAnalyses,
     stopped_early: bool,
     any_iteration_failed: bool,
 ) -> StressResponse {
@@ -386,11 +386,15 @@ fn build_stress_response(
         flaky_tests: flaky
             .into_iter()
             .map(|s| {
-                let failure_messages = messages
-                    .remove(&s.test_id)
-                    .unwrap_or_default()
+                let analysis = analyses.remove(&s.test_id).unwrap_or_default();
+                let failure_messages = analysis
+                    .modes
                     .into_iter()
-                    .map(|(message, count)| StressFailureMessage { message, count })
+                    .map(|mode| StressFailureMessage {
+                        message: mode.message,
+                        count: mode.count,
+                        details: mode.details,
+                    })
                     .collect();
                 StressFlakyTest {
                     test_id: s.test_id.as_str().to_string(),
@@ -399,6 +403,12 @@ fn build_stress_response(
                     transitions: s.transitions,
                     flakiness_score: s.flakiness_score,
                     failure_rate: s.failure_rate,
+                    failing_iterations: analysis.failing_iterations,
+                    failing_run_ids: analysis
+                        .failing_run_ids
+                        .into_iter()
+                        .map(|r| r.as_str().to_string())
+                        .collect(),
                     failure_messages,
                 }
             })
@@ -737,9 +747,15 @@ struct StressFlakyTest {
     flakiness_score: f64,
     /// `failures / runs`, in `[0, 1]`.
     failure_rate: f64,
-    /// Distinct failure messages observed across the stress window, with
-    /// the number of iterations each one appeared in. Sorted
-    /// most-frequent-first.
+    /// 1-based stress iteration indices in which this test failed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failing_iterations: Vec<u32>,
+    /// Run IDs corresponding to `failing_iterations`, same ordering.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failing_run_ids: Vec<String>,
+    /// Distinct failure modes observed across the stress window, with the
+    /// number of iterations each one appeared in and a representative
+    /// traceback. Sorted most-frequent-first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     failure_messages: Vec<StressFailureMessage>,
 }
@@ -751,6 +767,10 @@ struct StressFailureMessage {
     message: String,
     /// Number of iterations in which this exact message appeared.
     count: u32,
+    /// Representative full traceback / details from a failure grouped under
+    /// this message, if any of those failures recorded details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<String>,
 }
 
 #[derive(Serialize)]

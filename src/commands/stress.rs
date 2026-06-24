@@ -21,10 +21,38 @@ const MAX_MESSAGES_PER_TEST: usize = 3;
 /// Maximum displayed length of any single failure message (longer messages
 /// are truncated with an ellipsis).
 const MAX_MESSAGE_LEN: usize = 200;
+/// Maximum number of lines of full traceback/details printed per distinct
+/// failure mode in the analysis section.
+const MAX_DETAILS_LINES: usize = 30;
 
-/// Per-flaky-test list of `(failure message, occurrence count)`, sorted
-/// most-frequent-first. Tests that weren't flaky are omitted from the map.
-pub type FailureMessageCounts = HashMap<TestId, Vec<(String, u32)>>;
+/// One distinct failure mode for a flaky test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureMode {
+    /// Single-line summary used to group failures (from `failure_summary`).
+    pub message: String,
+    /// Number of iterations in which this exact message appeared.
+    pub count: u32,
+    /// Full `details` (typically a traceback) from a representative failure,
+    /// if any of the failures grouped under this message had details. We
+    /// keep one representative rather than all, on the assumption that
+    /// identically-summarised failures share a stack.
+    pub details: Option<String>,
+}
+
+/// Per-flaky-test analysis collected from the stress window.
+#[derive(Debug, Clone, Default)]
+pub struct FailureAnalysis {
+    /// 1-based stress iteration indices in which this test failed.
+    pub failing_iterations: Vec<u32>,
+    /// Run IDs corresponding to `failing_iterations`, same ordering.
+    pub failing_run_ids: Vec<RunId>,
+    /// Distinct failure modes, sorted most-frequent-first.
+    pub modes: Vec<FailureMode>,
+}
+
+/// Per-flaky-test failure analysis keyed by test ID. Tests that weren't
+/// flaky are omitted from the map.
+pub type FailureAnalyses = HashMap<TestId, FailureAnalysis>;
 
 /// Default number of iterations when `--iterations` is not given.
 pub const DEFAULT_ITERATIONS: usize = 10;
@@ -200,7 +228,7 @@ impl StressCommand {
         ui: &mut dyn UI,
         run_ids: &[RunId],
         flaky: Vec<TestFlakiness>,
-        messages: FailureMessageCounts,
+        analyses: FailureAnalyses,
         any_failure: bool,
     ) -> Result<i32> {
         ui.output(&format!(
@@ -231,25 +259,113 @@ impl StressCommand {
                 entry.flakiness_score * 100.0,
                 entry.test_id,
             ))?;
-            if let Some(msgs) = messages.get(&entry.test_id) {
-                let shown = msgs.iter().take(MAX_MESSAGES_PER_TEST);
-                for (msg, count) in shown {
+            if let Some(analysis) = analyses.get(&entry.test_id) {
+                let shown = analysis.modes.iter().take(MAX_MESSAGES_PER_TEST);
+                for mode in shown {
                     ui.output(&format!(
                         "      [{}x] {}",
-                        count,
-                        truncate_message(msg, MAX_MESSAGE_LEN)
+                        mode.count,
+                        truncate_message(&mode.message, MAX_MESSAGE_LEN)
                     ))?;
                 }
-                if msgs.len() > MAX_MESSAGES_PER_TEST {
+                if analysis.modes.len() > MAX_MESSAGES_PER_TEST {
                     ui.output(&format!(
                         "      ... and {} other distinct message(s)",
-                        msgs.len() - MAX_MESSAGES_PER_TEST
+                        analysis.modes.len() - MAX_MESSAGES_PER_TEST
                     ))?;
+                }
+            }
+        }
+
+        // Per-test analysis: failure rate, which iterations failed, and the
+        // full traceback for each distinct failure mode. The table above is
+        // a scannable index; this block is the "open the failure" view.
+        ui.output("\nFailure analysis:")?;
+        for entry in &flaky {
+            let Some(analysis) = analyses.get(&entry.test_id) else {
+                continue;
+            };
+            ui.output(&format!("\n* {}", entry.test_id))?;
+            ui.output(&format!(
+                "    failure rate: {}/{} iteration(s) ({:.1}%)",
+                entry.failures,
+                entry.runs,
+                entry.failure_rate * 100.0
+            ))?;
+            ui.output(&format!(
+                "    failed in iteration(s): {}",
+                format_iteration_list(&analysis.failing_iterations)
+            ))?;
+            ui.output(&format!(
+                "    failing run id(s): {}",
+                format_run_id_list(&analysis.failing_run_ids)
+            ))?;
+            for (i, mode) in analysis.modes.iter().enumerate() {
+                ui.output(&format!(
+                    "    failure mode {} of {} ({}x): {}",
+                    i + 1,
+                    analysis.modes.len(),
+                    mode.count,
+                    truncate_message(&mode.message, MAX_MESSAGE_LEN),
+                ))?;
+                if let Some(details) = &mode.details {
+                    render_details_block(ui, details, MAX_DETAILS_LINES)?;
                 }
             }
         }
         Ok(1)
     }
+}
+
+/// Render up to `max_lines` of an indented details/traceback block,
+/// summarising the tail when the source is longer.
+fn render_details_block(ui: &mut dyn UI, details: &str, max_lines: usize) -> Result<()> {
+    let lines: Vec<&str> = details.lines().collect();
+    let (shown, truncated) = if lines.len() > max_lines {
+        (&lines[..max_lines], lines.len() - max_lines)
+    } else {
+        (&lines[..], 0)
+    };
+    for line in shown {
+        ui.output(&format!("        | {}", line))?;
+    }
+    if truncated > 0 {
+        ui.output(&format!(
+            "        | ... ({} more line(s) truncated; see `inq log <run-id>` for the full output)",
+            truncated
+        ))?;
+    }
+    Ok(())
+}
+
+/// Format a list of 1-based iteration indices, collapsing contiguous runs
+/// into `start..end` ranges (e.g. `1,3..5,8`).
+fn format_iteration_list(iterations: &[u32]) -> String {
+    if iterations.is_empty() {
+        return String::new();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut start = iterations[0];
+    let mut prev = iterations[0];
+    for &n in &iterations[1..] {
+        if n == prev + 1 {
+            prev = n;
+            continue;
+        }
+        parts.push(if start == prev {
+            start.to_string()
+        } else {
+            format!("{}..{}", start, prev)
+        });
+        start = n;
+        prev = n;
+    }
+    parts.push(if start == prev {
+        start.to_string()
+    } else {
+        format!("{}..{}", start, prev)
+    });
+    parts.join(",")
 }
 
 /// Pick a short, comparable summary for a single failure. Prefers an explicit
@@ -299,21 +415,37 @@ fn truncate_message(msg: &str, max_len: usize) -> String {
 pub(crate) fn summarise_run_ids(
     repo: &dyn Repository,
     run_ids: &[RunId],
-) -> Result<(Vec<TestFlakiness>, FailureMessageCounts)> {
+) -> Result<(Vec<TestFlakiness>, FailureAnalyses)> {
     let mut history: HashMap<TestId, Vec<bool>> = HashMap::new();
-    let mut messages: HashMap<TestId, Vec<(String, u32)>> = HashMap::new();
-    for run_id in run_ids {
+    let mut analyses: HashMap<TestId, FailureAnalysis> = HashMap::new();
+    for (iter_index, run_id) in run_ids.iter().enumerate() {
+        let iteration = (iter_index + 1) as u32;
         let run = repo.get_test_run(run_id)?;
         for (test_id, result) in &run.results {
             let is_failure = result.status.is_failure();
             history.entry(test_id.clone()).or_default().push(is_failure);
             if is_failure {
                 let msg = failure_summary(result.message.as_deref(), result.details.as_deref());
-                let entries = messages.entry(test_id.clone()).or_default();
-                if let Some(slot) = entries.iter_mut().find(|(m, _)| m == &msg) {
-                    slot.1 += 1;
+                let details = result
+                    .details
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                let entry = analyses.entry(test_id.clone()).or_default();
+                entry.failing_iterations.push(iteration);
+                entry.failing_run_ids.push(run_id.clone());
+                if let Some(slot) = entry.modes.iter_mut().find(|m| m.message == msg) {
+                    slot.count += 1;
+                    if slot.details.is_none() {
+                        slot.details = details;
+                    }
                 } else {
-                    entries.push((msg, 1));
+                    entry.modes.push(FailureMode {
+                        message: msg,
+                        count: 1,
+                        details,
+                    });
                 }
             }
         }
@@ -329,16 +461,20 @@ pub(crate) fn summarise_run_ids(
     // window to be eligible.
     let summary = summarise_flakiness(history, 1);
 
-    // Restrict the message map to tests that ended up in the summary, and
-    // sort each entry's messages most-frequent-first for predictable output.
+    // Restrict the analyses to tests that ended up in the summary, and
+    // sort each entry's modes most-frequent-first for predictable output.
     let flaky_ids: std::collections::HashSet<&TestId> =
         summary.iter().map(|f| &f.test_id).collect();
-    messages.retain(|id, _| flaky_ids.contains(id));
-    for entries in messages.values_mut() {
-        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    analyses.retain(|id, _| flaky_ids.contains(id));
+    for analysis in analyses.values_mut() {
+        analysis.modes.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.message.cmp(&b.message))
+        });
     }
 
-    Ok((summary, messages))
+    Ok((summary, analyses))
 }
 
 /// Render a run-id list as a compact comma-separated string, with `..` when
@@ -518,6 +654,7 @@ mod tests {
                 "  Flaky tests: 1".to_string(),
                 "  fail/runs  flake%  test".to_string(),
                 "     1/3    100.0%  flap".to_string(),
+                "\nFailure analysis:".to_string(),
             ]
         );
     }
@@ -615,15 +752,41 @@ mod tests {
             &[("flap", Failure, Some("timeout after 5s"))],
         );
 
-        let (summary, messages) = summarise_run_ids(repo.as_ref(), &[r0, r1, r2, r3]).unwrap();
+        let (summary, analyses) = summarise_run_ids(repo.as_ref(), &[r0, r1, r2, r3]).unwrap();
         assert_eq!(summary.len(), 1);
-        let entries = messages.get(&TestId::new("flap")).expect("flap messages");
+        let analysis = analyses.get(&TestId::new("flap")).expect("flap analysis");
+        let mode_pairs: Vec<(&str, u32)> = analysis
+            .modes
+            .iter()
+            .map(|m| (m.message.as_str(), m.count))
+            .collect();
         assert_eq!(
-            entries,
-            &vec![
-                ("connection refused".to_string(), 2),
-                ("timeout after 5s".to_string(), 1),
-            ]
+            mode_pairs,
+            vec![("connection refused", 2), ("timeout after 5s", 1)]
+        );
+        assert_eq!(analysis.failing_iterations, vec![1, 3, 4]);
+    }
+
+    #[test]
+    fn summarise_run_ids_keeps_representative_details() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::{Failure, Success};
+        let r0 = insert_run_with_messages(
+            repo.as_mut(),
+            "0",
+            &[("flap", Failure, Some("AssertionError: 1 != 2"))],
+        );
+        let r1 = insert_run_with_messages(repo.as_mut(), "1", &[("flap", Success, None)]);
+
+        let (_summary, analyses) = summarise_run_ids(repo.as_ref(), &[r0, r1]).unwrap();
+        let analysis = analyses.get(&TestId::new("flap")).expect("flap analysis");
+        assert_eq!(analysis.modes.len(), 1);
+        assert_eq!(
+            analysis.modes[0].details.as_deref(),
+            Some("AssertionError: 1 != 2")
         );
     }
 
@@ -637,9 +800,28 @@ mod tests {
         let r0 = insert_run_with_messages(repo.as_mut(), "0", &[("flap", Failure, None)]);
         let r1 = insert_run_with_messages(repo.as_mut(), "1", &[("flap", Success, None)]);
 
-        let (_summary, messages) = summarise_run_ids(repo.as_ref(), &[r0, r1]).unwrap();
-        let entries = messages.get(&TestId::new("flap")).expect("flap messages");
-        assert_eq!(entries, &vec![("(no message)".to_string(), 1)]);
+        let (_summary, analyses) = summarise_run_ids(repo.as_ref(), &[r0, r1]).unwrap();
+        let analysis = analyses.get(&TestId::new("flap")).expect("flap analysis");
+        assert_eq!(analysis.modes.len(), 1);
+        assert_eq!(analysis.modes[0].message, "(no message)");
+    }
+
+    fn analysis_with(modes: Vec<(&str, u32)>, failing_iters: Vec<u32>) -> FailureAnalysis {
+        FailureAnalysis {
+            failing_iterations: failing_iters.clone(),
+            failing_run_ids: failing_iters
+                .iter()
+                .map(|i| RunId::new((i - 1).to_string()))
+                .collect(),
+            modes: modes
+                .into_iter()
+                .map(|(m, c)| FailureMode {
+                    message: m.to_string(),
+                    count: c,
+                    details: None,
+                })
+                .collect(),
+        }
     }
 
     #[test]
@@ -654,13 +836,13 @@ mod tests {
             flakiness_score: 2.0 / 3.0,
             failure_rate: 0.75,
         }];
-        let mut messages = HashMap::new();
-        messages.insert(
+        let mut analyses = HashMap::new();
+        analyses.insert(
             TestId::new("flap"),
-            vec![
-                ("connection refused".to_string(), 2),
-                ("timeout after 5s".to_string(), 1),
-            ],
+            analysis_with(
+                vec![("connection refused", 2), ("timeout after 5s", 1)],
+                vec![1, 3, 4],
+            ),
         );
 
         let code = cmd
@@ -673,7 +855,7 @@ mod tests {
                     RunId::new("3"),
                 ],
                 flaky,
-                messages,
+                analyses,
                 true,
             )
             .unwrap();
@@ -687,7 +869,120 @@ mod tests {
                 "     3/4     66.7%  flap".to_string(),
                 "      [2x] connection refused".to_string(),
                 "      [1x] timeout after 5s".to_string(),
+                "\nFailure analysis:".to_string(),
+                "\n* flap".to_string(),
+                "    failure rate: 3/4 iteration(s) (75.0%)".to_string(),
+                "    failed in iteration(s): 1,3..4".to_string(),
+                "    failing run id(s): 0,2,3".to_string(),
+                "    failure mode 1 of 2 (2x): connection refused".to_string(),
+                "    failure mode 2 of 2 (1x): timeout after 5s".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn report_renders_details_block_for_each_failure_mode() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 3,
+            failures: 1,
+            transitions: 2,
+            flakiness_score: 1.0,
+            failure_rate: 1.0 / 3.0,
+        }];
+        let mut analyses = HashMap::new();
+        analyses.insert(
+            TestId::new("flap"),
+            FailureAnalysis {
+                failing_iterations: vec![2],
+                failing_run_ids: vec![RunId::new("1")],
+                modes: vec![FailureMode {
+                    message: "AssertionError: 1 != 2".to_string(),
+                    count: 1,
+                    details: Some(
+                        "Traceback (most recent call last):\n  File \"x.py\", line 1\n    assert 1 == 2\nAssertionError: 1 != 2"
+                            .to_string(),
+                    ),
+                }],
+            },
+        );
+
+        let code = cmd
+            .report(
+                &mut ui,
+                &[RunId::new("0"), RunId::new("1"), RunId::new("2")],
+                flaky,
+                analyses,
+                true,
+            )
+            .unwrap();
+        assert_eq!(code, 1);
+        assert_eq!(
+            ui.output,
+            vec![
+                "\nStress summary (3 iteration(s), runs 0..2):".to_string(),
+                "  Flaky tests: 1".to_string(),
+                "  fail/runs  flake%  test".to_string(),
+                "     1/3    100.0%  flap".to_string(),
+                "      [1x] AssertionError: 1 != 2".to_string(),
+                "\nFailure analysis:".to_string(),
+                "\n* flap".to_string(),
+                "    failure rate: 1/3 iteration(s) (33.3%)".to_string(),
+                "    failed in iteration(s): 2".to_string(),
+                "    failing run id(s): 1".to_string(),
+                "    failure mode 1 of 1 (1x): AssertionError: 1 != 2".to_string(),
+                "        | Traceback (most recent call last):".to_string(),
+                "        |   File \"x.py\", line 1".to_string(),
+                "        |     assert 1 == 2".to_string(),
+                "        | AssertionError: 1 != 2".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn report_truncates_long_details_block() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 2,
+            failures: 1,
+            transitions: 1,
+            flakiness_score: 1.0,
+            failure_rate: 0.5,
+        }];
+        let mut analyses = HashMap::new();
+        let traceback = (0..MAX_DETAILS_LINES + 5)
+            .map(|i| format!("line-{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        analyses.insert(
+            TestId::new("flap"),
+            FailureAnalysis {
+                failing_iterations: vec![1],
+                failing_run_ids: vec![RunId::new("0")],
+                modes: vec![FailureMode {
+                    message: "boom".to_string(),
+                    count: 1,
+                    details: Some(traceback),
+                }],
+            },
+        );
+
+        cmd.report(
+            &mut ui,
+            &[RunId::new("0"), RunId::new("1")],
+            flaky,
+            analyses,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            *ui.output.last().unwrap(),
+            "        | ... (5 more line(s) truncated; see `inq log <run-id>` for the full output)"
+                .to_string()
         );
     }
 
@@ -703,26 +998,54 @@ mod tests {
             flakiness_score: 0.0,
             failure_rate: 1.0,
         }];
-        let mut messages = HashMap::new();
-        let entries: Vec<(String, u32)> = (0..MAX_MESSAGES_PER_TEST + 2)
-            .map(|i| (format!("msg-{}", i), 1))
+        let mut analyses = HashMap::new();
+        let modes: Vec<FailureMode> = (0..MAX_MESSAGES_PER_TEST + 2)
+            .map(|i| FailureMode {
+                message: format!("msg-{}", i),
+                count: 1,
+                details: None,
+            })
             .collect();
-        messages.insert(TestId::new("flap"), entries);
+        analyses.insert(
+            TestId::new("flap"),
+            FailureAnalysis {
+                failing_iterations: (1..=modes.len() as u32).collect(),
+                failing_run_ids: (0..modes.len() as u32)
+                    .map(|i| RunId::new(i.to_string()))
+                    .collect(),
+                modes,
+            },
+        );
 
         let code = cmd
             .report(
                 &mut ui,
                 &[RunId::new("0"), RunId::new("1")],
                 flaky,
-                messages,
+                analyses,
                 true,
             )
             .unwrap();
         assert_eq!(code, 1);
+        // The table-only "... and N other distinct message(s)" line is the
+        // index entry just before the per-test analysis section begins.
+        let table_truncation_idx = ui
+            .output
+            .iter()
+            .position(|l| l == "      ... and 2 other distinct message(s)")
+            .expect("expected truncation line in table");
         assert_eq!(
-            *ui.output.last().unwrap(),
-            "      ... and 2 other distinct message(s)".to_string()
+            ui.output[table_truncation_idx + 1],
+            "\nFailure analysis:".to_string()
         );
+    }
+
+    #[test]
+    fn format_iteration_list_collapses_ranges() {
+        assert_eq!(format_iteration_list(&[1]), "1");
+        assert_eq!(format_iteration_list(&[1, 2, 3]), "1..3");
+        assert_eq!(format_iteration_list(&[1, 3, 4, 5, 8]), "1,3..5,8");
+        assert_eq!(format_iteration_list(&[]), "");
     }
 
     #[test]
