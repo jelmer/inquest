@@ -292,6 +292,15 @@ impl StressCommand {
                 entry.runs,
                 entry.failure_rate * 100.0
             ))?;
+            if (entry.runs as usize) < run_ids.len() {
+                ui.output(&format!(
+                    "    note: only appeared in {} of {} stress iteration(s) — \
+                     missing iterations may indicate sharding, ordering, or a \
+                     prior crash that prevented this test from running.",
+                    entry.runs,
+                    run_ids.len()
+                ))?;
+            }
             ui.output(&format!(
                 "    failed in iteration(s): {}",
                 format_iteration_list(&analysis.failing_iterations)
@@ -451,10 +460,13 @@ pub(crate) fn summarise_run_ids(
         }
     }
 
-    // Drop tests that failed in every iteration in which they ran — those
-    // are broken, not flaky. `summarise_flakiness` already drops the inverse
-    // (never-failed) case.
-    history.retain(|_, statuses| statuses.iter().any(|f| !f));
+    // Drop tests that consistently failed across the *entire* stress window —
+    // those are broken, not flaky. A test that failed in every iteration it
+    // was recorded in but was absent from others (e.g. crashed the runner,
+    // sharding/ordering, filtered out) is itself suspicious and should still
+    // be surfaced as flaky.
+    let total_iterations = run_ids.len();
+    history.retain(|_, statuses| statuses.iter().any(|f| !f) || statuses.len() < total_iterations);
 
     // min_runs = 1 here because the caller already controls how many
     // iterations to run; we want every test that appeared in our stress
@@ -581,6 +593,57 @@ mod tests {
         assert_eq!(summary[0].runs, 3);
         assert_eq!(summary[0].failures, 1);
         assert_eq!(summary[0].transitions, 2);
+    }
+
+    #[test]
+    fn summarise_run_ids_keeps_test_that_appeared_in_a_subset() {
+        // Regression: a test that failed in just one of ten stress iterations
+        // and didn't appear in the other nine (e.g. it crashed the runner,
+        // got sharded out, or was conditionally skipped) used to be silently
+        // dropped as "always fails", leaving the user with a misleading
+        // "No flaky tests observed, but at least one iteration had failing
+        // tests" summary. Such a test is itself suspicious and should still
+        // be surfaced.
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::{Failure, Success};
+        let mut run_ids: Vec<RunId> = Vec::new();
+        for i in 0..10 {
+            let results: Vec<(&str, TestStatus)> = if i == 4 {
+                vec![("anchor", Success), ("ghost", Failure)]
+            } else {
+                vec![("anchor", Success)]
+            };
+            run_ids.push(insert_run(repo.as_mut(), &i.to_string(), &results));
+        }
+
+        let (summary, _analyses) = summarise_run_ids(repo.as_ref(), &run_ids).unwrap();
+        let ghost = summary
+            .iter()
+            .find(|s| s.test_id.as_str() == "ghost")
+            .expect("ghost should be reported as flaky despite appearing only once");
+        assert_eq!(ghost.failures, 1);
+        assert_eq!(ghost.runs, 1);
+    }
+
+    #[test]
+    fn summarise_run_ids_still_drops_consistently_broken_test() {
+        // Counter-check for the regression test above: a test that failed in
+        // *every* iteration of the stress window is broken, not flaky, and
+        // must still be dropped.
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::Failure;
+        let run_ids: Vec<RunId> = (0..3)
+            .map(|i| insert_run(repo.as_mut(), &i.to_string(), &[("broken", Failure)]))
+            .collect();
+
+        let (summary, _analyses) = summarise_run_ids(repo.as_ref(), &run_ids).unwrap();
+        assert!(summary.is_empty(), "broken-in-every-iter must not be flaky");
     }
 
     #[test]
@@ -876,6 +939,49 @@ mod tests {
                 "    failing run id(s): 0,2,3".to_string(),
                 "    failure mode 1 of 2 (2x): connection refused".to_string(),
                 "    failure mode 2 of 2 (1x): timeout after 5s".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn report_flags_test_that_didnt_run_in_every_iteration() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("ghost"),
+            runs: 1,
+            failures: 1,
+            transitions: 0,
+            flakiness_score: 0.0,
+            failure_rate: 1.0,
+        }];
+        let mut analyses = HashMap::new();
+        analyses.insert(
+            TestId::new("ghost"),
+            analysis_with(vec![("boom", 1)], vec![5]),
+        );
+
+        let run_ids: Vec<RunId> = (0..10).map(|i| RunId::new(i.to_string())).collect();
+        cmd.report(&mut ui, &run_ids, flaky, analyses, true)
+            .unwrap();
+        assert_eq!(
+            ui.output,
+            vec![
+                "\nStress summary (10 iteration(s), runs 0..9):".to_string(),
+                "  Flaky tests: 1".to_string(),
+                "  fail/runs  flake%  test".to_string(),
+                "     1/1      0.0%  ghost".to_string(),
+                "      [1x] boom".to_string(),
+                "\nFailure analysis:".to_string(),
+                "\n* ghost".to_string(),
+                "    failure rate: 1/1 iteration(s) (100.0%)".to_string(),
+                "    note: only appeared in 1 of 10 stress iteration(s) — \
+                 missing iterations may indicate sharding, ordering, or a \
+                 prior crash that prevented this test from running."
+                    .to_string(),
+                "    failed in iteration(s): 5".to_string(),
+                "    failing run id(s): 4".to_string(),
+                "    failure mode 1 of 1 (1x): boom".to_string(),
             ]
         );
     }
