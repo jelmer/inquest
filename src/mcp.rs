@@ -393,6 +393,7 @@ fn build_stress_response(
                     .map(|mode| StressFailureMessage {
                         message: mode.message,
                         count: mode.count,
+                        varies: mode.varies,
                         details: mode.details,
                     })
                     .collect();
@@ -806,11 +807,17 @@ struct StressSibling {
 
 #[derive(Serialize)]
 struct StressFailureMessage {
-    /// The failure message (or the last non-empty line of the traceback if
-    /// no explicit message was recorded).
+    /// Representative failure message shown to the reader. Other failures
+    /// in this group may have differed in volatile segments (line numbers,
+    /// hex addresses, ...) that the grouper treats as noise; see `varies`.
     message: String,
-    /// Number of iterations in which this exact message appeared.
+    /// Number of iterations in which this group appeared.
     count: u32,
+    /// True when at least one other failure in this group had a different
+    /// original message that only collapsed because the volatile segments
+    /// were stripped.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    varies: bool,
     /// Representative full traceback / details from a failure grouped under
     /// this message, if any of those failures recorded details.
     #[serde(skip_serializing_if = "Option::is_none")]

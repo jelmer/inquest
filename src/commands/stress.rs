@@ -32,9 +32,16 @@ const MAX_SIBLINGS_PER_TEST: usize = 5;
 /// One distinct failure mode for a flaky test.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailureMode {
-    /// Single-line summary used to group failures (from `failure_summary`).
+    /// Representative single-line summary shown to the user. The first
+    /// original message we saw in this group; other failures may have
+    /// differed in the parts `normalise_for_grouping` ignores (hex
+    /// addresses, ports, line numbers, ...).
     pub message: String,
-    /// Number of iterations in which this exact message appeared.
+    /// Whether failures grouped under this entry had more than one
+    /// distinct original `message` — i.e. they only collapsed because
+    /// `normalise_for_grouping` treated their differences as noise.
+    pub varies: bool,
+    /// Number of iterations in which this group appeared.
     pub count: u32,
     /// Full `details` (typically a traceback) from a representative failure,
     /// if any of the failures grouped under this message had details. We
@@ -341,11 +348,13 @@ impl StressCommand {
                 ui.output(&format!("    concurrency: {}", verdict))?;
             }
             for (i, mode) in analysis.modes.iter().enumerate() {
+                let varies_tag = if mode.varies { " (varies)" } else { "" };
                 ui.output(&format!(
-                    "    failure mode {} of {} ({}x): {}",
+                    "    failure mode {} of {} ({}x{}): {}",
                     i + 1,
                     analysis.modes.len(),
                     mode.count,
+                    varies_tag,
                     truncate_message(&mode.message, MAX_MESSAGE_LEN),
                 ))?;
                 if let Some(details) = &mode.details {
@@ -442,6 +451,163 @@ fn failure_summary(message: Option<&str>, details: Option<&str>) -> String {
     "(no message)".to_string()
 }
 
+/// Return a fingerprint of a failure summary used purely for grouping
+/// near-duplicates. Strips parts of the message that vary between
+/// otherwise-identical failures: hex pointers, long hex hashes, large
+/// integers (line numbers, PIDs, ports, ms counts), ISO-8601 timestamps
+/// and UUIDs. Two failures that differ only in those positions collapse
+/// into one [`FailureMode`].
+///
+/// The original message is kept untouched for display; this function's
+/// output is never shown to the user, only compared.
+fn normalise_for_grouping(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut chars = message.chars().peekable();
+    while let Some(c) = chars.next() {
+        // Hex pointer: `0x` followed by hex digits.
+        if c == '0' && chars.peek() == Some(&'x') {
+            chars.next();
+            let mut had_hex = false;
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_hexdigit() {
+                    chars.next();
+                    had_hex = true;
+                } else {
+                    break;
+                }
+            }
+            if had_hex {
+                out.push_str("0x?");
+                continue;
+            }
+            out.push_str("0x");
+            continue;
+        }
+        // UUID or hex hash: gobble [0-9a-fA-F-]+, then decide whether the
+        // run was hex-shaped (UUID, or 8+ chars with at least one a-f) or
+        // just a plain decimal number that happened to be all 0-9.
+        if c.is_ascii_hexdigit() {
+            let mut buf = String::new();
+            buf.push(c);
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_hexdigit() || next == '-' {
+                    buf.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if looks_like_uuid(&buf) {
+                out.push('?');
+                continue;
+            }
+            let has_hex_letter = buf.chars().any(|c| matches!(c, 'a'..='f' | 'A'..='F'));
+            // 8+ hex chars (with at least one a-f) → treat as a hash like a
+            // commit SHA or hex digest.
+            if buf.len() >= 8 && !buf.contains('-') && has_hex_letter {
+                out.push('?');
+                continue;
+            }
+            // Pure decimal run — re-route through the decimal logic so
+            // 4+-digit numbers still collapse. Pre-set `digits` to `buf`
+            // and fall through.
+            if !buf.contains('-') && !has_hex_letter {
+                let digits = buf;
+                emit_decimal_run(&digits, &mut chars, &mut out);
+                continue;
+            }
+            out.push_str(&buf);
+            continue;
+        }
+        // Decimal integer of 4+ digits (line numbers, PIDs, ports, ms, ...).
+        if c.is_ascii_digit() {
+            let mut digits = String::new();
+            digits.push(c);
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_digit() {
+                    digits.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            emit_decimal_run(&digits, &mut chars, &mut out);
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Emit a normalised form of a decimal run already extracted from the
+/// input. Handles the optional `.NNN(s|ms|µs|ns)` duration suffix and
+/// collapses 4+ digit integers to `?`. Used by both the dedicated decimal
+/// branch and the hex branch's fall-through for runs that turned out to
+/// be pure 0-9.
+fn emit_decimal_run(
+    digits: &str,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    out: &mut String,
+) {
+    let mut suffix = String::new();
+    if chars.peek() == Some(&'.') {
+        let mut lookahead = chars.clone();
+        lookahead.next();
+        let mut decimals = String::new();
+        while let Some(&next) = lookahead.peek() {
+            if next.is_ascii_digit() {
+                decimals.push(next);
+                lookahead.next();
+            } else {
+                break;
+            }
+        }
+        if !decimals.is_empty() {
+            suffix.push('.');
+            suffix.push_str(&decimals);
+            chars.next();
+            for _ in 0..decimals.len() {
+                chars.next();
+            }
+        }
+    }
+    let is_duration = matches!(
+        chars.peek(),
+        Some(&'s') | Some(&'m') | Some(&'µ') | Some(&'n')
+    ) && !suffix.is_empty();
+    if is_duration {
+        while let Some(&next) = chars.peek() {
+            if matches!(next, 's' | 'm' | 'µ' | 'n') {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        out.push_str("?dur");
+        return;
+    }
+    if digits.len() >= 4 {
+        out.push('?');
+        return;
+    }
+    out.push_str(digits);
+    out.push_str(&suffix);
+}
+
+/// Cheap UUID shape check: 8-4-4-4-12 hex characters separated by dashes
+/// (case-insensitive). Used by [`normalise_for_grouping`].
+fn looks_like_uuid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    let expected = [8usize, 4, 4, 4, 12];
+    if parts.len() != expected.len() {
+        return false;
+    }
+    parts
+        .iter()
+        .zip(expected.iter())
+        .all(|(part, &len)| part.len() == len && part.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 /// Truncate a single-line preview of a failure message. Newlines are
 /// collapsed to spaces so the table stays readable; the full message remains
 /// available via `inq log <run-id>`.
@@ -492,6 +658,7 @@ pub(crate) fn summarise_run_ids(
             entry.concurrency.record(concurrency, is_failure);
             if is_failure {
                 let msg = failure_summary(result.message.as_deref(), result.details.as_deref());
+                let key = normalise_for_grouping(&msg);
                 let details = result
                     .details
                     .as_deref()
@@ -500,14 +667,22 @@ pub(crate) fn summarise_run_ids(
                     .map(str::to_string);
                 entry.failing_iterations.push(iteration);
                 entry.failing_run_ids.push(run_id.clone());
-                if let Some(slot) = entry.modes.iter_mut().find(|m| m.message == msg) {
+                if let Some(slot) = entry
+                    .modes
+                    .iter_mut()
+                    .find(|m| normalise_for_grouping(&m.message) == key)
+                {
                     slot.count += 1;
+                    if slot.message != msg {
+                        slot.varies = true;
+                    }
                     if slot.details.is_none() {
                         slot.details = details;
                     }
                 } else {
                     entry.modes.push(FailureMode {
                         message: msg,
+                        varies: false,
                         count: 1,
                         details,
                     });
@@ -1046,6 +1221,79 @@ mod tests {
     }
 
     #[test]
+    fn normalise_for_grouping_strips_volatile_segments() {
+        // Identical assertion at different line numbers should collapse.
+        assert_eq!(
+            normalise_for_grouping("AssertionError at line 1234"),
+            normalise_for_grouping("AssertionError at line 5678"),
+        );
+        // Hex pointers in object reprs.
+        assert_eq!(
+            normalise_for_grouping("<Conn object at 0x7f8a3c4b0010>"),
+            normalise_for_grouping("<Conn object at 0xdeadbeef>"),
+        );
+        // UUIDs and long hex hashes.
+        assert_eq!(
+            normalise_for_grouping("job 550e8400-e29b-41d4-a716-446655440000 failed"),
+            normalise_for_grouping("job 6ba7b810-9dad-11d1-80b4-00c04fd430c8 failed"),
+        );
+        assert_eq!(
+            normalise_for_grouping("commit a1b2c3d4e5 not found"),
+            normalise_for_grouping("commit 9876543210 not found"),
+        );
+        // Durations.
+        assert_eq!(
+            normalise_for_grouping("timed out after 12.345s"),
+            normalise_for_grouping("timed out after 30.001s"),
+        );
+        // Short numbers (1-3 digits) should *not* be stripped — they
+        // could be meaningful (HTTP status codes, small counts).
+        assert_ne!(
+            normalise_for_grouping("got status 200"),
+            normalise_for_grouping("got status 500"),
+        );
+    }
+
+    #[test]
+    fn normalise_for_grouping_preserves_message_text() {
+        // Sanity: distinct error types stay distinct.
+        assert_ne!(
+            normalise_for_grouping("ConnectionRefused"),
+            normalise_for_grouping("TimeoutError"),
+        );
+    }
+
+    #[test]
+    fn summarise_run_ids_groups_near_duplicate_messages() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::{Failure, Success};
+        // Two failures that differ only in the line number, plus a pass —
+        // should collapse into one mode flagged as `varies`.
+        let r0 = insert_run_with_messages(
+            repo.as_mut(),
+            "0",
+            &[("flap", Failure, Some("AssertionError at line 1234"))],
+        );
+        let r1 = insert_run_with_messages(repo.as_mut(), "1", &[("flap", Success, None)]);
+        let r2 = insert_run_with_messages(
+            repo.as_mut(),
+            "2",
+            &[("flap", Failure, Some("AssertionError at line 5678"))],
+        );
+
+        let (_summary, analyses) = summarise_run_ids(repo.as_ref(), &[r0, r1, r2]).unwrap();
+        let analysis = analyses.get(&TestId::new("flap")).expect("flap analysis");
+        assert_eq!(analysis.modes.len(), 1);
+        assert_eq!(analysis.modes[0].count, 2);
+        assert!(analysis.modes[0].varies, "expected varies=true");
+        // The displayed message is the first one we saw.
+        assert_eq!(analysis.modes[0].message, "AssertionError at line 1234");
+    }
+
+    #[test]
     fn sibling_score_prioritises_consistent_co_failure() {
         let pure_signal = SiblingCandidate {
             test_id: TestId::new("s"),
@@ -1208,6 +1456,7 @@ mod tests {
                 .into_iter()
                 .map(|(m, c)| FailureMode {
                     message: m.to_string(),
+                    varies: false,
                     count: c,
                     details: None,
                 })
@@ -1270,6 +1519,42 @@ mod tests {
                 "    failure mode 1 of 2 (2x): connection refused".to_string(),
                 "    failure mode 2 of 2 (1x): timeout after 5s".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn report_marks_modes_that_collapsed_near_duplicates_as_varies() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 3,
+            failures: 2,
+            transitions: 2,
+            flakiness_score: 1.0,
+            failure_rate: 2.0 / 3.0,
+        }];
+        let mut analysis = analysis_with(vec![("AssertionError at line 1234", 2)], vec![1, 3]);
+        analysis.modes[0].varies = true;
+        let mut analyses = HashMap::new();
+        analyses.insert(TestId::new("flap"), analysis);
+
+        cmd.report(
+            &mut ui,
+            &[RunId::new("0"), RunId::new("1"), RunId::new("2")],
+            flaky,
+            analyses,
+            true,
+        )
+        .unwrap();
+        let mode_line = ui
+            .output
+            .iter()
+            .find(|l| l.starts_with("    failure mode "))
+            .expect("failure mode line missing");
+        assert_eq!(
+            mode_line,
+            "    failure mode 1 of 1 (2x (varies)): AssertionError at line 1234"
         );
     }
 
@@ -1496,6 +1781,7 @@ mod tests {
                 failing_run_ids: vec![RunId::new("1")],
                 modes: vec![FailureMode {
                     message: "AssertionError: 1 != 2".to_string(),
+                    varies: false,
                     count: 1,
                     details: Some(
                         "Traceback (most recent call last):\n  File \"x.py\", line 1\n    assert 1 == 2\nAssertionError: 1 != 2"
@@ -1563,6 +1849,7 @@ mod tests {
                 failing_run_ids: vec![RunId::new("0")],
                 modes: vec![FailureMode {
                     message: "boom".to_string(),
+                    varies: false,
                     count: 1,
                     details: Some(traceback),
                 }],
@@ -1602,6 +1889,7 @@ mod tests {
         let modes: Vec<FailureMode> = (0..MAX_MESSAGES_PER_TEST + 2)
             .map(|i| FailureMode {
                 message: format!("msg-{}", i),
+                varies: false,
                 count: 1,
                 details: None,
             })
