@@ -14,8 +14,8 @@ pub mod test_run;
 pub mod testr;
 
 pub use test_run::{
-    estimate_progress, worker_suffix, RunId, RunMetadata, StreamInterruption, TestFlakiness,
-    TestId, TestResult, TestRun, TestStatus,
+    estimate_progress, worker_suffix, ConcurrencyBreakdown, RunId, RunMetadata, StreamInterruption,
+    TestFlakiness, TestId, TestResult, TestRun, TestStatus,
 };
 
 /// Abstract repository trait for test result storage
@@ -270,8 +270,27 @@ pub trait Repository {
     /// Returns tests sorted by `transitions` (desc), then `failure_rate`
     /// (desc), then `test_id` (asc) for stable output.
     fn get_flakiness(&self, min_runs: usize) -> Result<Vec<TestFlakiness>> {
+        Ok(self
+            .get_flakiness_with_concurrency(min_runs)?
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect())
+    }
+
+    /// Compute per-test flakiness statistics paired with a concurrency
+    /// breakdown of the runs the test appeared in.
+    ///
+    /// Returns the same ordering as [`Self::get_flakiness`]. Older runs and
+    /// runs loaded from external streams may have no recorded concurrency
+    /// metadata; those observations are accumulated into the breakdown's
+    /// `unknown_*` buckets.
+    fn get_flakiness_with_concurrency(
+        &self,
+        min_runs: usize,
+    ) -> Result<Vec<(TestFlakiness, ConcurrencyBreakdown)>> {
         let run_ids = self.list_run_ids()?;
         let mut history: HashMap<TestId, Vec<bool>> = HashMap::new();
+        let mut concurrency: HashMap<TestId, ConcurrencyBreakdown> = HashMap::new();
         for run_id in &run_ids {
             let run = match self.get_test_run(run_id) {
                 Ok(r) => r,
@@ -280,14 +299,27 @@ pub trait Repository {
                     continue;
                 }
             };
+            let run_concurrency = self
+                .get_run_metadata(run_id)
+                .ok()
+                .and_then(|m| m.concurrency);
             for (test_id, result) in &run.results {
-                history
+                let is_failure = result.status.is_failure();
+                history.entry(test_id.clone()).or_default().push(is_failure);
+                concurrency
                     .entry(test_id.clone())
                     .or_default()
-                    .push(result.status.is_failure());
+                    .record(run_concurrency, is_failure);
             }
         }
-        Ok(summarise_flakiness(history, min_runs))
+        let flaky = summarise_flakiness(history, min_runs);
+        Ok(flaky
+            .into_iter()
+            .map(|f| {
+                let breakdown = concurrency.remove(&f.test_id).unwrap_or_default();
+                (f, breakdown)
+            })
+            .collect())
     }
 }
 

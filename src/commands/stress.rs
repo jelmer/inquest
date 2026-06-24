@@ -11,7 +11,9 @@ use crate::commands::Command;
 use crate::config::TimeoutSetting;
 use crate::error::Result;
 use crate::ordering::TestOrder;
-use crate::repository::{summarise_flakiness, Repository, RunId, TestFlakiness, TestId};
+use crate::repository::{
+    summarise_flakiness, ConcurrencyBreakdown, Repository, RunId, TestFlakiness, TestId,
+};
 use crate::ui::UI;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -48,6 +50,9 @@ pub struct FailureAnalysis {
     pub failing_run_ids: Vec<RunId>,
     /// Distinct failure modes, sorted most-frequent-first.
     pub modes: Vec<FailureMode>,
+    /// Pass/fail counts stratified by the concurrency level of each
+    /// iteration the test appeared in.
+    pub concurrency: ConcurrencyBreakdown,
 }
 
 /// Per-flaky-test failure analysis keyed by test ID. Tests that weren't
@@ -309,6 +314,9 @@ impl StressCommand {
                 "    failing run id(s): {}",
                 format_run_id_list(&analysis.failing_run_ids)
             ))?;
+            if let Some(verdict) = analysis.concurrency.verdict() {
+                ui.output(&format!("    concurrency: {}", verdict))?;
+            }
             for (i, mode) in analysis.modes.iter().enumerate() {
                 ui.output(&format!(
                     "    failure mode {} of {} ({}x): {}",
@@ -430,9 +438,17 @@ pub(crate) fn summarise_run_ids(
     for (iter_index, run_id) in run_ids.iter().enumerate() {
         let iteration = (iter_index + 1) as u32;
         let run = repo.get_test_run(run_id)?;
+        // The streaming subunit parser doesn't populate `concurrency` on the
+        // in-memory run, so go through the repository's metadata table.
+        let concurrency = repo
+            .get_run_metadata(run_id)
+            .ok()
+            .and_then(|m| m.concurrency);
         for (test_id, result) in &run.results {
             let is_failure = result.status.is_failure();
             history.entry(test_id.clone()).or_default().push(is_failure);
+            let entry = analyses.entry(test_id.clone()).or_default();
+            entry.concurrency.record(concurrency, is_failure);
             if is_failure {
                 let msg = failure_summary(result.message.as_deref(), result.details.as_deref());
                 let details = result
@@ -441,7 +457,6 @@ pub(crate) fn summarise_run_ids(
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_string);
-                let entry = analyses.entry(test_id.clone()).or_default();
                 entry.failing_iterations.push(iteration);
                 entry.failing_run_ids.push(run_id.clone());
                 if let Some(slot) = entry.modes.iter_mut().find(|m| m.message == msg) {
@@ -869,6 +884,44 @@ mod tests {
         assert_eq!(analysis.modes[0].message, "(no message)");
     }
 
+    #[test]
+    fn summarise_run_ids_records_concurrency_per_iteration() {
+        let temp = TempDir::new().unwrap();
+        let factory = InquestRepositoryFactory;
+        let mut repo = factory.initialise(temp.path()).unwrap();
+
+        use TestStatus::{Failure, Success};
+        let r0 = insert_run_with_messages(repo.as_mut(), "0", &[("flap", Success, None)]);
+        let r1 = insert_run_with_messages(repo.as_mut(), "1", &[("flap", Failure, Some("race"))]);
+        let r2 = insert_run_with_messages(repo.as_mut(), "2", &[("flap", Success, None)]);
+        let r3 = insert_run_with_messages(repo.as_mut(), "3", &[("flap", Failure, Some("race"))]);
+
+        // r0 + r2 ran serially, r1 + r3 ran with -j 8.
+        for (id, concurrency) in [(&r0, 1), (&r2, 1), (&r1, 8), (&r3, 8)] {
+            let metadata = crate::repository::RunMetadata {
+                concurrency: Some(concurrency),
+                ..Default::default()
+            };
+            repo.set_run_metadata(id, metadata).unwrap();
+        }
+
+        let (summary, analyses) = summarise_run_ids(repo.as_ref(), &[r0, r1, r2, r3]).unwrap();
+        assert_eq!(summary.len(), 1);
+        let analysis = analyses.get(&TestId::new("flap")).expect("flap analysis");
+        assert_eq!(
+            analysis.concurrency,
+            ConcurrencyBreakdown {
+                serial_failures: 0,
+                serial_runs: 2,
+                parallel_failures: 2,
+                parallel_runs: 2,
+                max_parallel_concurrency: Some(8),
+                unknown_failures: 0,
+                unknown_runs: 0,
+            }
+        );
+    }
+
     fn analysis_with(modes: Vec<(&str, u32)>, failing_iters: Vec<u32>) -> FailureAnalysis {
         FailureAnalysis {
             failing_iterations: failing_iters.clone(),
@@ -884,6 +937,7 @@ mod tests {
                     details: None,
                 })
                 .collect(),
+            concurrency: ConcurrencyBreakdown::default(),
         }
     }
 
@@ -940,6 +994,79 @@ mod tests {
                 "    failure mode 1 of 2 (2x): connection refused".to_string(),
                 "    failure mode 2 of 2 (1x): timeout after 5s".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn report_includes_concurrency_verdict_when_available() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 4,
+            failures: 2,
+            transitions: 2,
+            flakiness_score: 2.0 / 3.0,
+            failure_rate: 0.5,
+        }];
+        let mut analysis = analysis_with(vec![("race", 2)], vec![3, 4]);
+        analysis.concurrency.record(Some(1), false);
+        analysis.concurrency.record(Some(1), false);
+        analysis.concurrency.record(Some(8), true);
+        analysis.concurrency.record(Some(8), true);
+        let mut analyses = HashMap::new();
+        analyses.insert(TestId::new("flap"), analysis);
+
+        cmd.report(
+            &mut ui,
+            &[
+                RunId::new("0"),
+                RunId::new("1"),
+                RunId::new("2"),
+                RunId::new("3"),
+            ],
+            flaky,
+            analyses,
+            true,
+        )
+        .unwrap();
+        let concurrency_lines: Vec<&String> = ui
+            .output
+            .iter()
+            .filter(|l| l.starts_with("    concurrency:"))
+            .collect();
+        assert_eq!(
+            concurrency_lines,
+            vec![
+                &"    concurrency: fails 2/2 in parallel (max -j 8), 0/2 serially — likely concurrency-related".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn report_omits_concurrency_line_with_no_observations() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let flaky = vec![TestFlakiness {
+            test_id: TestId::new("flap"),
+            runs: 1,
+            failures: 1,
+            transitions: 0,
+            flakiness_score: 0.0,
+            failure_rate: 1.0,
+        }];
+        let mut analyses = HashMap::new();
+        analyses.insert(
+            TestId::new("flap"),
+            analysis_with(vec![("boom", 1)], vec![1]),
+        );
+
+        cmd.report(&mut ui, &[RunId::new("0")], flaky, analyses, true)
+            .unwrap();
+        assert!(
+            ui.output.iter().all(|l| !l.starts_with("    concurrency:")),
+            "got: {:?}",
+            ui.output
         );
     }
 
@@ -1012,6 +1139,7 @@ mod tests {
                             .to_string(),
                     ),
                 }],
+                concurrency: ConcurrencyBreakdown::default(),
             },
         );
 
@@ -1074,6 +1202,7 @@ mod tests {
                     count: 1,
                     details: Some(traceback),
                 }],
+                concurrency: ConcurrencyBreakdown::default(),
             },
         );
 
@@ -1120,6 +1249,7 @@ mod tests {
                     .map(|i| RunId::new(i.to_string()))
                     .collect(),
                 modes,
+                concurrency: ConcurrencyBreakdown::default(),
             },
         );
 
