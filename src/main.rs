@@ -343,7 +343,8 @@ enum Commands {
         #[arg(long, value_hint = ValueHint::FilePath)]
         load_list: Option<String>,
 
-        /// Run tests in parallel across multiple workers (defaults to number of CPUs if no value given)
+        /// Run tests in parallel across multiple workers. Stress defaults to
+        /// auto-detected CPU count when omitted; pass `-j 1` to run serially.
         #[arg(long, short = 'j', value_name = "N", alias = "concurrency", num_args = 0..=1, default_missing_value = "0")]
         parallel: Option<usize>,
 

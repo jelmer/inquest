@@ -75,11 +75,11 @@ impl StressCommand {
         }
     }
 
-    fn build_iteration(&self) -> crate::commands::RunCommand {
+    fn build_iteration(&self, concurrency: Option<usize>) -> crate::commands::RunCommand {
         crate::commands::RunCommand {
             base_path: self.base_path.clone(),
             load_list: self.load_list.clone(),
-            concurrency: self.concurrency,
+            concurrency,
             isolated: self.isolated,
             test_filters: self.test_filters.clone(),
             starting_with: self.starting_with.clone(),
@@ -94,6 +94,28 @@ impl StressCommand {
             ..Default::default()
         }
     }
+
+    /// Decide the per-iteration worker count to hand each child `RunCommand`.
+    ///
+    /// When the user passes `-j` we honour it verbatim (including `-j 1` to
+    /// opt back into serial). Otherwise we auto-detect CPU count up front so
+    /// that (a) every iteration runs in parallel, surfacing concurrency-only
+    /// flakes that a serial run would hide, and (b) the auto-detection
+    /// message prints once instead of once per iteration.
+    fn resolve_iteration_concurrency(&self, ui: &mut dyn UI) -> Result<Option<usize>> {
+        if let Some(c) = self.concurrency {
+            return Ok(Some(c));
+        }
+        let cpus = num_cpus::get();
+        if cpus > 1 {
+            ui.output(&format!(
+                "Stress: running each iteration in parallel across {} CPUs (auto-detected). \
+                 Pass `-j N` to set a specific worker count, or `-j 1` to run serially.",
+                cpus
+            ))?;
+        }
+        Ok(Some(cpus))
+    }
 }
 
 impl Command for StressCommand {
@@ -107,13 +129,15 @@ impl Command for StressCommand {
         let mut run_ids: Vec<RunId> = Vec::with_capacity(self.iterations);
         let mut any_failure = false;
 
+        let iteration_concurrency = self.resolve_iteration_concurrency(ui)?;
+
         for iteration in 1..=self.iterations {
             ui.output(&format!(
                 "\n=== Stress iteration {}/{} ===",
                 iteration, self.iterations
             ))?;
 
-            let run_cmd = self.build_iteration();
+            let run_cmd = self.build_iteration(iteration_concurrency);
             let output = run_cmd.execute_returning_run_id(ui)?;
 
             if let Some(run_id) = output.run_id {
@@ -678,6 +702,45 @@ mod tests {
             "got: {}",
             out
         );
+    }
+
+    #[test]
+    fn resolve_iteration_concurrency_honours_explicit() {
+        let mut cmd = StressCommand::new(None);
+        cmd.concurrency = Some(4);
+        let mut ui = TestUI::new();
+        assert_eq!(cmd.resolve_iteration_concurrency(&mut ui).unwrap(), Some(4));
+        assert_eq!(ui.output, Vec::<String>::new());
+    }
+
+    #[test]
+    fn resolve_iteration_concurrency_explicit_serial_is_silent() {
+        let mut cmd = StressCommand::new(None);
+        cmd.concurrency = Some(1);
+        let mut ui = TestUI::new();
+        assert_eq!(cmd.resolve_iteration_concurrency(&mut ui).unwrap(), Some(1));
+        assert_eq!(ui.output, Vec::<String>::new());
+    }
+
+    #[test]
+    fn resolve_iteration_concurrency_auto_detects_when_unset() {
+        let cmd = StressCommand::new(None);
+        let mut ui = TestUI::new();
+        let resolved = cmd.resolve_iteration_concurrency(&mut ui).unwrap();
+        let cpus = num_cpus::get();
+        assert_eq!(resolved, Some(cpus));
+        if cpus > 1 {
+            assert_eq!(
+                ui.output,
+                vec![format!(
+                    "Stress: running each iteration in parallel across {} CPUs (auto-detected). \
+                     Pass `-j N` to set a specific worker count, or `-j 1` to run serially.",
+                    cpus
+                )]
+            );
+        } else {
+            assert_eq!(ui.output, Vec::<String>::new());
+        }
     }
 
     #[test]
