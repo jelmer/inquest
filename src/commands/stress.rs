@@ -92,6 +92,16 @@ pub type FailureAnalyses = HashMap<TestId, FailureAnalysis>;
 /// Default number of iterations when `--iterations` is not given.
 pub const DEFAULT_ITERATIONS: usize = 10;
 
+/// Default number of confirmation iterations when the second-pass phase
+/// is enabled. Chosen to tighten a 10-iteration starting estimate to a
+/// failure-rate uncertainty of roughly ±5–10 percentage points.
+pub const DEFAULT_CONFIRM_ITERATIONS: usize = 30;
+
+/// Default number of co-running sibling tests to drag along into the
+/// confirmation phase per suspect, so cross-test interference is
+/// preserved rather than masked by re-running suspects in isolation.
+const DEFAULT_CONFIRM_SIBLINGS_PER_SUSPECT: usize = 3;
+
 /// Command to run the test suite repeatedly and report flaky tests.
 #[derive(Default)]
 pub struct StressCommand {
@@ -126,6 +136,12 @@ pub struct StressCommand {
     /// Niceness increment for spawned test processes (unix only). See
     /// [`crate::test_executor::TestExecutorConfig::nice`].
     pub nice: Option<i32>,
+    /// Number of additional iterations to run after the initial pass,
+    /// restricted to the suspects (and their top co-running siblings).
+    /// `None` falls back to [`DEFAULT_CONFIRM_ITERATIONS`]; `Some(0)`
+    /// disables the confirmation phase entirely (the `--no-confirm`
+    /// CLI flag).
+    pub confirm_iterations: Option<usize>,
 }
 
 impl StressCommand {
@@ -138,10 +154,15 @@ impl StressCommand {
         }
     }
 
-    fn build_iteration(&self, concurrency: Option<usize>) -> crate::commands::RunCommand {
+    fn build_iteration(
+        &self,
+        concurrency: Option<usize>,
+        test_ids_override: Option<Vec<TestId>>,
+    ) -> crate::commands::RunCommand {
         crate::commands::RunCommand {
             base_path: self.base_path.clone(),
             load_list: self.load_list.clone(),
+            test_ids_override,
             concurrency,
             isolated: self.isolated,
             test_filters: self.test_filters.clone(),
@@ -200,7 +221,7 @@ impl Command for StressCommand {
                 iteration, self.iterations
             ))?;
 
-            let run_cmd = self.build_iteration(iteration_concurrency);
+            let run_cmd = self.build_iteration(iteration_concurrency, None);
             let output = run_cmd.execute_returning_run_id(ui)?;
 
             if let Some(run_id) = output.run_id {
@@ -230,6 +251,48 @@ impl Command for StressCommand {
                         iteration
                     ))?;
                     return self.report(ui, &run_ids, summary, messages, any_failure);
+                }
+            }
+        }
+
+        // Phase 1 done. Compute suspects + their top siblings and re-run
+        // that focused set so the final failure-rate numbers reflect tens
+        // of observations rather than the noisy initial pass.
+        let confirm_iterations = self
+            .confirm_iterations
+            .unwrap_or(DEFAULT_CONFIRM_ITERATIONS);
+        if confirm_iterations > 0 {
+            let confirm_set = {
+                let repo = open_repository(self.base_path.as_deref())?;
+                let (_summary, analyses) = summarise_run_ids(&*repo, &run_ids)?;
+                build_confirm_set(&analyses, DEFAULT_CONFIRM_SIBLINGS_PER_SUSPECT)
+            };
+            if !confirm_set.is_empty() {
+                ui.output(&format!(
+                    "\n=== Confirmation phase: {} suspect(s)+sibling(s) x {} iterations ===",
+                    confirm_set.len(),
+                    confirm_iterations,
+                ))?;
+                for iteration in 1..=confirm_iterations {
+                    ui.output(&format!(
+                        "\n--- Confirm iteration {}/{} ---",
+                        iteration, confirm_iterations
+                    ))?;
+                    let run_cmd =
+                        self.build_iteration(iteration_concurrency, Some(confirm_set.clone()));
+                    let output = run_cmd.execute_returning_run_id(ui)?;
+                    if let Some(run_id) = output.run_id {
+                        run_ids.push(run_id);
+                    } else {
+                        ui.output(
+                            "\nConfirmation phase aborted: no test run was recorded. \
+                             Reporting from initial pass only.",
+                        )?;
+                        break;
+                    }
+                    if output.exit_code != 0 {
+                        any_failure = true;
+                    }
                 }
             }
         }
@@ -840,6 +903,26 @@ fn sibling_score(s: &SiblingCandidate, target_failures: u32) -> f64 {
     s.co_failures as f64 - s.co_passes as f64 * fail_rate
 }
 
+/// Compute the set of test IDs the confirmation phase should re-run.
+///
+/// Includes every flaky test (the "suspect") and up to
+/// `max_siblings_per_suspect` of its top-ranked co-running siblings so
+/// concurrency-driven interference is preserved when the focused phase
+/// runs. The list is deduplicated and sorted for deterministic output.
+pub(crate) fn build_confirm_set(
+    analyses: &FailureAnalyses,
+    max_siblings_per_suspect: usize,
+) -> Vec<TestId> {
+    let mut set: std::collections::BTreeSet<TestId> = std::collections::BTreeSet::new();
+    for (suspect, analysis) in analyses {
+        set.insert(suspect.clone());
+        for sibling in analysis.siblings.iter().take(max_siblings_per_suspect) {
+            set.insert(sibling.test_id.clone());
+        }
+    }
+    set.into_iter().collect()
+}
+
 /// Render a run-id list as a compact comma-separated string, with `..` when
 /// the IDs form a contiguous numeric range.
 fn format_run_id_list(run_ids: &[RunId]) -> String {
@@ -1291,6 +1374,84 @@ mod tests {
         assert!(analysis.modes[0].varies, "expected varies=true");
         // The displayed message is the first one we saw.
         assert_eq!(analysis.modes[0].message, "AssertionError at line 1234");
+    }
+
+    #[test]
+    fn build_confirm_set_includes_suspect_and_top_siblings() {
+        let mut analyses = FailureAnalyses::new();
+        let mut a = analysis_with(vec![("boom", 1)], vec![1]);
+        a.siblings = vec![
+            SiblingCandidate {
+                test_id: TestId::new("hot"),
+                co_failures: 3,
+                co_passes: 0,
+            },
+            SiblingCandidate {
+                test_id: TestId::new("warm"),
+                co_failures: 2,
+                co_passes: 0,
+            },
+            SiblingCandidate {
+                test_id: TestId::new("cool"),
+                co_failures: 1,
+                co_passes: 0,
+            },
+            SiblingCandidate {
+                test_id: TestId::new("ignored_extra"),
+                co_failures: 1,
+                co_passes: 0,
+            },
+        ];
+        analyses.insert(TestId::new("suspect"), a);
+
+        let set = build_confirm_set(&analyses, 3);
+        // Suspect + top-3 siblings, sorted, no extras.
+        assert_eq!(
+            set,
+            vec![
+                TestId::new("cool"),
+                TestId::new("hot"),
+                TestId::new("suspect"),
+                TestId::new("warm"),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_confirm_set_dedupes_across_suspects() {
+        // Two suspects whose top siblings overlap should produce a single
+        // entry for the shared sibling, not two.
+        let mut analyses = FailureAnalyses::new();
+        let mut a = analysis_with(vec![("boom", 1)], vec![1]);
+        a.siblings = vec![SiblingCandidate {
+            test_id: TestId::new("shared"),
+            co_failures: 1,
+            co_passes: 0,
+        }];
+        let mut b = analysis_with(vec![("boom", 1)], vec![1]);
+        b.siblings = vec![SiblingCandidate {
+            test_id: TestId::new("shared"),
+            co_failures: 1,
+            co_passes: 0,
+        }];
+        analyses.insert(TestId::new("s1"), a);
+        analyses.insert(TestId::new("s2"), b);
+
+        let set = build_confirm_set(&analyses, 3);
+        assert_eq!(
+            set,
+            vec![TestId::new("s1"), TestId::new("s2"), TestId::new("shared"),]
+        );
+    }
+
+    #[test]
+    fn build_confirm_set_with_no_siblings_returns_only_suspects() {
+        let mut analyses = FailureAnalyses::new();
+        analyses.insert(
+            TestId::new("loner"),
+            analysis_with(vec![("boom", 1)], vec![1]),
+        );
+        assert_eq!(build_confirm_set(&analyses, 3), vec![TestId::new("loner")]);
     }
 
     #[test]
