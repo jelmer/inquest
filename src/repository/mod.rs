@@ -14,8 +14,8 @@ pub mod test_run;
 pub mod testr;
 
 pub use test_run::{
-    estimate_progress, RunId, RunMetadata, StreamInterruption, TestFlakiness, TestId, TestResult,
-    TestRun, TestStatus,
+    estimate_progress, worker_suffix, RunId, RunMetadata, StreamInterruption, TestFlakiness,
+    TestId, TestResult, TestRun, TestStatus,
 };
 
 /// Abstract repository trait for test result storage
@@ -58,6 +58,40 @@ pub trait Repository {
     /// This preserves the original stream byte-for-byte including non-subunit output
     /// The caller should write the raw subunit bytes to the returned writer
     fn begin_test_run_raw(&mut self) -> Result<(RunId, Box<dyn std::io::Write + Send>)>;
+
+    /// Begin writing a sub-run (e.g. per-worker partial stream) under an
+    /// existing parent run, returning `(sub_run_id, writer)`.
+    ///
+    /// Unlike [`Self::begin_test_run_raw`], this does *not* allocate a new
+    /// top-level run ID or insert a row in the runs table. The on-disk
+    /// stream lives alongside the parent (so the inquest backend writes
+    /// `runs/<parent><suffix>`, e.g. `runs/15a`), and is intended for the
+    /// per-worker slices a parallel run produces. The parent's aggregate
+    /// stream is written separately by the caller via
+    /// [`Self::overwrite_test_run_raw`].
+    ///
+    /// The default implementation falls back to a fresh top-level run for
+    /// backends that don't distinguish sub-runs.
+    fn begin_sub_run_raw(
+        &mut self,
+        _parent: &RunId,
+        _suffix: &str,
+    ) -> Result<(RunId, Box<dyn std::io::Write + Send>)> {
+        self.begin_test_run_raw()
+    }
+
+    /// Open a writer that overwrites an existing run's raw subunit stream.
+    ///
+    /// Used after a parallel run completes, so the aggregate of every
+    /// worker's results lands at the outer run ID. The default
+    /// implementation is a no-op writer for backends that don't store
+    /// per-run streams; the inquest backend overrides it.
+    fn overwrite_test_run_raw(
+        &mut self,
+        _run_id: &RunId,
+    ) -> Result<Box<dyn std::io::Write + Send>> {
+        Ok(Box::new(std::io::sink()))
+    }
 
     /// Insert a test run (convenience method for tests - prefer begin_test_run_raw in production)
     ///

@@ -359,16 +359,22 @@ fn take_limited<T>(mut items: Vec<T>, limit: usize) -> (Vec<T>, usize) {
     }
 }
 
+type StressSummary = (
+    Vec<crate::repository::TestFlakiness>,
+    crate::commands::stress::FailureAnalyses,
+);
+
 fn stress_summarise(
     repo: &dyn Repository,
     run_ids: &[crate::repository::RunId],
-) -> crate::error::Result<Vec<crate::repository::TestFlakiness>> {
+) -> crate::error::Result<StressSummary> {
     crate::commands::stress::summarise_run_ids(repo, run_ids)
 }
 
 fn build_stress_response(
     run_ids: Vec<crate::repository::RunId>,
     flaky: Vec<crate::repository::TestFlakiness>,
+    mut analyses: crate::commands::stress::FailureAnalyses,
     stopped_early: bool,
     any_iteration_failed: bool,
 ) -> StressResponse {
@@ -379,13 +385,32 @@ fn build_stress_response(
         any_iteration_failed,
         flaky_tests: flaky
             .into_iter()
-            .map(|s| StressFlakyTest {
-                test_id: s.test_id.as_str().to_string(),
-                runs: s.runs,
-                failures: s.failures,
-                transitions: s.transitions,
-                flakiness_score: s.flakiness_score,
-                failure_rate: s.failure_rate,
+            .map(|s| {
+                let analysis = analyses.remove(&s.test_id).unwrap_or_default();
+                let failure_messages = analysis
+                    .modes
+                    .into_iter()
+                    .map(|mode| StressFailureMessage {
+                        message: mode.message,
+                        count: mode.count,
+                        details: mode.details,
+                    })
+                    .collect();
+                StressFlakyTest {
+                    test_id: s.test_id.as_str().to_string(),
+                    runs: s.runs,
+                    failures: s.failures,
+                    transitions: s.transitions,
+                    flakiness_score: s.flakiness_score,
+                    failure_rate: s.failure_rate,
+                    failing_iterations: analysis.failing_iterations,
+                    failing_run_ids: analysis
+                        .failing_run_ids
+                        .into_iter()
+                        .map(|r| r.as_str().to_string())
+                        .collect(),
+                    failure_messages,
+                }
             })
             .collect(),
     }
@@ -722,6 +747,30 @@ struct StressFlakyTest {
     flakiness_score: f64,
     /// `failures / runs`, in `[0, 1]`.
     failure_rate: f64,
+    /// 1-based stress iteration indices in which this test failed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failing_iterations: Vec<u32>,
+    /// Run IDs corresponding to `failing_iterations`, same ordering.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failing_run_ids: Vec<String>,
+    /// Distinct failure modes observed across the stress window, with the
+    /// number of iterations each one appeared in and a representative
+    /// traceback. Sorted most-frequent-first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failure_messages: Vec<StressFailureMessage>,
+}
+
+#[derive(Serialize)]
+struct StressFailureMessage {
+    /// The failure message (or the last non-empty line of the traceback if
+    /// no explicit message was recorded).
+    message: String,
+    /// Number of iterations in which this exact message appeared.
+    count: u32,
+    /// Representative full traceback / details from a failure grouped under
+    /// this message, if any of those failures recorded details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2160,12 +2209,13 @@ impl InquestMcpService {
 
             if stop_on_flaky && run_ids.len() >= 2 {
                 let repo = self.open_repo()?;
-                let flaky = stress_summarise(&*repo, &run_ids).map_err(to_mcp_err)?;
+                let (flaky, messages) = stress_summarise(&*repo, &run_ids).map_err(to_mcp_err)?;
                 if !flaky.is_empty() {
                     stopped_early = iteration < iterations;
                     return ok_json(&build_stress_response(
                         run_ids,
                         flaky,
+                        messages,
                         stopped_early,
                         any_iteration_failed,
                     ));
@@ -2174,10 +2224,11 @@ impl InquestMcpService {
         }
 
         let repo = self.open_repo()?;
-        let flaky = stress_summarise(&*repo, &run_ids).map_err(to_mcp_err)?;
+        let (flaky, messages) = stress_summarise(&*repo, &run_ids).map_err(to_mcp_err)?;
         ok_json(&build_stress_response(
             run_ids,
             flaky,
+            messages,
             stopped_early,
             any_iteration_failed,
         ))
