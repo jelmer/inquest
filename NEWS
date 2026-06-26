@@ -2,6 +2,35 @@
 inquest release notes
 #######################
 
+0.3.2	2026-06-26
+++++++++++++++++++
+
+CHANGES
+-------
+
+* ``inq stress`` now defaults to running iterations in parallel and
+  reports per-test failure analysis with tracebacks. Flaky failures are
+  stratified by run concurrency, near-duplicate failure messages are
+  collapsed, same-worker sibling tests are surfaced, and a post-hoc
+  confirmation phase tightens flaky estimates. Flaky tests that appeared
+  in only a subset of iterations are now retained. (Jelmer Vernooĳ)
+
+* Add a ``--nice`` flag to lower the scheduling priority of spawned test
+  processes. (Jelmer Vernooĳ)
+
+* ``inq auto`` now detects Maven and Gradle projects, with JVM test
+  listing and per-test selection via jvmtest-subunit. (Jelmer Vernooĳ)
+
+* ``inq run`` warns when a ``-s`` selector is ambiguous, drops the
+  common group prefix in the UI, and accepts short test IDs.
+  (Jelmer Vernooĳ)
+
+* Parallel run results are now aggregated under the outer run id.
+  (Jelmer Vernooĳ)
+
+* The CLI now runs on a worker thread to avoid a stack overflow on
+  Windows. (Jelmer Vernooĳ)
+
 0.3.0	2026-05-24
 ++++++++++++++++++
 
