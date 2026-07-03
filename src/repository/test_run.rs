@@ -637,6 +637,19 @@ impl TestRun {
             .map(|r| &r.test_id)
             .collect()
     }
+
+    /// Returns test IDs for failures matching the given tag filter, sorted
+    /// alphabetically for stable display order.
+    pub fn get_failing_tests_filtered(&self, filter_tags: &[String]) -> Vec<&TestId> {
+        let mut ids: Vec<&TestId> = self
+            .results
+            .values()
+            .filter(|r| Self::matches_filter(r, filter_tags) && r.status.is_failure())
+            .map(|r| &r.test_id)
+            .collect();
+        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        ids
+    }
 }
 
 /// Estimate progress for an in-progress test run using historical timings.

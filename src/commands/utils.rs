@@ -321,6 +321,34 @@ pub fn display_test_summary(
     Ok(())
 }
 
+/// Print the list of failed test IDs after the run summary. Truncates to
+/// `MAX_FAILED_TESTS_LISTED` entries when the failure count exceeds that
+/// cap, so a wave of failures does not drown out the rest of the summary.
+pub fn display_failed_tests(
+    ui: &mut dyn UI,
+    test_run: &TestRun,
+    filter_tags: &[String],
+) -> Result<()> {
+    const MAX_FAILED_TESTS_LISTED: usize = 20;
+
+    let failed = test_run.get_failing_tests_filtered(filter_tags);
+    if failed.is_empty() {
+        return Ok(());
+    }
+
+    ui.output(&format!("\nFailed test(s) ({}):", failed.len()))?;
+    for test_id in failed.iter().take(MAX_FAILED_TESTS_LISTED) {
+        ui.output(&format!("  {}", test_id))?;
+    }
+    if failed.len() > MAX_FAILED_TESTS_LISTED {
+        ui.output(&format!(
+            "  ... and {} more (run `inq failing` for the full list)",
+            failed.len() - MAX_FAILED_TESTS_LISTED,
+        ))?;
+    }
+    Ok(())
+}
+
 /// Warn about tests that ran significantly slower than their historical average.
 pub fn warn_slow_tests(
     ui: &mut dyn UI,
@@ -449,6 +477,7 @@ pub fn persist_and_display_run(
             report_eta_accuracy(ui, predicted, duration, calibration_factor)?;
         }
     }
+    display_failed_tests(ui, &combined_run, filter_tags)?;
     warn_slow_tests(ui, &combined_run, historical_times)?;
 
     Ok((exit_code, run_id))
@@ -734,6 +763,72 @@ mod tests {
         );
         warn_slow_tests(&mut ui, &run, &historical).unwrap();
         assert!(ui.output.is_empty());
+    }
+
+    #[test]
+    fn test_display_failed_tests_none() {
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let mut run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
+        run.add_result(crate::repository::TestResult::success("passing"));
+        display_failed_tests(&mut ui, &run, &[]).unwrap();
+        assert!(ui.output.is_empty());
+    }
+
+    #[test]
+    fn test_display_failed_tests_lists_failures_sorted() {
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let mut run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
+        run.add_result(crate::repository::TestResult::failure("zebra", "boom"));
+        run.add_result(crate::repository::TestResult::failure("alpha", "boom"));
+        run.add_result(crate::repository::TestResult::success("passing"));
+        display_failed_tests(&mut ui, &run, &[]).unwrap();
+        assert_eq!(
+            ui.output,
+            vec![
+                "\nFailed test(s) (2):".to_string(),
+                "  alpha".to_string(),
+                "  zebra".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_display_failed_tests_truncates_long_list() {
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let mut run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
+        for i in 0..25 {
+            run.add_result(crate::repository::TestResult::failure(
+                format!("t{:02}", i).as_str(),
+                "boom",
+            ));
+        }
+        display_failed_tests(&mut ui, &run, &[]).unwrap();
+        assert_eq!(ui.output[0], "\nFailed test(s) (25):");
+        assert_eq!(ui.output.len(), 22);
+        assert_eq!(
+            ui.output[21],
+            "  ... and 5 more (run `inq failing` for the full list)"
+        );
+    }
+
+    #[test]
+    fn test_display_failed_tests_respects_tag_filter() {
+        let mut ui = crate::ui::test_ui::TestUI::new();
+        let mut run = crate::repository::TestRun::new(crate::repository::RunId::new("0"));
+        run.add_result(
+            crate::repository::TestResult::failure("worker0_fail", "boom").with_tag("worker-0"),
+        );
+        run.add_result(
+            crate::repository::TestResult::failure("worker1_fail", "boom").with_tag("worker-1"),
+        );
+        display_failed_tests(&mut ui, &run, &["worker-0".to_string()]).unwrap();
+        assert_eq!(
+            ui.output,
+            vec![
+                "\nFailed test(s) (1):".to_string(),
+                "  worker0_fail".to_string(),
+            ]
+        );
     }
 
     #[test]
