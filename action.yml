@@ -157,8 +157,12 @@ runs:
         # the gdbm feature links against libgdbm (an extra apt/brew step
         # away on standard runners), and testr/junit pull in adapters that
         # are not required for the formats `inq ci` consumes in CI.
+        # `bundled-sqlite` embeds SQLite statically so we don't have to
+        # provision libsqlite3 (Ubuntu/macOS) or sqlite3.dll (Windows) on
+        # the runner before building.
         cargo install --locked --version "$VERSION" \
           --no-default-features \
+          --features bundled-sqlite \
           inquest
 
     - name: Add cargo bin to PATH
@@ -204,12 +208,29 @@ runs:
         echo "exit-code=$code" >> "$GITHUB_OUTPUT"
         exit $code
 
+    - name: Check inquest history cache is savable
+      # Only save the cache if the repository is complete — a run that
+      # crashed before the SQLite database was written would otherwise
+      # poison the cache for every subsequent run that restores it via
+      # `restore-keys`.
+      id: cache-check
+      if: inputs.cache == 'true' && always()
+      shell: bash
+      working-directory: ${{ steps.wd.outputs.path }}
+      run: |
+        if [ -f .inquest/metadata.db ] && [ -f .inquest/format ]; then
+          echo "savable=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "savable=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::Skipping inquest cache save: .inquest is incomplete"
+        fi
+
     - name: Save inquest history cache
       # Runs even on test failure so the updated history (timings, failure
       # counts) is captured. A fresh key per run guarantees the save happens;
       # the restore step above picks up the most recent of these on the next
       # run via its prefix.
-      if: inputs.cache == 'true' && always()
+      if: inputs.cache == 'true' && always() && steps.cache-check.outputs.savable == 'true'
       uses: actions/cache/save@v4
       with:
         path: ${{ steps.wd.outputs.path }}/.inquest
