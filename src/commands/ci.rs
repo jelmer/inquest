@@ -1126,6 +1126,54 @@ fn format_history_hint(
     }
 }
 
+/// Max lines of traceback embedded per test in the step summary.
+const SUMMARY_DETAILS_MAX_LINES: usize = 20;
+/// Max bytes of traceback embedded per test in the step summary. GitHub caps
+/// the whole file at 1MiB, so we truncate aggressively per-entry.
+const SUMMARY_DETAILS_MAX_BYTES: usize = 2048;
+
+/// Truncate `details` to at most [`SUMMARY_DETAILS_MAX_LINES`] lines and
+/// [`SUMMARY_DETAILS_MAX_BYTES`] bytes, appending a truncation marker when
+/// either limit trims content.
+fn truncate_details(details: &str) -> String {
+    let mut truncated = false;
+    let mut out = String::new();
+    for (i, line) in details.lines().enumerate() {
+        if i >= SUMMARY_DETAILS_MAX_LINES {
+            truncated = true;
+            break;
+        }
+        if out.len() + line.len() + 1 > SUMMARY_DETAILS_MAX_BYTES {
+            truncated = true;
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if truncated {
+        out.push_str("... (truncated)\n");
+    }
+    out
+}
+
+/// Emit a nested `<details>` block containing `details` inside a fenced code
+/// block. Callers embed this under a top-level test entry.
+fn write_details_block(out: &mut String, details: &str) {
+    let body = truncate_details(details);
+    if body.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "  <details><summary>traceback</summary>");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  ```");
+    for line in body.lines() {
+        let _ = writeln!(out, "  {}", line);
+    }
+    let _ = writeln!(out, "  ```");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  </details>");
+}
+
 /// Markdown summary written to `$GITHUB_STEP_SUMMARY`, which GitHub renders
 /// on the workflow run page.
 fn format_step_summary(
@@ -1199,6 +1247,14 @@ fn format_step_summary(
                 msg,
                 format_history_hint(&r.test_id, history),
             );
+            if let Some(d) = r
+                .details
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                write_details_block(&mut out, d);
+            }
         }
         let _ = writeln!(out);
         let _ = writeln!(out, "</details>");
@@ -1221,6 +1277,15 @@ fn format_step_summary(
                 t.as_str(),
                 format_history_hint(t, history),
             );
+            if let Some(d) = run
+                .results
+                .get(t)
+                .and_then(|r| r.details.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                write_details_block(&mut out, d);
+            }
         }
         let _ = writeln!(out);
         let _ = writeln!(out, "</details>");
@@ -1371,23 +1436,40 @@ mod tests {
         assert_eq!(out, "");
     }
 
+    /// Traceback block that appears under `tests.b` in the make_run fixture:
+    /// two indented lines wrapped in a `<details>`+code fence, matching what
+    /// `write_details_block` emits.
+    const TESTS_B_DETAILS: &str = concat!(
+        "  <details><summary>traceback</summary>\n",
+        "\n",
+        "  ```\n",
+        "  File \"tests/b.py\", line 7, in test\n",
+        "      raise AssertionError\n",
+        "  ```\n",
+        "\n",
+        "  </details>\n",
+    );
+
     #[test]
     fn step_summary_counts_and_lists_failures() {
         let run = make_run();
         let summary = format_step_summary(&run, &[], &HashMap::new());
         // total=4, passed=1, failed=1, errored=1, skipped=1, flaky=0
-        let expected = "## Test results\n\
-                        \n\
-                        | Total | Passed | Failed | Errored | Skipped | Flaky |\n\
-                        |------:|-------:|-------:|--------:|--------:|------:|\n\
-                        | 4 | 1 | 1 | 1 | 1 | 0 |\n\
-                        \n\
-                        <details><summary>Failing tests (2)</summary>\n\
-                        \n\
-                        - `tests.b` — boom\n\
-                        - `tests.c` — timeout\n\
-                        \n\
-                        </details>\n";
+        let expected = format!(
+            "## Test results\n\
+             \n\
+             | Total | Passed | Failed | Errored | Skipped | Flaky |\n\
+             |------:|-------:|-------:|--------:|--------:|------:|\n\
+             | 4 | 1 | 1 | 1 | 1 | 0 |\n\
+             \n\
+             <details><summary>Failing tests (2)</summary>\n\
+             \n\
+             - `tests.b` — boom\n\
+             {TESTS_B_DETAILS}\
+             - `tests.c` — timeout\n\
+             \n\
+             </details>\n"
+        );
         assert_eq!(summary, expected);
     }
 
@@ -1398,23 +1480,26 @@ mod tests {
         let summary = format_step_summary(&run, &flaky, &HashMap::new());
         // tests.b is now flaky, so failing list shows only tests.c, and
         // there's a separate flaky-tests block at the end.
-        let expected = "## Test results\n\
-                        \n\
-                        | Total | Passed | Failed | Errored | Skipped | Flaky |\n\
-                        |------:|-------:|-------:|--------:|--------:|------:|\n\
-                        | 4 | 1 | 1 | 1 | 1 | 1 |\n\
-                        \n\
-                        <details><summary>Failing tests (1)</summary>\n\
-                        \n\
-                        - `tests.c` — timeout\n\
-                        \n\
-                        </details>\n\
-                        \n\
-                        <details><summary>Flaky tests (1)</summary>\n\
-                        \n\
-                        - `tests.b` (passed on retry)\n\
-                        \n\
-                        </details>\n";
+        let expected = format!(
+            "## Test results\n\
+             \n\
+             | Total | Passed | Failed | Errored | Skipped | Flaky |\n\
+             |------:|-------:|-------:|--------:|--------:|------:|\n\
+             | 4 | 1 | 1 | 1 | 1 | 1 |\n\
+             \n\
+             <details><summary>Failing tests (1)</summary>\n\
+             \n\
+             - `tests.c` — timeout\n\
+             \n\
+             </details>\n\
+             \n\
+             <details><summary>Flaky tests (1)</summary>\n\
+             \n\
+             - `tests.b` (passed on retry)\n\
+             {TESTS_B_DETAILS}\
+             \n\
+             </details>\n"
+        );
         assert_eq!(summary, expected);
     }
 
@@ -1845,6 +1930,44 @@ mod tests {
             summary.contains("- `tests.b` (passed on retry) (failed 4 of last 10)\n"),
             "missing flake history hint: {summary}"
         );
+    }
+
+    #[test]
+    fn step_summary_truncates_long_tracebacks() {
+        // A traceback exceeding SUMMARY_DETAILS_MAX_LINES is cut off with a
+        // "... (truncated)" marker so a single blown-up failure can't push
+        // the whole summary past GitHub's 1MiB cap.
+        let mut run = TestRun::new(RunId::new("0"));
+        let long: String = (0..50).map(|i| format!("line {i}\n")).collect();
+        run.add_result(TestResult::failure("tests.big", "oops").with_details(&long));
+        let summary = format_step_summary(&run, &[], &HashMap::new());
+        assert!(
+            summary.contains("  line 0\n"),
+            "first line missing: {summary}"
+        );
+        assert!(
+            summary.contains(&format!("  line {}\n", SUMMARY_DETAILS_MAX_LINES - 1)),
+            "last kept line missing: {summary}"
+        );
+        assert!(
+            !summary.contains(&format!("  line {}\n", SUMMARY_DETAILS_MAX_LINES)),
+            "line past the cap should be dropped: {summary}"
+        );
+        assert!(
+            summary.contains("  ... (truncated)\n"),
+            "truncation marker missing: {summary}"
+        );
+    }
+
+    #[test]
+    fn step_summary_omits_traceback_when_details_empty() {
+        // Tests without recorded details (e.g., a bare `TestResult::error`)
+        // still appear in the failing list but with no nested block.
+        let mut run = TestRun::new(RunId::new("0"));
+        run.add_result(TestResult::error("tests.nodetail", "gone"));
+        let summary = format_step_summary(&run, &[], &HashMap::new());
+        assert!(summary.contains("- `tests.nodetail` — gone\n"));
+        assert!(!summary.contains("<summary>traceback</summary>"));
     }
 
     #[test]
