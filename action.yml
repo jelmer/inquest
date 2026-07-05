@@ -194,6 +194,30 @@ runs:
         restore-keys: |
           ${{ inputs.cache-key-prefix }}-${{ runner.os }}-
 
+    - name: Discard restored cache if unusable
+      # A cache can be restored in a partial state (interrupted save on a
+      # previous run, format skew across inquest versions, ...). Ask inq
+      # whether the restored `.inquest/` is openable and drop it if not,
+      # so `inq ci` starts from a clean slate instead of failing before
+      # the first test runs.
+      if: inputs.cache == 'true'
+      shell: bash
+      working-directory: ${{ steps.wd.outputs.path }}
+      run: |
+        # Only relevant when `.inquest/` was actually restored. On older
+        # inquest builds without `repo-check`, skip the check rather than
+        # risk discarding a healthy cache on a false positive.
+        if [ ! -d .inquest ]; then
+          exit 0
+        fi
+        if ! inq --help 2>&1 | grep -q '^  repo-check '; then
+          exit 0
+        fi
+        if ! inq repo-check; then
+          echo "::notice::Dropping unusable restored .inquest cache"
+          rm -rf .inquest
+        fi
+
     - name: Run inq ci
       id: run
       shell: bash
@@ -208,21 +232,26 @@ runs:
         echo "exit-code=$code" >> "$GITHUB_OUTPUT"
         exit $code
 
-    - name: Check inquest history cache is savable
-      # Only save the cache if the repository is complete — a run that
-      # crashed before the SQLite database was written would otherwise
-      # poison the cache for every subsequent run that restores it via
-      # `restore-keys`.
+    - name: Verify cache is saveable
       id: cache-check
+      # If `inq ci` failed before writing a usable `.inquest/`, don't save
+      # the partial directory: it would poison the cache for future runs.
       if: inputs.cache == 'true' && always()
       shell: bash
       working-directory: ${{ steps.wd.outputs.path }}
       run: |
-        if [ -f .inquest/metadata.db ] && [ -f .inquest/format ]; then
-          echo "savable=true" >> "$GITHUB_OUTPUT"
+        # On older inquest builds without `repo-check`, let the save
+        # happen; the pre-run check on the next run will drop the cache
+        # if it turns out to be broken.
+        if ! inq --help 2>&1 | grep -q '^  repo-check '; then
+          echo "saveable=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if inq repo-check; then
+          echo "saveable=true" >> "$GITHUB_OUTPUT"
         else
-          echo "savable=false" >> "$GITHUB_OUTPUT"
-          echo "::notice::Skipping inquest cache save: .inquest is incomplete"
+          echo "saveable=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::Skipping inquest cache save: repository is not usable"
         fi
 
     - name: Save inquest history cache
@@ -230,7 +259,7 @@ runs:
       # counts) is captured. A fresh key per run guarantees the save happens;
       # the restore step above picks up the most recent of these on the next
       # run via its prefix.
-      if: inputs.cache == 'true' && always() && steps.cache-check.outputs.savable == 'true'
+      if: inputs.cache == 'true' && always() && steps.cache-check.outputs.saveable == 'true'
       uses: actions/cache/save@v4
       with:
         path: ${{ steps.wd.outputs.path }}/.inquest

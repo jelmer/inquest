@@ -44,6 +44,14 @@ enum Commands {
     /// Initialize a new test repository
     Init,
 
+    /// Check that the test repository is present and openable.
+    ///
+    /// Exits 0 if the repository is healthy or absent, non-zero if a
+    /// `.inquest/` directory exists but cannot be opened. Intended for
+    /// CI wrappers that restore `.inquest/` from a cache and need to
+    /// detect a corrupt restore before running other commands.
+    RepoCheck,
+
     /// Export test results in standard formats
     Export {
         /// Run ID to export (defaults to latest; supports negative indices like -1, -2)
@@ -711,6 +719,10 @@ fn run() {
         }
         Commands::Init => {
             let cmd = InitCommand::new(cli.directory);
+            cmd.execute(&mut ui)
+        }
+        Commands::RepoCheck => {
+            let cmd = RepoCheckCommand::new(cli.directory);
             cmd.execute(&mut ui)
         }
         Commands::Export { run, format } => {
