@@ -1384,7 +1384,7 @@ impl InquestMcpService {
             .filter_map(|r| r.duration.map(|dur| (r.test_id.as_str(), dur)))
             .collect();
 
-        tests_with_duration.sort_by(|a, b| b.1.cmp(&a.1));
+        tests_with_duration.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
         let total_secs: f64 = tests_with_duration
             .iter()
