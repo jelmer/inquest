@@ -432,7 +432,8 @@ enum Commands {
         #[arg(long, value_name = "ORDER")]
         order: Option<String>,
 
-        /// Number of parallel test workers
+        /// Number of parallel test workers. Defaults to auto-detected CPU
+        /// count; pass `-j 1` to run serially.
         #[arg(long, short = 'j', value_name = "N", alias = "concurrency", num_args = 0..=1, default_missing_value = "0")]
         parallel: Option<usize>,
 
@@ -1090,6 +1091,10 @@ fn run() {
                 None => TimeoutSetting::Disabled,
             };
             let max_failures = if fail_fast { Some(1) } else { max_failures };
+            // Default to auto-detected CPU count when `-j` isn't given, matching
+            // bare `inq`. CI runners typically have many cores and users expect
+            // parallelism out of the box.
+            let concurrency = parallel.or(Some(0));
             let cmd = inquest::commands::CiCommand {
                 base_path: cli.directory,
                 format,
@@ -1097,7 +1102,7 @@ fn run() {
                 order: test_order,
                 test_filters: testfilters,
                 starting_with,
-                concurrency: parallel,
+                concurrency,
                 test_timeout,
                 max_duration,
                 test_args: testargs,
