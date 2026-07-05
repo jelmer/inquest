@@ -25,8 +25,10 @@ jobs:
             os: windows-latest
             # gdbm doesn't build on Windows; mirror the test workflow's
             # Windows configuration so the release binary matches what we
-            # actually verify in CI.
-            features: "--no-default-features --features=testr,junit"
+            # actually verify in CI. Also enable bundled-sqlite so the
+            # published binary embeds SQLite statically and doesn't depend
+            # on sqlite3.dll being on the target machine.
+            features: "--no-default-features --features=testr,junit,bundled-sqlite"
 
     steps:
       - uses: actions/checkout@v4
@@ -41,18 +43,6 @@ jobs:
           brew install gdbm
           echo "LIBRARY_PATH=$(brew --prefix gdbm)/lib" >> $GITHUB_ENV
           echo "CPATH=$(brew --prefix gdbm)/include" >> $GITHUB_ENV
-
-      - name: Install system dependencies (Windows)
-        if: matrix.os == 'windows-latest'
-        run: vcpkg install sqlite3:x64-windows
-        shell: bash
-
-      - name: Set vcpkg environment (Windows)
-        if: matrix.os == 'windows-latest'
-        run: |
-          echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> $GITHUB_ENV
-          echo "VCPKGRS_DYNAMIC=1" >> $GITHUB_ENV
-        shell: bash
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

@@ -16,6 +16,10 @@ gdbm = ["testr", "dep:gdbm"]
 junit = ["dep:quick-junit"]
 mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
 web = ["dep:axum", "dep:tokio", "dep:tokio-stream", "dep:tower", "dep:tower-http", "dep:futures", "dep:askama"]
+# Link SQLite statically into the binary. Useful for prebuilt distributions
+# on platforms where no system libsqlite3 is guaranteed to be present at
+# runtime (notably Windows), at the cost of building the SQLite amalgamation.
+bundled-sqlite = ["rusqlite/bundled"]
 
 [[bin]]
 name = "inq"
