@@ -2,6 +2,18 @@
 inquest release notes
 #######################
 
+0.3.3	2026-07-05
+++++++++++++++++++
+
+CHANGES
+-------
+
+* ``inq ci`` now defaults to running tests in parallel.
+  (Jelmer Vernooĳ)
+
+* ``inq run`` now lists failing tests in the post-run overview.
+  (Jelmer Vernooĳ)
+
 0.3.2	2026-06-26
 ++++++++++++++++++
 
