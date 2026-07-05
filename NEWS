@@ -2,6 +2,28 @@
 inquest release notes
 #######################
 
+0.3.4	2026-07-05
+++++++++++++++++++
+
+CHANGES
+-------
+
+* Add ``inq repo-check`` to check whether a ``.inquest/`` directory is
+  present and openable. Intended for CI wrappers that restore
+  ``.inquest/`` from a cache and need to detect a corrupt restore.
+  (Jelmer Vernooĳ)
+
+* The GitHub Action now validates the restored ``.inquest/`` cache
+  before running ``inq ci`` and skips saving a partial ``.inquest/``,
+  so a crashed run no longer poisons the cache for subsequent runs.
+  (Jelmer Vernooĳ)
+
+* The GitHub Action now surfaces failure tracebacks in the job summary
+  behind a collapsible ``<details/>`` block. (Jelmer Vernooĳ)
+
+* Add a ``bundled-sqlite`` feature that links SQLite statically, used
+  by the Windows prebuilt binaries. (Jelmer Vernooĳ)
+
 0.3.3	2026-07-05
 ++++++++++++++++++
 
