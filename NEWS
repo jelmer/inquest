@@ -2,8 +2,17 @@
 inquest release notes
 #######################
 
-UNRELEASED
-++++++++++
+0.3.5	2026-07-06
+++++++++++++++++++
+
+CHANGES
+-------
+
+* The GitHub Action now reports run statistics in the job summary.
+  (Jelmer Vernooĳ)
+
+* The GitHub Action now supports ``fail-fast: true`` to abort the run
+  on the first test failure. (Jelmer Vernooĳ)
 
 BUG FIXES
 ---------
