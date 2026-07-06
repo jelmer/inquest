@@ -2,6 +2,18 @@
 inquest release notes
 #######################
 
+UNRELEASED
+++++++++++
+
+BUG FIXES
+---------
+
+* Fix ``$IDFILE`` substitution on Windows: the temp file path is now
+  shell-quoted before being spliced into the test command, so
+  backslash-separated Windows paths survive the ``sh -c`` re-parse
+  instead of being mangled and causing every worker to fail with
+  ``FileNotFoundError``. (Jelmer Vernooĳ)
+
 0.3.4	2026-07-05
 ++++++++++++++++++
 

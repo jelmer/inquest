@@ -211,7 +211,19 @@ impl TestCommand {
                     })?;
                 }
 
-                let temp_path = temp.path().to_string_lossy().to_string();
+                // Quote for `sh -c` re-parsing; Windows temp paths contain
+                // backslashes that `sh` would otherwise eat as escapes.
+                let temp_path_raw = temp.path().to_str().ok_or_else(|| {
+                    Error::CommandExecution(format!(
+                        "IDFILE path is not valid UTF-8: {}",
+                        temp.path().display()
+                    ))
+                })?;
+                let temp_path = shlex::try_quote(temp_path_raw)
+                    .map_err(|e| {
+                        Error::CommandExecution(format!("Failed to quote IDFILE path: {}", e))
+                    })?
+                    .into_owned();
                 vars.insert("IDFILE".to_string(), temp_path);
 
                 // Handle IDOPTION
@@ -593,11 +605,26 @@ test_list_option=--list
         assert!(cmd.starts_with("python -m subunit.run  --load-list "));
         assert!(temp_file.is_some());
 
-        // Verify temp file contents
-        if let Some(temp) = temp_file {
-            let contents = fs::read_to_string(temp.path()).unwrap();
-            assert_eq!(contents, "test1\ntest2\n");
-        }
+        let temp = temp_file.unwrap();
+        let tokens = shlex::split(&cmd).expect("command should parse as shell tokens");
+        let load_list_idx = tokens
+            .iter()
+            .position(|t| t == "--load-list")
+            .expect("--load-list not found");
+        assert_eq!(tokens[load_list_idx + 1], temp.path().to_str().unwrap());
+
+        let contents = fs::read_to_string(temp.path()).unwrap();
+        assert_eq!(contents, "test1\ntest2\n");
+    }
+
+    #[test]
+    fn test_windows_style_idfile_survives_sh_parse() {
+        let win_path = r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpABC123";
+        let quoted = shlex::try_quote(win_path).unwrap();
+        let cmd = format!("python -m subunit.run --load-list {}", quoted);
+        let tokens = shlex::split(&cmd).expect("command should parse");
+        let idx = tokens.iter().position(|t| t == "--load-list").unwrap();
+        assert_eq!(tokens[idx + 1], win_path);
     }
 
     #[test]
