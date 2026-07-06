@@ -21,6 +21,15 @@ inputs:
     required: false
     default: ""
 
+  fail-fast:
+    description: |
+      Stop the run after the first test failure (passes `--fail-fast` to
+      `inq ci`). With smart ordering the historically-failing tests run
+      first, so a known regression fails the job quickly. Set to "true" to
+      enable.
+    required: false
+    default: "false"
+
   working-directory:
     description: |
       Directory to run `inq ci` in. Defaults to the workspace root. The
@@ -224,10 +233,15 @@ runs:
       working-directory: ${{ steps.wd.outputs.path }}
       env:
         INQ_ARGS: ${{ inputs.args }}
+        FAIL_FAST: ${{ inputs.fail-fast }}
       run: |
         set +e
+        fail_fast_arg=""
+        if [ "$FAIL_FAST" = "true" ]; then
+          fail_fast_arg="--fail-fast"
+        fi
         # shellcheck disable=SC2086
-        inq ci $INQ_ARGS
+        inq ci $fail_fast_arg $INQ_ARGS
         code=$?
         echo "exit-code=$code" >> "$GITHUB_OUTPUT"
         exit $code
