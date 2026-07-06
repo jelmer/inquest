@@ -303,6 +303,8 @@ impl CiCommand {
         // chronic flake from a one-off, short enough that the read is cheap
         // and reviewers don't have to discount stale incidents from months ago.
         let history = collect_test_history(self.base_path.as_deref(), &initial_run_id, 10);
+        let baseline_duration =
+            collect_recent_duration_avg(self.base_path.as_deref(), &initial_run_id, 10);
         emit_ci_output(
             ui,
             &initial_run,
@@ -314,6 +316,7 @@ impl CiCommand {
             &initial_run_id,
             total_start.elapsed(),
             &history,
+            baseline_duration,
         )?;
 
         if let Some(path) = &self.junit_path {
@@ -719,6 +722,44 @@ pub(crate) fn collect_test_history(
     out
 }
 
+/// Average wall-clock duration of the last `window` runs *before* `current`,
+/// used for the "vs history" comparison in the step summary. Reads the
+/// persisted per-run `duration_secs` metadata; runs without a recorded
+/// duration (e.g. predating duration tracking) are ignored. Returns `None`
+/// when there's no usable history, so the summary omits the comparison
+/// rather than comparing against a meaningless zero.
+pub(crate) fn collect_recent_duration_avg(
+    base_path: Option<&str>,
+    current: &RunId,
+    window: usize,
+) -> Option<Duration> {
+    if window == 0 {
+        return None;
+    }
+    let repo = open_repository(base_path).ok()?;
+    let run_ids = repo.list_run_ids().ok()?;
+    let recent = run_ids
+        .iter()
+        .rev()
+        .filter(|id| id.as_str() != current.as_str())
+        .take(window);
+    let mut total = 0.0;
+    let mut count = 0usize;
+    for run_id in recent {
+        let Ok(meta) = repo.get_run_metadata(run_id) else {
+            continue;
+        };
+        if let Some(secs) = meta.duration_secs {
+            total += secs;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(total / count as f64))
+}
+
 /// Subset of `candidates` that the run identified by `run_id` reports as
 /// passing (so they were "recovered" by the retry).
 fn recovered_tests(
@@ -749,6 +790,7 @@ fn emit_ci_output(
     run_id: &RunId,
     duration: Duration,
     history: &std::collections::HashMap<TestId, TestHistory>,
+    baseline_duration: Option<Duration>,
 ) -> Result<()> {
     match format {
         // Plain and Auto stay silent: the test runner already printed each
@@ -800,7 +842,8 @@ fn emit_ci_output(
             // GitHub-only: markdown summary + step outputs.
             if format == CiFormat::Github {
                 if let Some(path) = env.get("GITHUB_STEP_SUMMARY") {
-                    let summary = format_step_summary(run, flaky, history);
+                    let summary =
+                        format_step_summary(run, flaky, history, duration, baseline_duration);
                     std::fs::write(&path, summary)?;
                 }
                 write_github_output(env, run, flaky, run_id, duration)?;
@@ -1174,12 +1217,114 @@ fn write_details_block(out: &mut String, details: &str) {
     let _ = writeln!(out, "  </details>");
 }
 
+/// Human-readable `1m2.3s` / `4.56s` / `789ms` rendering of a duration for
+/// the step summary. Sub-second durations keep millisecond precision; longer
+/// ones round to a tenth of a second, and anything past a minute splits into
+/// `<m>m<s>s`.
+fn format_duration_human(d: Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 1.0 {
+        format!("{}ms", d.as_millis())
+    } else if secs < 60.0 {
+        format!("{:.2}s", secs)
+    } else {
+        let whole = secs.round() as u64;
+        format!("{}m{}s", whole / 60, whole % 60)
+    }
+}
+
+/// The runtime line shown under the counts table: wall-clock of the step, the
+/// summed per-test execution time (which exceeds wall-clock when tests run in
+/// parallel), and a comparison against the recent-runs average when history
+/// is available.
+fn format_runtime_line(
+    run: &TestRun,
+    duration: Duration,
+    baseline_duration: Option<Duration>,
+) -> String {
+    let mut line = format!("**Runtime:** {}", format_duration_human(duration));
+
+    if let Some(baseline) = baseline_duration {
+        let base = baseline.as_secs_f64();
+        if base > 0.0 {
+            let delta = (duration.as_secs_f64() - base) / base * 100.0;
+            // Round to a whole percent; treat anything under 1% as flat so we
+            // don't flag noise as a regression or improvement.
+            let rounded = delta.round() as i64;
+            let marker = if rounded > 0 {
+                format!("up {}%", rounded)
+            } else if rounded < 0 {
+                format!("down {}%", -rounded)
+            } else {
+                "no change".to_string()
+            };
+            let _ = write!(
+                line,
+                " ({} vs avg of last runs, {})",
+                marker,
+                format_duration_human(baseline)
+            );
+        }
+    }
+
+    if let Some(test_time) = run.total_duration() {
+        let _ = write!(
+            line,
+            "  \u{2014}  test time: {}",
+            format_duration_human(test_time)
+        );
+    }
+
+    line
+}
+
+/// Number of slowest tests listed in the step summary. Small enough to stay a
+/// glanceable pointer at what to optimise, not a full profile.
+const SUMMARY_SLOWEST_COUNT: usize = 5;
+
+/// Append a collapsible block listing the slowest tests by execution time.
+/// No-op when no result carries timing data (e.g. an adapter that doesn't
+/// report per-test durations).
+fn write_slowest_tests_block(out: &mut String, run: &TestRun) {
+    let mut timed: Vec<(&TestId, Duration)> = run
+        .results
+        .values()
+        .filter_map(|r| r.duration.map(|d| (&r.test_id, d)))
+        .collect();
+    if timed.is_empty() {
+        return;
+    }
+    // Slowest first; break ties on test id so the output is deterministic.
+    timed.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.as_str().cmp(b.0.as_str())));
+    timed.truncate(SUMMARY_SLOWEST_COUNT);
+
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "<details><summary>Slowest tests ({})</summary>",
+        timed.len()
+    );
+    let _ = writeln!(out);
+    for (test_id, d) in timed {
+        let _ = writeln!(
+            out,
+            "- `{}` — {}",
+            test_id.as_str(),
+            format_duration_human(d)
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "</details>");
+}
+
 /// Markdown summary written to `$GITHUB_STEP_SUMMARY`, which GitHub renders
 /// on the workflow run page.
 fn format_step_summary(
     run: &TestRun,
     flaky: &[TestId],
     history: &std::collections::HashMap<TestId, TestHistory>,
+    duration: Duration,
+    baseline_duration: Option<Duration>,
 ) -> String {
     let total = run.results.len();
     let mut passed = 0usize;
@@ -1217,6 +1362,15 @@ fn format_step_summary(
         skipped,
         flaky.len()
     );
+
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "{}",
+        format_runtime_line(run, duration, baseline_duration)
+    );
+
+    write_slowest_tests_block(&mut out, run);
 
     let mut failures: Vec<_> = run
         .results
@@ -1453,7 +1607,15 @@ mod tests {
     #[test]
     fn step_summary_counts_and_lists_failures() {
         let run = make_run();
-        let summary = format_step_summary(&run, &[], &HashMap::new());
+        // No per-test durations in the fixture, so no "Slowest tests" block;
+        // `None` baseline suppresses the vs-history comparison.
+        let summary = format_step_summary(
+            &run,
+            &[],
+            &HashMap::new(),
+            Duration::from_secs_f64(2.5),
+            None,
+        );
         // total=4, passed=1, failed=1, errored=1, skipped=1, flaky=0
         let expected = format!(
             "## Test results\n\
@@ -1461,6 +1623,8 @@ mod tests {
              | Total | Passed | Failed | Errored | Skipped | Flaky |\n\
              |------:|-------:|-------:|--------:|--------:|------:|\n\
              | 4 | 1 | 1 | 1 | 1 | 0 |\n\
+             \n\
+             **Runtime:** 2.50s\n\
              \n\
              <details><summary>Failing tests (2)</summary>\n\
              \n\
@@ -1477,7 +1641,13 @@ mod tests {
     fn step_summary_separates_flakes_from_hard_failures() {
         let run = make_run();
         let flaky = vec![TestId::new("tests.b")];
-        let summary = format_step_summary(&run, &flaky, &HashMap::new());
+        let summary = format_step_summary(
+            &run,
+            &flaky,
+            &HashMap::new(),
+            Duration::from_secs_f64(2.5),
+            None,
+        );
         // tests.b is now flaky, so failing list shows only tests.c, and
         // there's a separate flaky-tests block at the end.
         let expected = format!(
@@ -1486,6 +1656,8 @@ mod tests {
              | Total | Passed | Failed | Errored | Skipped | Flaky |\n\
              |------:|-------:|-------:|--------:|--------:|------:|\n\
              | 4 | 1 | 1 | 1 | 1 | 1 |\n\
+             \n\
+             **Runtime:** 2.50s\n\
              \n\
              <details><summary>Failing tests (1)</summary>\n\
              \n\
@@ -1501,6 +1673,77 @@ mod tests {
              </details>\n"
         );
         assert_eq!(summary, expected);
+    }
+
+    #[test]
+    fn format_duration_human_scales_by_magnitude() {
+        assert_eq!(format_duration_human(Duration::from_millis(789)), "789ms");
+        assert_eq!(
+            format_duration_human(Duration::from_secs_f64(4.567)),
+            "4.57s"
+        );
+        assert_eq!(format_duration_human(Duration::from_secs(62)), "1m2s");
+    }
+
+    #[test]
+    fn runtime_line_reports_delta_vs_baseline() {
+        let run = make_run();
+        // 44s now against a 40s average is +10%. The fixture has no per-test
+        // timing, so the "test time" tail is omitted.
+        let line =
+            format_runtime_line(&run, Duration::from_secs(44), Some(Duration::from_secs(40)));
+        assert_eq!(
+            line,
+            "**Runtime:** 44.00s (up 10% vs avg of last runs, 40.00s)"
+        );
+    }
+
+    #[test]
+    fn runtime_line_reports_improvement_and_test_time() {
+        let mut run = TestRun::new(RunId::new("t"));
+        run.add_result(TestResult::success("tests.a").with_duration(Duration::from_secs(3)));
+        run.add_result(TestResult::success("tests.b").with_duration(Duration::from_secs(2)));
+        // Wall-clock 4s vs 5s average is -20%; summed test time is 5s.
+        let line = format_runtime_line(&run, Duration::from_secs(4), Some(Duration::from_secs(5)));
+        assert_eq!(
+            line,
+            "**Runtime:** 4.00s (down 20% vs avg of last runs, 5.00s)  \u{2014}  test time: 5.00s"
+        );
+    }
+
+    #[test]
+    fn runtime_line_omits_comparison_without_baseline() {
+        let run = make_run();
+        let line = format_runtime_line(&run, Duration::from_secs_f64(1.5), None);
+        assert_eq!(line, "**Runtime:** 1.50s");
+    }
+
+    #[test]
+    fn slowest_tests_block_lists_top_by_duration() {
+        let mut run = TestRun::new(RunId::new("s"));
+        run.add_result(TestResult::success("tests.fast").with_duration(Duration::from_millis(10)));
+        run.add_result(TestResult::success("tests.slow").with_duration(Duration::from_secs(3)));
+        run.add_result(TestResult::success("tests.mid").with_duration(Duration::from_secs(1)));
+        let mut out = String::new();
+        write_slowest_tests_block(&mut out, &run);
+        let expected = "\n\
+             <details><summary>Slowest tests (3)</summary>\n\
+             \n\
+             - `tests.slow` — 3.00s\n\
+             - `tests.mid` — 1.00s\n\
+             - `tests.fast` — 10ms\n\
+             \n\
+             </details>\n";
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn slowest_tests_block_empty_without_timing() {
+        // `make_run` results carry no durations, so the block is suppressed.
+        let run = make_run();
+        let mut out = String::new();
+        write_slowest_tests_block(&mut out, &run);
+        assert_eq!(out, "");
     }
 
     #[test]
@@ -1700,6 +1943,7 @@ mod tests {
             &RunId::new("0"),
             Duration::ZERO,
             &HashMap::new(),
+            None,
         )
         .unwrap();
         // ui.output() trims the trailing newline before recording, so the
@@ -1740,6 +1984,7 @@ mod tests {
             &RunId::new("0"),
             Duration::ZERO,
             &HashMap::new(),
+            None,
         )
         .unwrap();
         let body = std::fs::read_to_string(temp.path()).unwrap();
@@ -1769,6 +2014,7 @@ mod tests {
             &RunId::new("forge"),
             Duration::ZERO,
             &HashMap::new(),
+            None,
         )
         .unwrap();
         assert_eq!(ui.output, Vec::<String>::new());
@@ -1804,6 +2050,7 @@ mod tests {
             &RunId::new("forge"),
             Duration::ZERO,
             &HashMap::new(),
+            None,
         )
         .unwrap();
         let summary = std::fs::read_to_string(summary_temp.path()).unwrap();
@@ -1831,6 +2078,7 @@ mod tests {
             &RunId::new("wp"),
             Duration::ZERO,
             &HashMap::new(),
+            None,
         )
         .unwrap();
         assert_eq!(ui.output, Vec::<String>::new());
@@ -1899,7 +2147,7 @@ mod tests {
         );
         // tests.c has no history — it's a brand-new test; the hint should
         // be omitted rather than printing a misleading "0 of 0".
-        let summary = format_step_summary(&run, &[], &history);
+        let summary = format_step_summary(&run, &[], &history, Duration::from_secs(1), None);
         assert!(
             summary.contains("- `tests.b` — boom (failed 7 of last 10)\n"),
             "missing history hint for tests.b: {summary}"
@@ -1925,7 +2173,7 @@ mod tests {
                 runs_seen: 10,
             },
         );
-        let summary = format_step_summary(&run, &flaky, &history);
+        let summary = format_step_summary(&run, &flaky, &history, Duration::from_secs(1), None);
         assert!(
             summary.contains("- `tests.b` (passed on retry) (failed 4 of last 10)\n"),
             "missing flake history hint: {summary}"
@@ -1940,7 +2188,7 @@ mod tests {
         let mut run = TestRun::new(RunId::new("0"));
         let long: String = (0..50).map(|i| format!("line {i}\n")).collect();
         run.add_result(TestResult::failure("tests.big", "oops").with_details(&long));
-        let summary = format_step_summary(&run, &[], &HashMap::new());
+        let summary = format_step_summary(&run, &[], &HashMap::new(), Duration::from_secs(1), None);
         assert!(
             summary.contains("  line 0\n"),
             "first line missing: {summary}"
@@ -1965,7 +2213,7 @@ mod tests {
         // still appear in the failing list but with no nested block.
         let mut run = TestRun::new(RunId::new("0"));
         run.add_result(TestResult::error("tests.nodetail", "gone"));
-        let summary = format_step_summary(&run, &[], &HashMap::new());
+        let summary = format_step_summary(&run, &[], &HashMap::new(), Duration::from_secs(1), None);
         assert!(summary.contains("- `tests.nodetail` — gone\n"));
         assert!(!summary.contains("<summary>traceback</summary>"));
     }
@@ -2058,6 +2306,7 @@ mod tests {
             &RunId::new("99"),
             Duration::ZERO,
             &HashMap::new(),
+            None,
         )
         .unwrap();
         let body = std::fs::read_to_string(temp.path()).unwrap();
