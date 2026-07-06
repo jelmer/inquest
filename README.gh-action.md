@@ -3,8 +3,10 @@
 `inq ci` formats test results as GitHub Actions workflow commands when it
 detects it's running inside a workflow. Failures show up as red annotations
 on the changed lines of the PR diff, each failing test gets its own
-foldable section in the workflow log, and a markdown summary with
-pass/fail counts is rendered on the workflow run page.
+foldable section in the workflow log, and a markdown summary is rendered on
+the workflow run page: pass/fail counts, total runtime (with a comparison
+against the recent-runs average when history is cached), and the slowest
+tests.
 
 ## Using the `jelmer/inquest` action
 
@@ -30,6 +32,9 @@ Once `v0` is tagged, pin to `@v0` (or a specific release) instead of
 - `version` (default `latest`): inquest release to install, e.g. `0.1.5`.
 - `args` (default empty): extra arguments forwarded to `inq ci`, e.g.
   `--retry=2` or `-j 4`.
+- `fail-fast` (default `false`): set to `true` to stop the run after the
+  first test failure. With cached history the failure-prone tests run
+  first, so a known regression fails the job quickly.
 - `working-directory` (default workspace root): where to run `inq ci` and
   where the `.inquest` cache lives.
 - `cache` (default `true`): set to `false` to skip the history cache.
