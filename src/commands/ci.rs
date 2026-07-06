@@ -619,6 +619,7 @@ impl CiCommand {
             &[],
             active_profile,
             false,
+            false,
         )?;
 
         let bytes = match stderr_capture.lock() {

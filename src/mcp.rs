@@ -1935,6 +1935,7 @@ impl InquestMcpService {
                                     &[],
                                     None,
                                     false,
+                                    false,
                                 ) {
                                     tracing::error!(
                                         "Failed to persist background run results: {}",

@@ -424,6 +424,7 @@ pub fn persist_and_display_run(
     filter_tags: &[String],
     profile: Option<String>,
     eta_debug: bool,
+    quiet_summary: bool,
 ) -> Result<(i32, RunId)> {
     let exit_code = output.exit_code();
     let crate::test_executor::RunOutput {
@@ -471,14 +472,18 @@ pub fn persist_and_display_run(
         predicted_duration,
     )?;
 
-    display_test_summary(ui, &run_id, &combined_run, filter_tags)?;
+    if !quiet_summary {
+        display_test_summary(ui, &run_id, &combined_run, filter_tags)?;
+    }
     if eta_debug {
         if let Some(predicted) = predicted_duration {
             report_eta_accuracy(ui, predicted, duration, calibration_factor)?;
         }
     }
-    display_failed_tests(ui, &combined_run, filter_tags)?;
-    warn_slow_tests(ui, &combined_run, historical_times)?;
+    if !quiet_summary {
+        display_failed_tests(ui, &combined_run, filter_tags)?;
+        warn_slow_tests(ui, &combined_run, historical_times)?;
+    }
 
     Ok((exit_code, run_id))
 }
@@ -960,6 +965,7 @@ mod tests {
             &[],
             None,
             false,
+            false,
         )
         .unwrap();
         // Without --eta-debug the summary stops at the pass/fail counts;
@@ -994,6 +1000,7 @@ mod tests {
             &[],
             None,
             true,
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -1048,6 +1055,7 @@ mod tests {
             &historical,
             &[],
             None,
+            false,
             false,
         )
         .unwrap();
@@ -1140,6 +1148,7 @@ mod tests {
             &historical,
             &[],
             None,
+            false,
             false,
         )
         .unwrap();

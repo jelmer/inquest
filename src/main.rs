@@ -1238,6 +1238,7 @@ fn run() {
                 implicit_run,
                 eta_debug: cli.eta_debug,
                 nice,
+                quiet_summary: false,
             };
             cmd.execute(&mut ui)
         }

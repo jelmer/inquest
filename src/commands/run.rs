@@ -115,6 +115,11 @@ pub struct RunCommand {
     /// Niceness increment for spawned test processes (unix only). See
     /// [`crate::test_executor::TestExecutorConfig::nice`].
     pub nice: Option<i32>,
+    /// Suppress the per-run summary block (totals table, failed-test list,
+    /// slow-test warnings). Set by drivers like `inq stress` that already
+    /// present their own aggregated report and would otherwise emit the
+    /// full summary once per iteration.
+    pub quiet_summary: bool,
 }
 
 impl RunCommand {
@@ -208,6 +213,7 @@ impl RunCommand {
             filter_tags,
             active_profile.map(|s| s.to_string()),
             self.eta_debug,
+            self.quiet_summary,
         )?;
         if let Some(buf) = stderr_capture {
             let bytes = match buf.lock() {
