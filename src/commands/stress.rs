@@ -15,6 +15,7 @@ use crate::repository::{
     summarise_flakiness, ConcurrencyBreakdown, Repository, RunId, TestFlakiness, TestId,
 };
 use crate::ui::UI;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -175,6 +176,10 @@ impl StressCommand {
             // Each iteration runs the whole (filtered) suite, not just failing
             // tests; persist results as a full run, not a partial update.
             test_order: self.test_order.clone(),
+            // The aggregated stress report at the end already lists failing
+            // and flaky tests; the per-iteration pass/fail table would just
+            // scroll past N times without adding information.
+            quiet_summary: true,
             ..Default::default()
         }
     }
@@ -215,18 +220,24 @@ impl Command for StressCommand {
 
         let iteration_concurrency = self.resolve_iteration_concurrency(ui)?;
 
-        for iteration in 1..=self.iterations {
-            ui.output(&format!(
-                "\n=== Stress iteration {}/{} ===",
-                iteration, self.iterations
-            ))?;
+        let confirm_iterations = self
+            .confirm_iterations
+            .unwrap_or(DEFAULT_CONFIRM_ITERATIONS);
+        // Reserve room for both phases; the bar's length is trimmed to
+        // match the actual work if phase 2 turns out to be empty or gets
+        // skipped by --stop-on-flaky.
+        let planned_total = (self.iterations + confirm_iterations) as u64;
+        let stress_bar = make_stress_progress_bar(planned_total);
+        stress_bar.set_message("initial");
 
+        for iteration in 1..=self.iterations {
             let run_cmd = self.build_iteration(iteration_concurrency, None);
             let output = run_cmd.execute_returning_run_id(ui)?;
 
             if let Some(run_id) = output.run_id {
                 run_ids.push(run_id);
             } else {
+                stress_bar.finish_and_clear();
                 // No run was recorded (e.g. no tests matched the filters).
                 // Without runs to compare we can't measure flakiness, so bail
                 // out early rather than silently doing nothing.
@@ -241,10 +252,13 @@ impl Command for StressCommand {
                 any_failure = true;
             }
 
+            stress_bar.inc(1);
+
             if self.stop_on_flaky && run_ids.len() >= 2 {
                 let (summary, messages) =
                     summarise_run_ids(&*open_repository(self.base_path.as_deref())?, &run_ids)?;
                 if !summary.is_empty() {
+                    stress_bar.finish_and_clear();
                     ui.output(&format!(
                         "\nObserved {} flaky test(s) after {} iteration(s); stopping early.",
                         summary.len(),
@@ -258,32 +272,28 @@ impl Command for StressCommand {
         // Phase 1 done. Compute suspects + their top siblings and re-run
         // that focused set so the final failure-rate numbers reflect tens
         // of observations rather than the noisy initial pass.
-        let confirm_iterations = self
-            .confirm_iterations
-            .unwrap_or(DEFAULT_CONFIRM_ITERATIONS);
         if confirm_iterations > 0 {
             let confirm_set = {
                 let repo = open_repository(self.base_path.as_deref())?;
                 let (_summary, analyses) = summarise_run_ids(&*repo, &run_ids)?;
                 build_confirm_set(&analyses, DEFAULT_CONFIRM_SIBLINGS_PER_SUSPECT)
             };
-            if !confirm_set.is_empty() {
-                ui.output(&format!(
-                    "\n=== Confirmation phase: {} suspect(s)+sibling(s) x {} iterations ===",
-                    confirm_set.len(),
-                    confirm_iterations,
-                ))?;
-                for iteration in 1..=confirm_iterations {
-                    ui.output(&format!(
-                        "\n--- Confirm iteration {}/{} ---",
-                        iteration, confirm_iterations
-                    ))?;
+            if confirm_set.is_empty() {
+                // No suspects to re-verify; trim the bar so it reads 100 %.
+                stress_bar.set_length(self.iterations as u64);
+            } else {
+                stress_bar.set_message(format!(
+                    "confirm ({} suspect(s)+sibling(s))",
+                    confirm_set.len()
+                ));
+                for _ in 1..=confirm_iterations {
                     let run_cmd =
                         self.build_iteration(iteration_concurrency, Some(confirm_set.clone()));
                     let output = run_cmd.execute_returning_run_id(ui)?;
                     if let Some(run_id) = output.run_id {
                         run_ids.push(run_id);
                     } else {
+                        stress_bar.finish_and_clear();
                         ui.output(
                             "\nConfirmation phase aborted: no test run was recorded. \
                              Reporting from initial pass only.",
@@ -293,9 +303,12 @@ impl Command for StressCommand {
                     if output.exit_code != 0 {
                         any_failure = true;
                     }
+                    stress_bar.inc(1);
                 }
             }
         }
+
+        stress_bar.finish_and_clear();
 
         let repo = open_repository(self.base_path.as_deref())?;
         let (summary, messages) = summarise_run_ids(&*repo, &run_ids)?;
@@ -445,6 +458,31 @@ impl StressCommand {
         }
         Ok(1)
     }
+}
+
+/// Build the overall stress progress bar spanning `total` iterations
+/// (initial + confirmation). Hidden when progress is disabled globally
+/// or when there is no work to show.
+fn make_stress_progress_bar(total: u64) -> ProgressBar {
+    if total == 0 || crate::config::progress_disabled() {
+        return ProgressBar::hidden();
+    }
+    let pb = ProgressBar::new(total);
+    // No steady tick: the per-iteration `inq run` progress bars own their
+    // own MultiProgress and would fight with an autonomously-redrawing
+    // outer bar over the terminal. The stress bar redraws when we call
+    // `inc()` at iteration boundaries, which is when nothing else is
+    // actively drawing.
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(
+                "Stress {msg} [{elapsed_precise}] {bar:40.cyan/blue} \
+                 {pos}/{len} iterations ({eta} remaining)",
+            )
+            .unwrap()
+            .progress_chars("█▓▒░  "),
+    );
+    pb
 }
 
 /// Render up to `max_lines` of an indented details/traceback block,
