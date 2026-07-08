@@ -85,34 +85,26 @@ fn detect_project(base: &Path) -> Vec<Detection> {
         });
     }
 
-    // Maven / Gradle — drive the build tool through `jvmtest-subunit`
-    // (ships with python-subunit). The wrapper auto-detects the
-    // build tool from the current directory, spawns it, watches its
-    // reports directory live, and translates inquest's $LISTOPT /
-    // $IDOPTION into the build tool's selection vocabulary
-    // (`-Dtest=` for Maven, `--tests` for Gradle). Listing is done
-    // by walking src/test/java and src/test/kotlin for conventionally-
-    // named test classes; methods created at runtime
-    // (`@ParameterizedTest`, `@TestFactory`) aren't statically
-    // discoverable and are absent from listings, but executing them
-    // by ID works.
+    // Maven — compile tests and materialise the runtime classpath, then
+    // run `junit-subunit` against the compiled classes. Test ids are
+    // JUnit Platform unique ids
+    // (`[engine:junit-jupiter]/[class:Foo]/[method:bar()]`). Methods
+    // created at runtime (`@ParameterizedTest`, `@TestFactory` dynamic
+    // tests) aren't discoverable by `--list` but can still be executed
+    // by id.
     if has_maven(base) {
         detections.push(Detection {
             name: "Maven (JVM)",
-            test_command: "jvmtest-subunit $LISTOPT $IDOPTION".to_string(),
-            test_id_option: Some("--id-file $IDFILE"),
+            test_command:
+                "mvn -q test-compile dependency:build-classpath -Dmdep.outputFile=target/cp.txt \
+                 && junit-subunit \
+                 --scan-classpath=target/test-classes \
+                 -cp \"target/test-classes:target/classes:$(cat target/cp.txt)\" \
+                 $LISTOPT $IDOPTION"
+                    .to_string(),
+            test_id_option: Some("--load-list=$IDFILE"),
             test_list_option: Some("--list"),
-            group_regex: Some("^(.*)::[^:]+$"),
-        });
-    }
-
-    if has_gradle(base) {
-        detections.push(Detection {
-            name: "Gradle (JVM)",
-            test_command: "jvmtest-subunit $LISTOPT $IDOPTION".to_string(),
-            test_id_option: Some("--id-file $IDFILE"),
-            test_list_option: Some("--list"),
-            group_regex: Some("^(.*)::[^:]+$"),
+            group_regex: Some(r"^(.*/\[class:[^\]]+\])/\[method:.*$"),
         });
     }
 
@@ -168,24 +160,6 @@ fn has_go(base: &Path) -> bool {
 /// Check if the project is a Maven project.
 fn has_maven(base: &Path) -> bool {
     base.join("pom.xml").exists()
-}
-
-/// Check if the project is a Gradle project. Both Groovy (`build.gradle`)
-/// and Kotlin (`build.gradle.kts`) DSLs are recognised, plus the
-/// `settings.gradle*` markers used by multi-module builds whose root
-/// directory has no top-level `build.gradle`.
-fn has_gradle(base: &Path) -> bool {
-    for name in &[
-        "build.gradle",
-        "build.gradle.kts",
-        "settings.gradle",
-        "settings.gradle.kts",
-    ] {
-        if base.join(name).exists() {
-            return true;
-        }
-    }
-    false
 }
 
 /// Check if the project uses pytest.
@@ -394,7 +368,7 @@ impl Command for AutoCommand {
         if detections.is_empty() {
             ui.error("Could not detect project type")?;
             ui.error(
-                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), Maven (JVM), Gradle (JVM), prove (Perl), vitest (Node.js), jest (Node.js)",
+                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), Maven (JVM), prove (Perl), vitest (Node.js), jest (Node.js)",
             )?;
             return Ok(1);
         }
@@ -654,7 +628,7 @@ mod tests {
             ui.errors,
             vec![
                 "Could not detect project type",
-                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), Maven (JVM), Gradle (JVM), prove (Perl), vitest (Node.js), jest (Node.js)",
+                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), Maven (JVM), prove (Perl), vitest (Node.js), jest (Node.js)",
             ]
         );
     }
@@ -716,74 +690,17 @@ mod tests {
         let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
         assert_eq!(
             content,
-            "test_command = \"jvmtest-subunit $LISTOPT $IDOPTION\"\n\
-             test_id_option = \"--id-file $IDFILE\"\n\
-             test_list_option = \"--list\"\n\
-             group_regex = \"^(.*)::[^:]+$\"\n"
+            concat!(
+                "test_command = \"mvn -q test-compile dependency:build-classpath ",
+                "-Dmdep.outputFile=target/cp.txt && junit-subunit ",
+                "--scan-classpath=target/test-classes ",
+                "-cp \\\"target/test-classes:target/classes:$(cat target/cp.txt)\\\" ",
+                "$LISTOPT $IDOPTION\"\n",
+                "test_id_option = \"--load-list=$IDFILE\"\n",
+                "test_list_option = \"--list\"\n",
+                "group_regex = \"^(.*/\\\\[class:[^\\\\]]+\\\\])/\\\\[method:.*$\"\n",
+            )
         );
-    }
-
-    #[test]
-    fn test_auto_detect_gradle_groovy() {
-        let temp = TempDir::new().unwrap();
-        std::fs::write(temp.path().join("build.gradle"), "apply plugin: 'java'\n").unwrap();
-
-        let mut ui = TestUI::new();
-        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
-        let result = cmd.execute(&mut ui).unwrap();
-
-        assert_eq!(result, 0);
-        assert_eq!(
-            ui.output,
-            vec![format!(
-                "Detected Gradle (JVM) project, wrote {}",
-                temp.path().join("inquest.toml").display()
-            )]
-        );
-
-        let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
-        assert_eq!(
-            content,
-            "test_command = \"jvmtest-subunit $LISTOPT $IDOPTION\"\n\
-             test_id_option = \"--id-file $IDFILE\"\n\
-             test_list_option = \"--list\"\n\
-             group_regex = \"^(.*)::[^:]+$\"\n"
-        );
-    }
-
-    #[test]
-    fn test_auto_detect_gradle_kotlin() {
-        // The Kotlin DSL marker (build.gradle.kts) on its own should
-        // also trigger Gradle detection.
-        let temp = TempDir::new().unwrap();
-        std::fs::write(temp.path().join("build.gradle.kts"), "plugins { java }\n").unwrap();
-
-        let mut ui = TestUI::new();
-        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
-        let result = cmd.execute(&mut ui).unwrap();
-
-        assert_eq!(result, 0);
-        assert!(ui.output[0].contains("Detected Gradle (JVM)"));
-    }
-
-    #[test]
-    fn test_auto_detect_gradle_settings_only() {
-        // Multi-module Gradle builds often have only `settings.gradle`
-        // at the root (the per-module `build.gradle` is one level down).
-        // Detect from the settings file alone.
-        let temp = TempDir::new().unwrap();
-        std::fs::write(
-            temp.path().join("settings.gradle"),
-            "rootProject.name = 'demo'\n",
-        )
-        .unwrap();
-
-        let mut ui = TestUI::new();
-        let cmd = AutoCommand::new(Some(temp.path().to_string_lossy().to_string()));
-        let result = cmd.execute(&mut ui).unwrap();
-
-        assert_eq!(result, 0);
-        assert!(ui.output[0].contains("Detected Gradle (JVM)"));
     }
 
     #[test]
