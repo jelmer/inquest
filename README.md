@@ -406,41 +406,28 @@ are created at runtime by `t.Run` and aren't statically discoverable,
 so they're absent from listings — but executing them by ID works
 (e.g. `inq run --failing` correctly re-runs `pkg::TestX/sub_one`).
 
-#### JVM (Maven / Gradle)
+#### JVM (Maven)
 
-Drive the build tool through `jvmtest-subunit` (ships with
-python-subunit):
+Use [`junit-subunit`](https://github.com/jelmer/junit-subunit), a
+JUnit Platform runner that emits a subunit v2 stream directly. It
+needs the compiled test classes and the full runtime classpath, so
+`inq auto` chains `mvn test-compile dependency:build-classpath` in
+front of it:
 
 ```toml
-test_command = "jvmtest-subunit $LISTOPT $IDOPTION"
-test_id_option = "--id-file $IDFILE"
+test_command = "mvn -q test-compile dependency:build-classpath -Dmdep.outputFile=target/cp.txt && junit-subunit --scan-classpath=target/test-classes -cp \"target/test-classes:target/classes:$(cat target/cp.txt)\" $LISTOPT $IDOPTION"
+test_id_option = "--load-list=$IDFILE"
 test_list_option = "--list"
+group_regex = "^(.*/\\[class:[^\\]]+\\])/\\[method:.*$"
 ```
 
-`inq auto` generates this from `pom.xml` or
-`build.gradle{,.kts}`/`settings.gradle{,.kts}`. The wrapper:
-
-* auto-detects Maven vs Gradle from the working directory;
-* spawns the build tool and watches its reports directory live so
-  per-class results stream into `inq run` as each test class finishes;
-* enumerates tests for `--list` by walking `src/test/java` and
-  `src/test/kotlin` for conventionally-named test classes
-  (`*Test`/`*Tests`/`*TestCase`/`*IT`);
-* translates `--id-file` IDs (`Class` or `Class::method`) to the
-  build tool's selection syntax — `-Dtest=Class1,Class2#methodA+methodB`
-  for Maven, `--tests Class1 --tests Class2.methodA` for Gradle;
-* forwards build-tool stdout/stderr so users still see compile errors
-  and progress.
-
-`inq run --failing`, `inq run --isolated`, and `inq list-tests` all
-work — methods created at runtime (`@ParameterizedTest`,
-`@TestFactory` dynamic tests) aren't statically discoverable and so
-are absent from listings, but executing them by ID works.
-
-The wrapper takes optional flags for non-default layouts:
-`jvmtest-subunit --tool gradle --reports-dir build/custom-reports`,
-or pass extra build args after `--`:
-`jvmtest-subunit -- -Dmaven.test.skip=false`.
+`inq auto` generates this when it finds `pom.xml`. Test ids are the
+JUnit Platform unique id
+(`[engine:junit-jupiter]/[class:Foo]/[method:bar()]`); `group_regex`
+groups them by class so `inq run` schedules related tests together.
+Methods created at runtime (`@ParameterizedTest`, `@TestFactory`
+dynamic tests) aren't discoverable by `--list` but can still be
+executed by id.
 
 #### Node.js with Vitest
 
