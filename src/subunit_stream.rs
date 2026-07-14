@@ -99,6 +99,87 @@ fn convert_status_with_progress(status: SubunitTestStatus) -> Option<(TestStatus
     }
 }
 
+/// Accumulated file attachments for a single test, keyed by attachment name in
+/// arrival order. A subunit writer may split one logical file across several
+/// packets (`python -m subunit.run` chunks tracebacks), so content for a
+/// repeated name is appended rather than replaced.
+#[derive(Default)]
+struct Attachments {
+    files: Vec<(String, String)>,
+}
+
+impl Attachments {
+    fn push(&mut self, name: &str, content: &str) {
+        match self.files.iter_mut().find(|(n, _)| n == name) {
+            Some((_, existing)) => existing.push_str(content),
+            None => self.files.push((name.to_string(), content.to_string())),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    fn get(&self, name: &str) -> Option<&str> {
+        self.files
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, c)| c.as_str())
+    }
+
+    /// The failure detail to store on the `TestResult`: the traceback if the
+    /// runner sent one, otherwise every other attachment concatenated, so
+    /// runners that only report captured stdout/stderr still surface something.
+    fn details(&self) -> Option<String> {
+        if let Some(tb) = self.get("traceback") {
+            return Some(tb.to_string());
+        }
+        let joined: String = self
+            .files
+            .iter()
+            .filter(|(name, _)| name != "_tags")
+            .map(|(_, content)| content.as_str())
+            .collect();
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
+    }
+}
+
+/// One-line summary of a failure, for callers that show a single line per test
+/// (CI annotations, the step summary, `inq failing`). For a Python traceback
+/// that is the trailing exception line, which carries the actual assertion;
+/// the first line is the useless `Traceback (most recent call last):` banner.
+fn summary_line(details: &str) -> Option<String> {
+    details
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+/// Merge attachments buffered from preceding packets with any file content
+/// carried on the terminal status packet itself, and derive the result's
+/// `message` (one-line summary) and `details` (the full traceback).
+///
+/// Both shapes occur in the wild: `python -m subunit.run` sends the traceback
+/// as separate file-content packets before an empty status packet, while our
+/// own `write_stream` attaches it directly to the status packet.
+fn result_content(
+    mut buffered: Attachments,
+    status_file: Option<(&str, &[u8])>,
+) -> (Option<String>, Option<String>) {
+    if let Some((name, content)) = status_file {
+        buffered.push(name, &String::from_utf8_lossy(content));
+    }
+    let details = buffered.details();
+    let message = details.as_deref().and_then(summary_line);
+    (message, details)
+}
+
 /// Parse a subunit stream from a byte slice into a TestRun
 ///
 /// This is optimized for memory-mapped files and avoids copying data.
@@ -142,7 +223,7 @@ where
     // Track output for the current test (for filtering)
     let mut current_test_output: Vec<u8> = Vec::new();
     // Buffer file attachments per test until we know the status
-    let mut pending_attachments: std::collections::HashMap<String, Vec<(String, String)>> =
+    let mut pending_attachments: std::collections::HashMap<String, Attachments> =
         std::collections::HashMap::new();
 
     // Iterate over the subunit stream
@@ -203,28 +284,14 @@ where
                     // Buffer them until we know the test status
                     if event.status == SubunitTestStatus::Undefined && event.file.file.is_some() {
                         if let Some((name, content)) = &event.file.file {
-                            let content_str = String::from_utf8_lossy(content).to_string();
-
-                            // Store tags with the first attachment
-                            let tags = event.tags.clone();
-
-                            pending_attachments
-                                .entry(test_id_str.clone())
-                                .or_default()
-                                .push((name.clone(), content_str));
-
-                            // Store tags if this is the first attachment
-                            if pending_attachments
-                                .get(test_id_str)
-                                .is_some_and(|v| v.len() == 1)
-                            {
-                                if let Some(tags) = tags {
-                                    pending_attachments
-                                        .entry(test_id_str.clone())
-                                        .or_default()
-                                        .insert(0, ("_tags".to_string(), tags.join(" ")));
+                            let entry = pending_attachments.entry(test_id_str.clone()).or_default();
+                            // Tags ride along with the first attachment.
+                            if entry.is_empty() {
+                                if let Some(tags) = event.tags.clone() {
+                                    entry.push("_tags", &tags.join(" "));
                                 }
                             }
+                            entry.push(name, &String::from_utf8_lossy(content));
                         }
                         continue;
                     }
@@ -250,8 +317,11 @@ where
 
                     progress_callback(test_id_str, progress_status);
 
-                    // Now that we know the status, flush any pending file attachments
-                    if let Some(attachments) = pending_attachments.remove(test_id_str) {
+                    // Now that we know the status, flush any pending file
+                    // attachments. Keep them around afterwards: they also
+                    // carry the traceback we store on the `TestResult`.
+                    let attachments = pending_attachments.remove(test_id_str).unwrap_or_default();
+                    {
                         let is_failure = matches!(
                             progress_status,
                             ProgressStatus::Failed | ProgressStatus::UnexpectedSuccess
@@ -280,13 +350,10 @@ where
                                 format!("{}: {}\n", status_str, test_id_str).as_bytes(),
                             );
 
-                            // Show tags if present (stored as first item with name "_tags")
-                            if let Some((name, tags_str)) = attachments.first() {
-                                if name == "_tags" {
-                                    output.extend_from_slice(
-                                        format!("tags: {}\n", tags_str).as_bytes(),
-                                    );
-                                }
+                            // Show tags if present
+                            if let Some(tags_str) = attachments.get("_tags") {
+                                output
+                                    .extend_from_slice(format!("tags: {}\n", tags_str).as_bytes());
                             }
 
                             // Separator line
@@ -294,7 +361,7 @@ where
 
                             // Show file attachments
                             let mut has_traceback = false;
-                            for (name, content) in &attachments {
+                            for (name, content) in &attachments.files {
                                 if name == "_tags" {
                                     continue; // Skip tags, already shown
                                 }
@@ -319,13 +386,16 @@ where
                         }
                     }
 
-                    // Extract file content as message/details (for storage in TestResult)
-                    let (message, details) = if let Some((_name, content)) = &event.file.file {
-                        let content_str = String::from_utf8_lossy(content).to_string();
-                        (Some(content_str.clone()), Some(content_str))
-                    } else {
-                        (None, None)
-                    };
+                    // Store the traceback on the result. It arrives either in
+                    // the preceding attachment packets or on this status packet.
+                    let (message, details) = result_content(
+                        attachments,
+                        event
+                            .file
+                            .file
+                            .as_ref()
+                            .map(|(name, content)| (name.as_str(), content.as_slice())),
+                    );
 
                     // Show any buffered output for this test
                     match output_filter {
@@ -404,6 +474,8 @@ pub fn parse_stream<R: Read>(reader: R, run_id: RunId) -> Result<TestRun> {
     let mut test_run = TestRun::new(run_id);
     let mut start_times: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
     let mut consecutive_errors = 0;
+    // Buffer file attachments per test until we see the terminal status event
+    let mut pending_attachments: HashMap<String, Attachments> = HashMap::new();
 
     // Iterate over the subunit stream
     for item in iter_stream(reader) {
@@ -444,6 +516,18 @@ pub fn parse_stream<R: Read>(reader: R, run_id: RunId) -> Result<TestRun> {
             ScannedItem::Event(event) => {
                 consecutive_errors = 0; // Reset on any valid event
                 if let Some(ref test_id_str) = event.test_id {
+                    // Buffer file attachments (tracebacks, captured output) that
+                    // arrive in their own packets ahead of the status event.
+                    if event.status == SubunitTestStatus::Undefined {
+                        if let Some((name, content)) = &event.file.file {
+                            pending_attachments
+                                .entry(test_id_str.clone())
+                                .or_default()
+                                .push(name, &String::from_utf8_lossy(content));
+                        }
+                        continue;
+                    }
+
                     // Track start events for duration calculation
                     if event.status == SubunitTestStatus::InProgress {
                         if let Some(timestamp) = event.timestamp {
@@ -463,15 +547,16 @@ pub fn parse_stream<R: Read>(reader: R, run_id: RunId) -> Result<TestRun> {
                     let test_id = TestId::new(test_id_str.clone());
 
                     // Extract tags
-                    let tags = event.tags.unwrap_or_default();
+                    let tags = event.tags.clone().unwrap_or_default();
 
-                    // Extract file content as message/details
-                    let (message, details) = if let Some((_name, content)) = event.file.file {
-                        let content_str = String::from_utf8_lossy(&content).to_string();
-                        (Some(content_str.clone()), Some(content_str))
-                    } else {
-                        (None, None)
-                    };
+                    let (message, details) = result_content(
+                        pending_attachments.remove(test_id_str).unwrap_or_default(),
+                        event
+                            .file
+                            .file
+                            .as_ref()
+                            .map(|(name, content)| (name.as_str(), content.as_slice())),
+                    );
 
                     // Calculate duration from start/stop timestamps
                     let duration = if let (Some(start_time), Some(end_time)) =
@@ -707,6 +792,118 @@ mod tests {
         assert_eq!(parsed.total_tests(), 2);
         assert_eq!(parsed.count_successes(), 1);
         assert_eq!(parsed.count_failures(), 1);
+    }
+
+    /// Serialize a stream the way `python -m subunit.run` does: the traceback
+    /// arrives in its own file-content packets with no status, split across
+    /// several chunks, and the terminal status packet carries no file at all.
+    /// Our own `write_stream` attaches the traceback to the status packet
+    /// instead, so a roundtrip through it would not exercise this path.
+    fn write_python_style_failure(test_id: &str, traceback_chunks: &[&str]) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        Event::new(SubunitTestStatus::InProgress)
+            .test_id(test_id)
+            .build()
+            .serialize(&mut buffer)
+            .unwrap();
+        for chunk in traceback_chunks {
+            Event::new(SubunitTestStatus::Undefined)
+                .test_id(test_id)
+                .mime_type("text/x-traceback; charset=\"utf8\"; language=\"python\"")
+                .file_content("traceback", chunk.as_bytes())
+                .build()
+                .serialize(&mut buffer)
+                .unwrap();
+        }
+        Event::new(SubunitTestStatus::Failed)
+            .test_id(test_id)
+            .build()
+            .serialize(&mut buffer)
+            .unwrap();
+        buffer
+    }
+
+    #[test]
+    fn test_parse_stream_captures_traceback_from_attachment_packets() {
+        let stream = write_python_style_failure(
+            "tests.test_x.T.test_boom",
+            &[
+                "Traceback (most recent call last):\n",
+                "AssertionError: 1 != 2\n",
+            ],
+        );
+
+        let parsed = parse_stream(&stream[..], RunId::new("0")).unwrap();
+        let result = parsed
+            .results
+            .get(&TestId::new("tests.test_x.T.test_boom"))
+            .unwrap();
+        assert_eq!(result.status, TestStatus::Failure);
+        assert_eq!(
+            result.details.as_deref(),
+            Some("Traceback (most recent call last):\nAssertionError: 1 != 2\n")
+        );
+        // The message is the one-line summary, not a copy of the traceback.
+        assert_eq!(result.message.as_deref(), Some("AssertionError: 1 != 2"));
+    }
+
+    #[test]
+    fn test_summary_line_takes_trailing_exception_line() {
+        assert_eq!(
+            summary_line("Traceback (most recent call last):\n  x\nValueError: bad\n").as_deref(),
+            Some("ValueError: bad")
+        );
+        assert_eq!(summary_line("").as_deref(), None);
+        assert_eq!(summary_line("  \n \n").as_deref(), None);
+    }
+
+    #[test]
+    fn test_attachments_concatenate_chunks_of_one_file() {
+        let mut a = Attachments::default();
+        a.push("traceback", "Traceback:\n");
+        a.push("traceback", "ValueError: bad\n");
+        assert_eq!(
+            a.details().as_deref(),
+            Some("Traceback:\nValueError: bad\n")
+        );
+    }
+
+    #[test]
+    fn test_attachments_fall_back_to_non_traceback_files() {
+        let mut a = Attachments::default();
+        a.push("_tags", "worker-0");
+        a.push("stderr", "boom\n");
+        assert_eq!(a.details().as_deref(), Some("boom\n"));
+    }
+
+    #[test]
+    fn test_parse_stream_with_progress_captures_traceback_from_attachment_packets() {
+        let stream = write_python_style_failure(
+            "tests.test_x.T.test_boom",
+            &[
+                "Traceback (most recent call last):\n",
+                "AssertionError: 1 != 2\n",
+            ],
+        );
+
+        let parsed = parse_stream_with_progress(
+            &stream[..],
+            RunId::new("0"),
+            |_, _| {},
+            |_| {},
+            |_| {},
+            OutputFilter::FailuresOnly,
+        )
+        .unwrap();
+        let result = parsed
+            .results
+            .get(&TestId::new("tests.test_x.T.test_boom"))
+            .unwrap();
+        assert_eq!(result.status, TestStatus::Failure);
+        assert_eq!(
+            result.details.as_deref(),
+            Some("Traceback (most recent call last):\nAssertionError: 1 != 2\n")
+        );
     }
 
     #[test]
