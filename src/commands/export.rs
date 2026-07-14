@@ -230,12 +230,32 @@ pub(crate) struct SourceLocation {
     pub(crate) col: Option<u32>,
 }
 
+/// Whether a traceback frame points into the project being tested, as opposed
+/// to the standard library or an installed dependency. A relative path is
+/// always project-local; an absolute one only counts if it sits under the
+/// working directory. Everything else (`/usr/lib/python3.14/unittest/case.py`,
+/// a path in `site-packages`) is somebody else's code.
+fn is_project_path(file: &str) -> bool {
+    let path = std::path::Path::new(file);
+    if path.is_relative() {
+        return true;
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => path.starts_with(cwd),
+        Err(_) => false,
+    }
+}
+
 /// Try to recover a source-file location from a test's traceback. Recognises
 /// the common Python (`File "x.py", line 42`), Rust panic
 /// (`thread '...' panicked at src/foo.rs:12:5`), and generic `path:line[:col]`
-/// formats. Returns the *last* match in the traceback (most-deeply-nested
-/// frame) so the annotation points at the failure site rather than the test
-/// harness entry-point.
+/// formats.
+///
+/// Prefers the deepest frame that lies inside the project. A Python assertion
+/// bottoms out several frames down in `unittest`, and pointing an annotation
+/// there is useless -- GitHub anchors it to a path in the repository, and the
+/// standard library isn't in the repository. If no frame is project-local we
+/// fall back to the deepest one, which at least says where it broke.
 pub(crate) fn extract_source_location(details: &str) -> Option<SourceLocation> {
     use regex::Regex;
 
@@ -252,18 +272,27 @@ pub(crate) fn extract_source_location(details: &str) -> Option<SourceLocation> {
         ]
     });
 
-    let mut best: Option<SourceLocation> = None;
     for re in patterns {
+        let mut deepest: Option<SourceLocation> = None;
+        let mut deepest_in_project: Option<SourceLocation> = None;
         for caps in re.captures_iter(details) {
-            let file = caps.name("file")?.as_str().to_string();
-            let line = caps.name("line")?.as_str().parse().ok()?;
+            let Some(file) = caps.name("file").map(|m| m.as_str().to_string()) else {
+                continue;
+            };
+            let Some(line) = caps.name("line").and_then(|m| m.as_str().parse().ok()) else {
+                continue;
+            };
             let col = caps
                 .name("col")
                 .and_then(|m| m.as_str().parse::<u32>().ok());
-            best = Some(SourceLocation { file, line, col });
+            let loc = SourceLocation { file, line, col };
+            if is_project_path(&loc.file) {
+                deepest_in_project = Some(loc.clone());
+            }
+            deepest = Some(loc);
         }
-        if best.is_some() {
-            return best;
+        if let Some(loc) = deepest_in_project.or(deepest) {
+            return Some(loc);
         }
     }
     None
@@ -643,6 +672,37 @@ ok 4 tests.unit.test_gamma # SKIP
     #[test]
     fn test_extract_source_location_none() {
         assert!(extract_source_location("just a plain message").is_none());
+    }
+
+    #[test]
+    fn test_extract_source_location_skips_stdlib_frames() {
+        // A Python assertion failure bottoms out inside unittest, several
+        // frames below the test. The annotation has to point at the test
+        // file: GitHub anchors it to a path in the repo, and the stdlib
+        // isn't in the repo.
+        let details = "Traceback (most recent call last):\n  \
+            File \"tests/test_log_utils.py\", line 357, in test_invalid_file\n    \
+            self.assertIn(\"nope\", stderr.getvalue())\n  \
+            File \"/usr/lib/python3.14/unittest/case.py\", line 1174, in assertIn\n    \
+            self.fail(self._formatMessage(msg, standardMsg))\n  \
+            File \"/usr/lib/python3.14/unittest/case.py\", line 732, in fail\n    \
+            raise self.failureException(msg)\nAssertionError: nope";
+        let loc = extract_source_location(details).unwrap();
+        assert_eq!(loc.file, "tests/test_log_utils.py");
+        assert_eq!(loc.line, 357);
+    }
+
+    #[test]
+    fn test_extract_source_location_falls_back_when_all_frames_external() {
+        // Nothing in the traceback belongs to the project. Point at the
+        // deepest frame anyway rather than dropping the location entirely --
+        // a location outside the repo still tells the reader where it broke.
+        let details = "Traceback (most recent call last):\n  \
+            File \"/usr/lib/python3.14/unittest/case.py\", line 732, in fail\n    \
+            raise self.failureException(msg)\nAssertionError: nope";
+        let loc = extract_source_location(details).unwrap();
+        assert_eq!(loc.file, "/usr/lib/python3.14/unittest/case.py");
+        assert_eq!(loc.line, 732);
     }
 
     #[test]
