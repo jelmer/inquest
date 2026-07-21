@@ -898,7 +898,6 @@ impl<'a> TestExecutor<'a> {
                 } else {
                     let bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
                     bar.set_style(make_worker_style(
-                        worker_id,
                         worker_bar_width,
                         worker_eta_state.clone(),
                     ));
@@ -1644,15 +1643,14 @@ fn attach_eta_key(style: ProgressStyle, eta_state: Option<Arc<EtaState>>) -> Pro
 }
 
 /// Style a parallel worker's progress bar. Mirrors the look of the overall bar
-/// but tints it green and prefixes the worker id.
-fn make_worker_style(
-    worker_id: usize,
-    bar_width: usize,
-    eta_state: Option<Arc<EtaState>>,
-) -> ProgressStyle {
+/// but tints it green. The elapsed clock is omitted because all workers start
+/// together, so the overall bar's elapsed already covers them. Workers aren't
+/// numbered — MultiProgress stacks them in order, so their position in the
+/// list is unambiguous.
+fn make_worker_style(bar_width: usize, eta_state: Option<Arc<EtaState>>) -> ProgressStyle {
     let template = format!(
-        "Worker {}: [{{elapsed_precise}}{{eta_hist}}] [{{bar:{}.green/blue}}] {{pos}}/{{len}} {{msg}}",
-        worker_id, bar_width
+        "{{eta_hist}} [{{bar:{}.green/blue}}] {{pos}}/{{len}} {{msg}}",
+        bar_width
     );
     let style = ProgressStyle::default_bar()
         .template(&template)
@@ -1844,7 +1842,7 @@ fn collect_worker_results(
         })??;
 
         wt.io.join(&format!("worker-{}", wt.worker_id))?;
-        wt.bar.finish_with_message("done");
+        wt.bar.finish_and_clear();
 
         let worker_tag = format!("worker-{}", wt.worker_id);
         for result in worker_run.results.values_mut() {
