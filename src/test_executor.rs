@@ -491,6 +491,7 @@ impl<'a> TestExecutor<'a> {
                     bar_width,
                     max_msg_len,
                     false,
+                    true,
                     eta_model_for_thread,
                     eta_state_for_thread,
                     display_prefix_for_thread,
@@ -897,9 +898,11 @@ impl<'a> TestExecutor<'a> {
                     multi_progress.add(ProgressBar::hidden())
                 } else {
                     let bar = multi_progress.add(ProgressBar::new(partition.len() as u64));
-                    bar.set_style(make_worker_style(
-                        worker_id,
+                    bar.set_style(build_bar_style(
                         worker_bar_width,
+                        "green",
+                        "blue",
+                        false,
                         worker_eta_state.clone(),
                     ));
                     bar
@@ -991,16 +994,18 @@ impl<'a> TestExecutor<'a> {
                 let display_prefix_for_worker = self.config.display_prefix.clone();
                 let parse_thread = std::thread::spawn(move || {
                     let worker_bar_for_bytes = worker_bar_clone.clone();
+                    let worker_bar_for_finish = worker_bar_clone.clone();
                     let mut tracker = BarProgress::new(
                         worker_bar_width,
                         worker_max_msg,
                         true,
+                        false,
                         eta_model_for_worker,
                         worker_eta_state_for_thread,
                         display_prefix_for_worker,
                     );
 
-                    subunit_stream::parse_stream_with_progress(
+                    let result = subunit_stream::parse_stream_with_progress(
                         channel_reader,
                         worker_run_id_clone,
                         |test_id, status| {
@@ -1036,6 +1041,7 @@ impl<'a> TestExecutor<'a> {
                                         overall_bar_width,
                                         completed,
                                         total,
+                                        true,
                                         overall_eta_state_for_thread.clone(),
                                     );
                                     let msg = console::style(format!("failures: {}", total))
@@ -1061,13 +1067,17 @@ impl<'a> TestExecutor<'a> {
                             }
                         },
                         output_filter_clone,
-                    )
+                    );
+                    // Clear this worker's row from the MultiProgress as soon
+                    // as it stops streaming, instead of waiting for every
+                    // worker to finish so `collect_worker_results` can do it.
+                    worker_bar_for_finish.finish_and_clear();
+                    result
                 });
 
                 supervisors.push((worker_id, supervisor));
                 worker_threads.push(WorkerThreads {
                     worker_id,
-                    bar: worker_bar,
                     parse: parse_thread,
                     io: io_threads,
                     watchdog: worker_watchdog,
@@ -1543,12 +1553,15 @@ fn get_progress_bar_colors(failure_rate: f64) -> (&'static str, &'static str) {
     }
 }
 
-/// Update progress bar style based on current failure rate.
+/// Update progress bar style based on current failure rate. `show_elapsed`
+/// controls whether the `[elapsed ETA]` block is rendered; parallel worker
+/// bars pass `false` (the overall bar's elapsed already covers them).
 fn update_progress_bar_style(
     progress_bar: &ProgressBar,
     bar_width: usize,
     completed: u64,
     failures: usize,
+    show_elapsed: bool,
     eta_state: Option<Arc<EtaState>>,
 ) {
     let failure_rate = if completed > 0 {
@@ -1558,15 +1571,13 @@ fn update_progress_bar_style(
     };
 
     let (filled_color, empty_color) = get_progress_bar_colors(failure_rate);
-
-    let style = ProgressStyle::default_bar()
-        .template(&format!(
-            "[{{elapsed_precise}}{{eta_hist}}] {{bar:{}.{}/{}}} {{pos}}/{{len}} {{msg}}",
-            bar_width, filled_color, empty_color
-        ))
-        .unwrap()
-        .progress_chars("█▓▒░  ");
-    progress_bar.set_style(attach_eta_key(style, eta_state));
+    progress_bar.set_style(build_bar_style(
+        bar_width,
+        filled_color,
+        empty_color,
+        show_elapsed,
+        eta_state,
+    ));
 }
 
 /// Compute the common group prefix to drop from the progress display for a run.
@@ -1617,17 +1628,35 @@ fn create_progress_bar(
         return ProgressBar::hidden();
     }
     let pb = ProgressBar::new(total);
+    pb.set_style(build_bar_style(bar_width, "cyan", "blue", true, eta_state));
+    pb
+}
+
+/// Build a progress bar style. `show_elapsed` controls whether the
+/// `[elapsed ETA]` block is included; parallel worker bars set it to `false`
+/// because all workers start together, so the overall bar's elapsed already
+/// covers them.
+fn build_bar_style(
+    bar_width: usize,
+    filled_color: &str,
+    empty_color: &str,
+    show_elapsed: bool,
+    eta_state: Option<Arc<EtaState>>,
+) -> ProgressStyle {
+    let time_block = if show_elapsed {
+        "[{elapsed_precise}{eta_hist}] "
+    } else {
+        "{eta_hist} "
+    };
     let template = format!(
-        "[{{elapsed_precise}}{{eta_hist}}] {{bar:{}.cyan/blue}} {{pos}}/{{len}} {{msg}}",
-        bar_width
+        "{}{{bar:{}.{}/{}}} {{pos}}/{{len}} {{msg}}",
+        time_block, bar_width, filled_color, empty_color
     );
     let style = ProgressStyle::default_bar()
         .template(&template)
         .unwrap()
         .progress_chars("█▓▒░  ");
-    let style = attach_eta_key(style, eta_state);
-    pb.set_style(style);
-    pb
+    attach_eta_key(style, eta_state)
 }
 
 /// Attach the `{eta_hist}` custom template key. When `eta_state` is `None` the
@@ -1641,24 +1670,6 @@ fn attach_eta_key(style: ProgressStyle, eta_state: Option<Arc<EtaState>>) -> Pro
             }
         },
     )
-}
-
-/// Style a parallel worker's progress bar. Mirrors the look of the overall bar
-/// but tints it green and prefixes the worker id.
-fn make_worker_style(
-    worker_id: usize,
-    bar_width: usize,
-    eta_state: Option<Arc<EtaState>>,
-) -> ProgressStyle {
-    let template = format!(
-        "Worker {}: [{{elapsed_precise}}{{eta_hist}}] [{{bar:{}.green/blue}}] {{pos}}/{{len}} {{msg}}",
-        worker_id, bar_width
-    );
-    let style = ProgressStyle::default_bar()
-        .template(&template)
-        .unwrap()
-        .progress_chars("█▓▒░  ");
-    attach_eta_key(style, eta_state)
 }
 
 /// Create a timeout error result for a test that was killed.
@@ -1704,6 +1715,9 @@ struct BarProgress {
     bar_width: usize,
     max_msg_len: usize,
     short_fail_label: bool,
+    /// Whether to render the `[elapsed ETA]` block. `true` for serial and
+    /// overall parallel bars; `false` for per-worker bars.
+    show_elapsed: bool,
     eta_model: EtaModel,
     eta_state: Arc<EtaState>,
     display_prefix: Option<String>,
@@ -1714,6 +1728,7 @@ impl BarProgress {
         bar_width: usize,
         max_msg_len: usize,
         short_fail_label: bool,
+        show_elapsed: bool,
         eta_model: EtaModel,
         eta_state: Arc<EtaState>,
         display_prefix: Option<String>,
@@ -1723,6 +1738,7 @@ impl BarProgress {
             bar_width,
             max_msg_len,
             short_fail_label,
+            show_elapsed,
             eta_model,
             eta_state,
             display_prefix,
@@ -1765,6 +1781,7 @@ impl BarProgress {
             self.bar_width,
             completed,
             self.failures,
+            self.show_elapsed,
             Some(Arc::clone(&self.eta_state)),
         );
 
@@ -1796,7 +1813,6 @@ impl BarProgress {
 /// Handles for a single parallel worker's background threads.
 struct WorkerThreads {
     worker_id: usize,
-    bar: ProgressBar,
     parse: std::thread::JoinHandle<Result<TestRun>>,
     io: IoThreads,
     watchdog: Option<TestWatchdog>,
@@ -1844,7 +1860,6 @@ fn collect_worker_results(
         })??;
 
         wt.io.join(&format!("worker-{}", wt.worker_id))?;
-        wt.bar.finish_with_message("done");
 
         let worker_tag = format!("worker-{}", wt.worker_id);
         for result in worker_run.results.values_mut() {
@@ -2405,11 +2420,12 @@ mod helper_tests {
     fn test_update_progress_bar_style_doesnt_panic() {
         let pb = ProgressBar::new(10);
 
-        update_progress_bar_style(&pb, 50, 5, 0, None);
-        update_progress_bar_style(&pb, 50, 5, 1, None);
-        update_progress_bar_style(&pb, 50, 5, 3, None);
-        update_progress_bar_style(&pb, 50, 5, 5, None);
-        update_progress_bar_style(&pb, 50, 0, 0, None);
+        update_progress_bar_style(&pb, 50, 5, 0, true, None);
+        update_progress_bar_style(&pb, 50, 5, 1, true, None);
+        update_progress_bar_style(&pb, 50, 5, 3, true, None);
+        update_progress_bar_style(&pb, 50, 5, 5, true, None);
+        update_progress_bar_style(&pb, 50, 0, 0, true, None);
+        update_progress_bar_style(&pb, 50, 5, 1, false, None);
     }
 
     #[test]
