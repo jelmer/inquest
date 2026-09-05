@@ -382,10 +382,14 @@ test_list_option = "--list"
 
 #### Python with pytest
 
+Requires the [pytest-subunit](https://pypi.org/project/pytest-subunit/)
+plugin, which adds a `--subunit` reporter and `--subunit-load-list`.
+
 ```toml
-test_command = "pytest $IDOPTION"
-test_id_option = "--test-id-file=$IDFILE"
-test_list_option = "--collect-only -q"
+test_command = "pytest --subunit $IDOPTION $LISTOPT"
+test_id_option = "--subunit-load-list $IDFILE"
+test_list_option = "--collect-only"
+group_regex = "^(.*)::[^:]+$"
 ```
 
 #### Go

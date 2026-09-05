@@ -18,9 +18,10 @@ test_list_option = "--list"
 ### Python pytest with subunit
 
 ```toml
-test_command = "pytest --subunit-trace $IDOPTION"
-test_id_option = "--test-list=$IDFILE"
-test_list_option = "--collect-only -q"
+test_command = "pytest --subunit $IDOPTION $LISTOPT"
+test_id_option = "--subunit-load-list $IDFILE"
+test_list_option = "--collect-only"
+group_regex = "^(.*)::[^:]+$"
 ```
 
 ### Rust with cargo-subunit
