@@ -32,13 +32,19 @@ fn detect_project(base: &Path) -> Vec<Detection> {
         });
     }
 
-    // Python project with pytest
+    // Python project with pytest. The pytest-subunit plugin exposes
+    // `--subunit` for streaming subunit v2 events, `--collect-only`
+    // together with `--subunit` emits `exists` records for enumeration,
+    // and `--subunit-load-list FILE` filters the collected tests to a
+    // supplied list. Pytest node ids look like
+    // `path/to/test_x.py::TestClass::test_method`, so grouping on the
+    // final `::` keeps a class's methods (or a module's tests) together.
     if has_pytest(base) {
         detections.push(Detection {
             name: "pytest (Python)",
-            test_command: "pytest --subunit $IDOPTION".to_string(),
-            test_id_option: Some("--load-list $IDFILE"),
-            test_list_option: None,
+            test_command: "pytest --subunit $IDOPTION $LISTOPT".to_string(),
+            test_id_option: Some("--subunit-load-list $IDFILE"),
+            test_list_option: Some("--collect-only"),
             group_regex: Some("^(.*)::[^:]+$"),
         });
     }
@@ -490,8 +496,9 @@ mod tests {
         let content = std::fs::read_to_string(temp.path().join("inquest.toml")).unwrap();
         assert_eq!(
             content,
-            "test_command = \"pytest --subunit $IDOPTION\"\n\
-             test_id_option = \"--load-list $IDFILE\"\n\
+            "test_command = \"pytest --subunit $IDOPTION $LISTOPT\"\n\
+             test_id_option = \"--subunit-load-list $IDFILE\"\n\
+             test_list_option = \"--collect-only\"\n\
              group_regex = \"^(.*)::[^:]+$\"\n"
         );
     }
