@@ -7,6 +7,7 @@
 //! for improved performance with large subunit streams.
 
 use crate::error::{Error, Result};
+use crate::failure_summary;
 use crate::repository::{RunId, StreamInterruption, TestId, TestResult, TestRun, TestStatus};
 use std::io::{Read, Write};
 use subunit::io::sync::iter_stream;
@@ -154,31 +155,15 @@ impl Attachments {
         }
     }
 
-    /// One-line summary of the failure. testtools sends Python tracebacks as
-    /// `traceback`, or `traceback {description}` for each failed subtest, and
-    /// their last line is the exception. Other runners' attachments carry no
-    /// such convention, so fall back to the last line of all details.
+    /// One-line summary of the failure: what `failure_summary` finds for
+    /// output it recognises, otherwise the last line of the details.
     fn message(&self) -> Option<String> {
-        self.files
-            .iter()
-            .rev()
-            .find(|(name, _)| name == "traceback" || name.starts_with("traceback "))
-            .and_then(|(_, content)| summary_line(content))
-            .or_else(|| self.details().as_deref().and_then(summary_line))
+        failure_summary::summarize(&self.files).or_else(|| {
+            self.details()
+                .as_deref()
+                .and_then(failure_summary::last_line)
+        })
     }
-}
-
-/// Last non-empty line of `text`, for callers that show a single line per test
-/// (CI annotations, the step summary, `inq failing`). For a Python traceback
-/// that is the exception, rather than the `Traceback (most recent call last):`
-/// banner.
-fn summary_line(details: &str) -> Option<String> {
-    details
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
 }
 
 /// Merge attachments buffered from preceding packets with any file content
@@ -860,16 +845,6 @@ mod tests {
     }
 
     #[test]
-    fn test_summary_line_takes_trailing_exception_line() {
-        assert_eq!(
-            summary_line("Traceback (most recent call last):\n  x\nValueError: bad\n").as_deref(),
-            Some("ValueError: bad")
-        );
-        assert_eq!(summary_line("").as_deref(), None);
-        assert_eq!(summary_line("  \n \n").as_deref(), None);
-    }
-
-    #[test]
     fn test_attachments_concatenate_chunks_of_one_file() {
         let mut a = Attachments::default();
         a.push("traceback", "Traceback:\n");
@@ -986,12 +961,8 @@ mod tests {
     #[test]
     fn test_attachments_message_falls_back_to_last_line() {
         let mut a = Attachments::default();
-        a.push("go test output", "=== RUN TestX\n    x_test.go:5: boom\n");
-        assert_eq!(
-            a.details().as_deref(),
-            Some("=== RUN TestX\n    x_test.go:5: boom\n")
-        );
-        assert_eq!(a.message().as_deref(), Some("x_test.go:5: boom"));
+        a.push("stdout", "connecting\nconnection refused\n");
+        assert_eq!(a.message().as_deref(), Some("connection refused"));
     }
 
     #[test]
