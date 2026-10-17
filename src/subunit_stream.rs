@@ -127,31 +127,51 @@ impl Attachments {
             .map(|(_, c)| c.as_str())
     }
 
-    /// The failure detail to store on the `TestResult`: the traceback if the
-    /// runner sent one, otherwise every other attachment concatenated, so
-    /// runners that only report captured stdout/stderr still surface something.
+    /// Every attachment in arrival order. With more than one, each is
+    /// preceded by a line with its name so they can be told apart.
     fn details(&self) -> Option<String> {
-        if let Some(tb) = self.get("traceback") {
-            return Some(tb.to_string());
-        }
-        let joined: String = self
+        let files: Vec<_> = self
             .files
             .iter()
-            .filter(|(name, _)| name != "_tags")
-            .map(|(_, content)| content.as_str())
+            .filter(|(name, content)| name != "_tags" && !content.is_empty())
             .collect();
-        if joined.is_empty() {
+        if files.len() == 1 {
+            return Some(files[0].1.clone());
+        }
+        let mut out = String::new();
+        for (name, content) in files {
+            out.push_str(name);
+            out.push_str(":\n");
+            out.push_str(content);
+            if !content.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        if out.is_empty() {
             None
         } else {
-            Some(joined)
+            Some(out)
         }
+    }
+
+    /// One-line summary of the failure. testtools sends Python tracebacks as
+    /// `traceback`, or `traceback {description}` for each failed subtest, and
+    /// their last line is the exception. Other runners' attachments carry no
+    /// such convention, so fall back to the last line of all details.
+    fn message(&self) -> Option<String> {
+        self.files
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "traceback" || name.starts_with("traceback "))
+            .and_then(|(_, content)| summary_line(content))
+            .or_else(|| self.details().as_deref().and_then(summary_line))
     }
 }
 
-/// One-line summary of a failure, for callers that show a single line per test
+/// Last non-empty line of `text`, for callers that show a single line per test
 /// (CI annotations, the step summary, `inq failing`). For a Python traceback
-/// that is the trailing exception line, which carries the actual assertion;
-/// the first line is the useless `Traceback (most recent call last):` banner.
+/// that is the exception, rather than the `Traceback (most recent call last):`
+/// banner.
 fn summary_line(details: &str) -> Option<String> {
     details
         .lines()
@@ -163,7 +183,7 @@ fn summary_line(details: &str) -> Option<String> {
 
 /// Merge attachments buffered from preceding packets with any file content
 /// carried on the terminal status packet itself, and derive the result's
-/// `message` (one-line summary) and `details` (the full traceback).
+/// `message` (one-line summary) and `details` (all attachments).
 ///
 /// Both shapes occur in the wild: `python -m subunit.run` sends the traceback
 /// as separate file-content packets before an empty status packet, while our
@@ -175,9 +195,7 @@ fn result_content(
     if let Some((name, content)) = status_file {
         buffered.push(name, &String::from_utf8_lossy(content));
     }
-    let details = buffered.details();
-    let message = details.as_deref().and_then(summary_line);
-    (message, details)
+    (buffered.message(), buffered.details())
 }
 
 /// Parse a subunit stream from a byte slice into a TestRun
@@ -359,25 +377,8 @@ where
                             // Separator line
                             output.extend_from_slice(b"----------------------------------------------------------------------\n");
 
-                            // Show file attachments
-                            let mut has_traceback = false;
-                            for (name, content) in &attachments.files {
-                                if name == "_tags" {
-                                    continue; // Skip tags, already shown
-                                }
-
-                                if name == "log" {
-                                    output.extend_from_slice(b"log: {{{\n");
-                                    output.extend_from_slice(content.as_bytes());
-                                    output.extend_from_slice(b"}}}\n\n");
-                                } else if name == "traceback" {
-                                    output.extend_from_slice(content.as_bytes());
-                                    has_traceback = true;
-                                }
-                            }
-
-                            // Footer separator after all attachments if there was a traceback
-                            if has_traceback {
+                            if let Some(details) = attachments.details() {
+                                output.extend_from_slice(details.as_bytes());
                                 output.extend_from_slice(b"======================================================================\n");
                             }
 
@@ -800,17 +801,28 @@ mod tests {
     /// Our own `write_stream` attaches the traceback to the status packet
     /// instead, so a roundtrip through it would not exercise this path.
     fn write_python_style_failure(test_id: &str, traceback_chunks: &[&str]) -> Vec<u8> {
+        let files: Vec<(&str, &str)> = traceback_chunks
+            .iter()
+            .map(|chunk| ("traceback", *chunk))
+            .collect();
+        write_python_style_failure_files(test_id, &files)
+    }
+
+    /// Like `write_python_style_failure`, but with explicit attachment names,
+    /// e.g. the `traceback (i=2)` attachments testtools emits per failed
+    /// subtest.
+    fn write_python_style_failure_files(test_id: &str, files: &[(&str, &str)]) -> Vec<u8> {
         let mut buffer = Vec::new();
         Event::new(SubunitTestStatus::InProgress)
             .test_id(test_id)
             .build()
             .serialize(&mut buffer)
             .unwrap();
-        for chunk in traceback_chunks {
+        for (name, content) in files {
             Event::new(SubunitTestStatus::Undefined)
                 .test_id(test_id)
                 .mime_type("text/x-traceback; charset=\"utf8\"; language=\"python\"")
-                .file_content("traceback", chunk.as_bytes())
+                .file_content(name, content.as_bytes())
                 .build()
                 .serialize(&mut buffer)
                 .unwrap();
@@ -904,6 +916,82 @@ mod tests {
             result.details.as_deref(),
             Some("Traceback (most recent call last):\nAssertionError: 1 != 2\n")
         );
+    }
+
+    #[test]
+    fn test_parse_stream_with_progress_labels_subtest_tracebacks() {
+        let stream = write_python_style_failure_files(
+            "tests.test_x.T.test_sub",
+            &[
+                ("traceback (i=2)", "Traceback:\nAssertionError: 2 != 1\n"),
+                (
+                    "traceback [msg] (i=3)",
+                    "Traceback:\nAssertionError: 3 != 1\n",
+                ),
+            ],
+        );
+
+        let mut output = Vec::new();
+        let parsed = parse_stream_with_progress(
+            &stream[..],
+            RunId::new("0"),
+            |_, _| {},
+            |bytes| output.extend_from_slice(bytes),
+            |_| {},
+            OutputFilter::FailuresOnly,
+        )
+        .unwrap();
+        let result = parsed
+            .results
+            .get(&TestId::new("tests.test_x.T.test_sub"))
+            .unwrap();
+        assert_eq!(
+            result.details.as_deref(),
+            Some(
+                "traceback (i=2):\nTraceback:\nAssertionError: 2 != 1\n\
+                 traceback [msg] (i=3):\nTraceback:\nAssertionError: 3 != 1\n"
+            )
+        );
+        assert_eq!(result.message.as_deref(), Some("AssertionError: 3 != 1"));
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "FAIL: tests.test_x.T.test_sub\n\
+             ----------------------------------------------------------------------\n\
+             traceback (i=2):\nTraceback:\nAssertionError: 2 != 1\n\
+             traceback [msg] (i=3):\nTraceback:\nAssertionError: 3 != 1\n\
+             ======================================================================\n"
+        );
+    }
+
+    #[test]
+    fn test_attachments_label_each_file_when_there_are_several() {
+        let mut a = Attachments::default();
+        a.push("_tags", "worker-0");
+        a.push("traceback", "Traceback:\nValueError: bad\n");
+        a.push("stderr", "noise");
+        assert_eq!(
+            a.details().as_deref(),
+            Some("traceback:\nTraceback:\nValueError: bad\nstderr:\nnoise\n")
+        );
+    }
+
+    #[test]
+    fn test_attachments_message_prefers_python_traceback() {
+        let mut a = Attachments::default();
+        a.push("traceback (i=1)", "Traceback:\nValueError: bad\n");
+        a.push("stderr", "noise\n");
+        assert_eq!(a.message().as_deref(), Some("ValueError: bad"));
+    }
+
+    #[test]
+    fn test_attachments_message_falls_back_to_last_line() {
+        let mut a = Attachments::default();
+        a.push("go test output", "=== RUN TestX\n    x_test.go:5: boom\n");
+        assert_eq!(
+            a.details().as_deref(),
+            Some("=== RUN TestX\n    x_test.go:5: boom\n")
+        );
+        assert_eq!(a.message().as_deref(), Some("x_test.go:5: boom"));
     }
 
     #[test]
