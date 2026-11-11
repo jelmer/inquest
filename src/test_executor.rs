@@ -2554,6 +2554,7 @@ mod helper_tests {
             // via `ps`. POSIX `ps -o nice= -p $$` prints the current nice value.
             "ps -o nice= -p $$",
             tmp.path(),
+            false,
             Some(want),
         )
         .expect("spawn");
@@ -2575,7 +2576,7 @@ mod helper_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let parent_nice = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
         let mut child =
-            spawn_in_process_group("ps -o nice= -p $$", tmp.path(), None).expect("spawn");
+            spawn_in_process_group("ps -o nice= -p $$", tmp.path(), false, None).expect("spawn");
         let mut out = String::new();
         child.stdout.as_mut().unwrap().read_to_string(&mut out).ok();
         let _ = child.wait();

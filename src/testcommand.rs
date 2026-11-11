@@ -300,7 +300,7 @@ impl TestCommand {
         let (stderr_stdio, pty_master) = match crate::pty::open_stderr_pty() {
             #[cfg(unix)]
             Some(crate::pty::PtyPair { master, slave }) => (Stdio::from(slave), Some(master)),
-            _ => (Stdio::piped(), None),
+            _ => (Stdio::piped(), None::<std::fs::File>),
         };
 
         let mut child = sh_command(&cmd, &self.base_dir)
