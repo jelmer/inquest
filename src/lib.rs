@@ -81,6 +81,7 @@ pub mod config;
 pub mod error;
 pub mod eta;
 mod failure_summary;
+pub mod git_notes;
 pub mod grouping;
 #[cfg(feature = "mcp")]
 pub mod mcp;

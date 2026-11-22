@@ -204,8 +204,9 @@ impl RunCommand {
         filter_tags: &[String],
         stderr_capture: Option<&std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
         active_profile: Option<&str>,
+        mirror_to_git_notes: bool,
     ) -> Result<CliRunOutput> {
-        let (exit_code, run_id) = crate::commands::utils::persist_and_display_run(
+        let (exit_code, run_id, totals) = crate::commands::utils::persist_and_display_run(
             ui,
             repo,
             output,
@@ -222,6 +223,13 @@ impl RunCommand {
                 Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
             };
             repo.set_run_stderr(&run_id, &bytes)?;
+        }
+        // Mirror after stderr is persisted so it can be picked up too.
+        // Mirroring is best-effort: log and continue on failure.
+        if mirror_to_git_notes {
+            if let Err(e) = crate::commands::utils::mirror_run_to_git(repo, &run_id, totals) {
+                tracing::warn!("git mirror failed for run {}: {}", run_id, e);
+            }
         }
         Ok(CliRunOutput {
             exit_code,
@@ -479,6 +487,7 @@ impl RunCommand {
         let display_prefix = test_executor::display_prefix_for(test_ids.as_deref(), &test_cmd);
         let config = self.executor_config(Some(stderr_capture.clone()), display_prefix);
         let executor = TestExecutor::new(&config);
+        let mirror_to_git_notes = test_cmd.config().mirror_to_git_notes.unwrap_or(false);
 
         if self.subunit {
             let (run_id, writer) = repo.begin_test_run_raw()?;
@@ -493,6 +502,7 @@ impl RunCommand {
                 &filter_tags,
                 Some(&stderr_capture),
                 active_profile.as_deref(),
+                mirror_to_git_notes,
             );
         }
 
@@ -599,6 +609,7 @@ impl RunCommand {
                         &filter_tags,
                         Some(&stderr_capture),
                         active_profile.as_deref(),
+                        mirror_to_git_notes,
                     )?;
 
                     if result.exit_code != 0 {
@@ -625,6 +636,7 @@ impl RunCommand {
                     &filter_tags,
                     Some(&stderr_capture),
                     active_profile.as_deref(),
+                    mirror_to_git_notes,
                 )
             }
         } else if self.until_failure {
@@ -693,6 +705,7 @@ impl RunCommand {
                     &filter_tags,
                     Some(&stderr_capture),
                     active_profile.as_deref(),
+                    mirror_to_git_notes,
                 )?;
 
                 if result.exit_code != 0 {
@@ -734,6 +747,7 @@ impl RunCommand {
                 &filter_tags,
                 Some(&stderr_capture),
                 active_profile.as_deref(),
+                mirror_to_git_notes,
             )
         } else {
             let (run_id, writer) = repo.begin_test_run_raw()?;
@@ -758,6 +772,7 @@ impl RunCommand {
                 &filter_tags,
                 Some(&stderr_capture),
                 active_profile.as_deref(),
+                mirror_to_git_notes,
             )
         }
     }

@@ -610,7 +610,7 @@ impl CiCommand {
             )?
         };
 
-        let (_exit, run_id) = persist_and_display_run(
+        let (_exit, run_id, _totals) = persist_and_display_run(
             ui,
             repo.as_mut(),
             output,
