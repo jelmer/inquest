@@ -1,10 +1,14 @@
 //! Auto-detect project type and generate an inquest.toml configuration file
 
 use crate::commands::Command;
-use crate::config::CONFIG_FILE_NAMES;
+use crate::config::{ConfigFile, ConfigLayer, CONFIG_FILE_NAMES};
 use crate::error::Result;
 use crate::ui::UI;
+use std::collections::BTreeMap;
 use std::path::Path;
+
+/// Supported project types listed in auto-detection error messages.
+const SUPPORTED_PROJECT_TYPES: &str = "Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), Maven (JVM), prove (Perl), vitest (Node.js), jest (Node.js)";
 
 /// A detected project type with its recommended inquest configuration.
 struct Detection {
@@ -13,6 +17,42 @@ struct Detection {
     test_id_option: Option<&'static str>,
     test_list_option: Option<&'static str>,
     group_regex: Option<&'static str>,
+}
+
+impl Detection {
+    /// Convert this detection into an in-memory [`ConfigFile`].
+    fn to_config_file(&self) -> ConfigFile {
+        ConfigFile {
+            base: ConfigLayer {
+                test_command: Some(self.test_command.clone()),
+                test_id_option: self.test_id_option.map(str::to_string),
+                test_list_option: self.test_list_option.map(str::to_string),
+                group_regex: self.group_regex.map(str::to_string),
+                ..Default::default()
+            },
+            default_profile: None,
+            profiles: BTreeMap::new(),
+        }
+    }
+}
+
+/// Auto-detect the highest-priority project type in `base` and return its
+/// name and configuration in memory without writing `inquest.toml`.
+pub fn detect_config(base: &Path) -> Option<(&'static str, ConfigFile)> {
+    detect_project(base)
+        .into_iter()
+        .next()
+        .map(|d| (d.name, d.to_config_file()))
+}
+
+/// Emit the standard error messages when project auto-detection finds no match.
+pub fn report_no_project_detected(ui: &mut dyn UI) -> Result<()> {
+    ui.error("Could not detect project type")?;
+    ui.error(&format!(
+        "Supported project types: {}",
+        SUPPORTED_PROJECT_TYPES
+    ))?;
+    Ok(())
 }
 
 /// Detect project type from files present in the directory.
@@ -372,10 +412,7 @@ impl Command for AutoCommand {
         let detections = detect_project(base);
 
         if detections.is_empty() {
-            ui.error("Could not detect project type")?;
-            ui.error(
-                "Supported project types: Cargo (Rust), pytest (Python), unittest/subunit (Python), go test (Go), Maven (JVM), prove (Perl), vitest (Node.js), jest (Node.js)",
-            )?;
+            report_no_project_detected(ui)?;
             return Ok(1);
         }
 
@@ -1013,5 +1050,33 @@ mod tests {
             group_regex: None,
         };
         assert_eq!(format_toml(&detection), "test_command = \"test-cmd\"\n");
+    }
+
+    #[test]
+    fn test_detect_config_in_memory_does_not_write_file() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"foo\"\n",
+        )
+        .unwrap();
+
+        let (name, cfg) = detect_config(temp.path()).expect("should detect Cargo project");
+        assert_eq!(name, "Cargo (Rust)");
+        assert!(!temp.path().join("inquest.toml").exists());
+
+        // In-memory ConfigFile must match what `format_toml` would produce.
+        let detection = &detect_project(temp.path())[0];
+        let parsed = ConfigFile::parse_toml(&format_toml(detection)).unwrap();
+        assert_eq!(cfg.base, parsed.base);
+        assert!(cfg.profiles.is_empty());
+        assert_eq!(cfg.default_profile, None);
+    }
+
+    #[test]
+    fn test_detect_config_empty_dir_returns_none() {
+        let temp = TempDir::new().unwrap();
+        assert!(detect_config(temp.path()).is_none());
+        assert!(!temp.path().join("inquest.toml").exists());
     }
 }

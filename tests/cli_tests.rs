@@ -9,9 +9,10 @@ fn inq_bin() -> &'static str {
 
 #[test]
 fn no_subcommand_runs_with_auto() {
-    // With no subcommand, `inq` should behave like `inq run --auto`. In an empty
-    // directory with no recognizable project, that means the auto-detection
-    // error path fires (rather than clap's "missing subcommand" usage error or
+    // With no subcommand, `inq` auto-detects project configuration in memory
+    // (without creating `inquest.toml`). In an empty directory with no
+    // recognizable project, it hits the same auto-detection error path as
+    // `inq run --auto` (rather than clap's "missing subcommand" usage error or
     // the plain `inq run` "repository not found" error).
     let temp = TempDir::new().unwrap();
 
@@ -37,6 +38,164 @@ fn no_subcommand_runs_with_auto() {
     assert!(
         stderr.contains("Could not detect project type"),
         "expected auto-detect failure, got stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+fn write_fake_gotest_run(bin_dir: &std::path::Path, test_id: &str) {
+    use inquest::repository::{RunId, TestResult, TestRun};
+    use std::os::unix::fs::PermissionsExt;
+    use subunit::serialize::Serializable;
+    use subunit::types::event::Event;
+    use subunit::types::teststatus::TestStatus as SubunitTestStatus;
+
+    let list_stream_path = bin_dir.join("list.subunit");
+    let mut list_bytes = Vec::new();
+    Event::new(SubunitTestStatus::Enumeration)
+        .test_id(test_id)
+        .build()
+        .serialize(&mut list_bytes)
+        .unwrap();
+    std::fs::write(&list_stream_path, list_bytes).unwrap();
+
+    let run_stream_path = bin_dir.join("run.subunit");
+    let mut run = TestRun::new(RunId::new("0"));
+    run.add_result(TestResult::success(test_id));
+    let mut run_bytes = Vec::new();
+    inquest::subunit_stream::write_stream(&run, &mut run_bytes).unwrap();
+    std::fs::write(&run_stream_path, run_bytes).unwrap();
+
+    let script_path = bin_dir.join("gotest-run");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--list\" ]; then\n  cat \"{}\"\nelse\n  cat \"{}\"\nfi\n",
+        list_stream_path.display(),
+        run_stream_path.display()
+    );
+    std::fs::write(&script_path, script).unwrap();
+    let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script_path, perms).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn no_subcommand_autodetects_in_memory_without_creating_inquest_toml() {
+    let project = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    std::fs::write(project.path().join("go.mod"), "module example.com/foo\n").unwrap();
+    write_fake_gotest_run(bin_dir.path(), "pkg.TestExample");
+
+    let path_env = format!(
+        "{}:{}",
+        bin_dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(inq_bin())
+        .arg("-C")
+        .arg(project.path())
+        .env("PATH", &path_env)
+        .env("INQ_NO_PROGRESS", "1")
+        .output()
+        .expect("run bare inq");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "expected bare `inq` to succeed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !project.path().join("inquest.toml").exists(),
+        "bare `inq` must not create inquest.toml"
+    );
+    assert!(
+        project.path().join(".inquest").exists(),
+        "bare `inq` should still initialize .inquest repository"
+    );
+    assert!(
+        stdout.contains("Detected go test (Go) project"),
+        "expected detection notice in stdout, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Passed:  1"),
+        "expected test run summary in stdout, got:\n{stdout}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn run_auto_still_creates_inquest_toml() {
+    let project = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    std::fs::write(project.path().join("go.mod"), "module example.com/foo\n").unwrap();
+    write_fake_gotest_run(bin_dir.path(), "pkg.TestExample");
+
+    let path_env = format!(
+        "{}:{}",
+        bin_dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = Command::new(inq_bin())
+        .arg("-C")
+        .arg(project.path())
+        .arg("run")
+        .arg("--auto")
+        .env("PATH", &path_env)
+        .env("INQ_NO_PROGRESS", "1")
+        .output()
+        .expect("run inq run --auto");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "expected `inq run --auto` to succeed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        project.path().join("inquest.toml").exists(),
+        "`inq run --auto` should create inquest.toml"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn no_subcommand_uses_existing_inquest_toml() {
+    let project = TempDir::new().unwrap();
+    let bin_dir = TempDir::new().unwrap();
+    // Put go.mod in the directory too so auto-detect would pick gotest-run if it
+    // wrongly ignored the existing config file.
+    std::fs::write(project.path().join("go.mod"), "module example.com/foo\n").unwrap();
+    write_fake_gotest_run(bin_dir.path(), "pkg.TestFromCustomConfig");
+
+    let custom_config = format!(
+        "test_command = \"{} $LISTOPT $IDOPTION\"\ntest_id_option = \"--id-file $IDFILE\"\ntest_list_option = \"--list\"\n",
+        bin_dir.path().join("gotest-run").display()
+    );
+    std::fs::write(project.path().join("inquest.toml"), &custom_config).unwrap();
+
+    let out = Command::new(inq_bin())
+        .arg("-C")
+        .arg(project.path())
+        .env("INQ_NO_PROGRESS", "1")
+        .output()
+        .expect("run bare inq with existing config");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "expected bare `inq` with existing inquest.toml to succeed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("Detected go test"),
+        "should not auto-detect when inquest.toml exists, got:\n{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("inquest.toml")).unwrap(),
+        custom_config,
+        "existing inquest.toml must not be modified"
     );
 }
 
