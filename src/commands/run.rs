@@ -103,9 +103,10 @@ pub struct RunCommand {
     /// Active profile name from `--profile` / `INQ_PROFILE` (None = base
     /// only or `default_profile` from the config file).
     pub profile: Option<String>,
-    /// True when invoked as bare `inq` (no subcommand). Tweaks the
-    /// concurrency-resolution messaging so the user is told how to opt out
-    /// of the auto-parallel default. Has no effect on actual concurrency.
+    /// True when invoked as bare `inq` (no subcommand). When no config file is
+    /// present, auto-detects project configuration in memory without writing
+    /// `inquest.toml`, and tweaks the concurrency-resolution messaging so the
+    /// user is told how to opt out of the auto-parallel default.
     pub implicit_run: bool,
     /// When true, print details about the ETA prediction: the calibration
     /// factor and the inputs that produced it (before the run), and the
@@ -232,18 +233,45 @@ impl RunCommand {
     pub fn execute_returning_run_id(&self, ui: &mut dyn UI) -> Result<CliRunOutput> {
         let base = Path::new(self.base_path.as_deref().unwrap_or("."));
 
-        if self.auto && crate::config::ConfigFile::find_in_directory(base).is_err() {
+        let config_file = if crate::commands::utils::has_config_file(self.base_path.as_deref()) {
+            let (cfg, _path) = crate::config::ConfigFile::find_in_directory(base)?;
+            Some(cfg)
+        } else if self.implicit_run {
+            match crate::commands::auto::detect_config(base) {
+                Some((project_name, cfg)) => {
+                    ui.output(&format!(
+                        "Detected {} project (run `inq auto` to save inquest.toml)",
+                        project_name
+                    ))?;
+                    Some(cfg)
+                }
+                None => {
+                    crate::commands::auto::report_no_project_detected(ui)?;
+                    return Ok(CliRunOutput::no_run(1));
+                }
+            }
+        } else if self.auto {
             let auto_cmd = crate::commands::auto::AutoCommand::new(self.base_path.clone());
             let exit_code = auto_cmd.execute(ui)?;
             if exit_code != 0 {
                 return Ok(CliRunOutput::no_run(exit_code));
             }
-        }
+            let (cfg, _path) = crate::config::ConfigFile::find_in_directory(base)?;
+            Some(cfg)
+        } else {
+            None
+        };
 
-        let mut repo =
-            open_or_init_repository(self.base_path.as_deref(), self.force_init || self.auto, ui)?;
+        let mut repo = open_or_init_repository(
+            self.base_path.as_deref(),
+            self.force_init || self.auto || self.implicit_run,
+            ui,
+        )?;
 
-        let (config_file, _config_path) = crate::config::ConfigFile::find_in_directory(base)?;
+        let config_file = match config_file {
+            Some(cfg) => cfg,
+            None => crate::config::ConfigFile::find_in_directory(base)?.0,
+        };
         let (resolved, active_profile) = config_file.resolve(self.profile.as_deref())?;
         let test_cmd = TestCommand::new(resolved, base.to_path_buf());
         if let Some(ref name) = active_profile {
@@ -871,6 +899,30 @@ mod tests {
         let result = cmd.execute(&mut ui);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_implicit_run_unrecognized_dir_creates_neither_config_nor_repo() {
+        let temp = TempDir::new().unwrap();
+
+        let mut ui = TestUI::new();
+        let cmd = RunCommand {
+            base_path: Some(temp.path().to_string_lossy().to_string()),
+            implicit_run: true,
+            ..Default::default()
+        };
+        let exit_code = cmd.execute(&mut ui).unwrap();
+
+        assert_eq!(exit_code, 1);
+        assert!(
+            ui.errors
+                .iter()
+                .any(|e| e.contains("Could not detect project type")),
+            "expected detection error, got: {:?}",
+            ui.errors
+        );
+        assert!(!temp.path().join("inquest.toml").exists());
+        assert!(!temp.path().join(".inquest").exists());
     }
 
     #[test]

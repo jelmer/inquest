@@ -686,7 +686,9 @@ fn run() {
     let command = cli.command.unwrap_or(Commands::Run {
         failing: false,
         force_init: false,
-        auto: true,
+        // Bare `inq` auto-detects project config in memory (via `implicit_run`)
+        // instead of writing an `inquest.toml` file like `inq run --auto`.
+        auto: false,
         partial: false,
         load_list: None,
         // Bare `inq` defaults to parallel auto-detect; explicit `inq run`
